@@ -1,4 +1,4 @@
-# Music Markov Model — Design Document (English)
+# Music Markov Model — Design Document
 
 ## 1. Problem Statement
 
