@@ -175,7 +175,13 @@ class MusicModel:
             str(k): v for k, v in self.persistence_duration.run_lengths.items()
         }
         with open(path / "persistence.json", "w") as f:
-            json.dump(rl_serialisable, f)
+            json.dump(
+                {
+                    "run_lengths": rl_serialisable,
+                    "file_run_sequences": self.persistence_duration.file_run_sequences,
+                },
+                f,
+            )
 
         # Start distribution
         with open(path / "start_dist.json", "w") as f:
@@ -224,12 +230,23 @@ class MusicModel:
         # Persistence duration
         with open(path / "persistence.json") as f:
             rl_data = json.load(f)
-        run_lengths: Dict[int, List[int]] = {
-            int(k): v for k, v in rl_data.items()
-        }
+        if isinstance(rl_data, dict) and "run_lengths" in rl_data:
+            # New format with file_run_sequences
+            run_lengths: Dict[int, List[int]] = {
+                int(k): v for k, v in rl_data["run_lengths"].items()
+            }
+            file_run_sequences: List[List[Tuple[int, int]]] = [
+                [tuple(pair) for pair in seq]  # type: ignore[misc]
+                for seq in rl_data["file_run_sequences"]
+            ]
+        else:
+            # Legacy format (plain run_lengths dict)
+            run_lengths = {int(k): v for k, v in rl_data.items()}
+            file_run_sequences = []
         persistence_duration = PersistenceDuration(
             run_lengths=run_lengths,
             n_clusters=n,
+            file_run_sequences=file_run_sequences,
         )
 
         # Start distribution

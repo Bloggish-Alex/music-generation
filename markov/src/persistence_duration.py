@@ -51,20 +51,26 @@ class PersistenceDuration:
 
     Attributes:
         run_lengths: cluster → list of consecutive run-lengths (in measures).
+        file_run_sequences: Per-file ordered run sequences. Each entry is a
+            list of (state, duration) tuples in the order they appear.
         stats: Per-cluster (mean, std), index = cluster label.
         n_clusters: Number of cluster states.
         total_runs: Total number of runs across all clusters.
+        num_files: Number of files represented in file_run_sequences.
     """
 
     def __init__(
         self,
         run_lengths: Dict[int, List[int]],
         n_clusters: int,
+        file_run_sequences: Optional[List[List[Tuple[int, int]]]] = None,
     ) -> None:
         self.run_lengths = run_lengths
         self.n_clusters = n_clusters
         self.total_runs = sum(len(v) for v in run_lengths.values())
         self.stats = self._compute_stats()
+        self.file_run_sequences = file_run_sequences or []
+        self.num_files = len(self.file_run_sequences)
 
     @staticmethod
     def _weighted_average(values: List[int]) -> int:
@@ -104,6 +110,28 @@ class PersistenceDuration:
         if not rl:
             return 1
         return self._weighted_average(rl)
+
+    def get_file_runs(self, file_index: int) -> List[Tuple[int, int]]:
+        """Return the ordered run sequence for a single file.
+
+        Each element is a ``(state, duration)`` tuple in the order the runs
+        appear in the file.
+
+        Args:
+            file_index: 0-based index into the file list.
+
+        Returns:
+            List of (state, duration) tuples, e.g. ``[(2,4), (0,2), (1,3)]``.
+        """
+        return self.file_run_sequences[file_index]
+
+    def get_all_file_runs(self) -> List[List[Tuple[int, int]]]:
+        """Return the ordered run sequences for all files.
+
+        Returns:
+            List of lists of (state, duration) tuples, one entry per file.
+        """
+        return self.file_run_sequences
 
     def summary(self) -> str:
         """Human-readable summary of persistence duration distribution."""
@@ -276,6 +304,7 @@ class PersistenceDurationBuilder:
             preprocessors.append(ShortRunMerger(min_length=min_run_length))
 
         run_lengths: Dict[int, List[int]] = defaultdict(list)
+        file_run_sequences: List[List[Tuple[int, int]]] = []
         skipped = 0
         for labels in file_labels:
             # Apply preprocessors
@@ -285,6 +314,7 @@ class PersistenceDurationBuilder:
 
             # Run-length computation
             file_runs: Dict[int, List[int]] = defaultdict(list)
+            file_run_seq: List[Tuple[int, int]] = []
             current = processed[0]
             count = 1
             for s in processed[1:]:
@@ -292,14 +322,17 @@ class PersistenceDurationBuilder:
                     count += 1
                 else:
                     file_runs[current].append(count)
+                    file_run_seq.append((current, count))
                     current = s
                     count = 1
             file_runs[current].append(count)
+            file_run_seq.append((current, count))
 
             total = sum(len(v) for v in file_runs.values())
             if total == 0:
                 skipped += 1
                 continue
+            file_run_sequences.append(file_run_seq)
             for cluster, lengths in file_runs.items():
                 run_lengths[cluster].extend(lengths)
 
@@ -312,6 +345,7 @@ class PersistenceDurationBuilder:
         result = PersistenceDuration(
             run_lengths=dict(run_lengths),
             n_clusters=n,
+            file_run_sequences=file_run_sequences,
         )
 
         log.info(
