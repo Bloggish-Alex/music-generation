@@ -27,9 +27,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from section_grammar import SectionGrammar
 
 from measure_clustering import (
     MeasureClusterer,
@@ -55,6 +58,8 @@ class MusicModel:
         transition_matrix: Row-normalised transition probabilities.
         persistence_duration: Per-cluster run-length distributions.
         start_distribution: Per-cluster start probabilities.
+        section_results: Per-file section structure dicts (filename → result dict),
+            populated when ``analyze_sections=True`` is passed to :meth:`fit`.
     """
 
     def __init__(
@@ -63,11 +68,15 @@ class MusicModel:
         transition_matrix: TransitionMatrix,
         persistence_duration: PersistenceDuration,
         start_distribution: StartDistribution,
+        section_results: Optional[Dict[str, Dict[str, Any]]] = None,
+        grammar: Optional["SectionGrammar"] = None,
     ) -> None:
         self.clusterer = clusterer
         self.transition_matrix = transition_matrix
         self.persistence_duration = persistence_duration
         self.start_distribution = start_distribution
+        self.section_results = section_results
+        self.grammar = grammar
 
     @property
     def n_clusters(self) -> int:
@@ -84,11 +93,13 @@ class MusicModel:
         min_run_length: int = 0,
         skip_self_transitions: bool = True,
         file_patterns: Optional[Union[str, Sequence[str]]] = None,
+        analyze_sections: bool = False,
+        section_config: Optional[Dict[str, Any]] = None,
     ) -> "MusicModel":
         """Train a complete model from a directory of music files.
 
         Extraction, clustering, and classification happen once, then all
-        three sub-models are built from the same label sequences.
+        sub-models are built from the same label sequences.
 
         Args:
             music_dir: Root directory containing music files.
@@ -97,6 +108,11 @@ class MusicModel:
             min_run_length: Persistence noise-filter threshold.
             skip_self_transitions: Exclude self-transitions from matrix.
             file_patterns: Glob patterns for music files.
+            analyze_sections: If True, run the section miner on each file's
+                bar vectors after clustering.  Results are stored in
+                ``self.section_results``.
+            section_config: Optional dict of SectionMinerConfig overrides
+                (e.g. ``{"min_len": 4, "transposition_invariant": True}``).
 
         Returns:
             A trained MusicModel.
@@ -104,22 +120,28 @@ class MusicModel:
         music_dir = Path(music_dir)
         extractor = MeasureExtractor()
 
-        # 1. Extract all vectors and fit KMeans
+        # 1. Extract per-file vectors (kept for optional section analysis)
         log.info("Extracting measures from %s ...", music_dir)
-        vectors = extractor.extract_all(music_dir, file_patterns=file_patterns)
-        log.info("Extracted %d measure vectors.", len(vectors))
+        file_map = extractor.extract_file_map(music_dir, file_patterns=file_patterns)
+        vectors = [v for vecs in file_map.values() for v in vecs]
+        log.info("Extracted %d measure vectors from %d files.", len(vectors), len(file_map))
 
+        # 2. Fit KMeans on flat vector list (8-D texture features only)
         clusterer = MeasureClusterer()
         clusterer.fit(vectors, n_clusters=n_clusters, random_seed=seed)
         log.info("Clusterer fitted: k=%d, inertia=%.3f", n_clusters, clusterer.inertia)
 
-        # 2. Classify all files → file_labels
+        # 3. Classify all files → file_labels
         log.info("Classifying files ...")
         file_labels = classify_files(
             music_dir, clusterer, extractor, file_patterns
         )
 
-        # 3. Build sub-models
+        # 3b. Learn per-cluster pitch-class histograms
+        log.info("Computing per-cluster pitch histograms ...")
+        clusterer.compute_pitch_histograms(file_map, file_labels)
+
+        # 4. Build sub-models
         log.info("Building transition matrix ...")
         transition_matrix = TransitionMatrixBuilder.build(
             file_labels,
@@ -135,12 +157,49 @@ class MusicModel:
         log.info("Building start distribution ...")
         start_distribution = StartDistributionBuilder.build(file_labels)
 
+        # 5. Optional section structure analysis
+        section_results: Optional[Dict[str, Dict[str, Any]]] = None
+        if analyze_sections:
+            from section_miner import SectionMiner, SectionMinerConfig
+
+            miner_config = SectionMinerConfig(
+                **(section_config or {})
+            )
+            miner = SectionMiner(miner_config)
+            section_results = {}
+            for filepath, measure_vecs in file_map.items():
+                if len(measure_vecs) < miner_config.min_len * 2:
+                    continue
+                # Feed 20-D full arrays (texture + pitch-class histogram)
+                full_arrays = [v.as_full_array().tolist() for v in measure_vecs]
+                try:
+                    result = miner.analyze(full_arrays)
+                    if result.families:
+                        section_results[filepath] = result.to_dict()
+                except Exception as exc:
+                    log.warning("Section miner failed for %s: %s", filepath, exc)
+            log.info(
+                "Section analysis: %d/%d files have detected sections.",
+                len(section_results), len(file_map),
+            )
+
+        # 6. Train section grammar from discovered section structure
+        grammar: Optional["SectionGrammar"] = None
+        if section_results:
+            from section_grammar import SectionGrammar
+
+            grammar = SectionGrammar.fit_from_results(
+                section_results, clusterer, n_clusters,
+            )
+
         log.info("MusicModel trained: k=%d.", n_clusters)
         return cls(
             clusterer=clusterer,
             transition_matrix=transition_matrix,
             persistence_duration=persistence_duration,
             start_distribution=start_distribution,
+            section_results=section_results,
+            grammar=grammar,
         )
 
     # -- persistence -----------------------------------------------------------
@@ -204,6 +263,15 @@ class MusicModel:
                 f,
             )
 
+        # Section structure (optional)
+        if self.section_results:
+            with open(path / "section_structure.json", "w") as f:
+                json.dump(self.section_results, f, indent=2)
+
+        # Section grammar (optional)
+        if self.grammar is not None:
+            self.grammar.save(path / "grammar")
+
         log.info("Saved model to %s", path)
 
     @classmethod
@@ -258,12 +326,29 @@ class MusicModel:
             total_files=sd_data["total_files"],
         )
 
+        # Section structure (optional)
+        section_results: Optional[Dict[str, Dict[str, Any]]] = None
+        section_path = path / "section_structure.json"
+        if section_path.exists():
+            with open(section_path) as f:
+                section_results = json.load(f)
+
+        # Section grammar (optional)
+        grammar: Optional["SectionGrammar"] = None
+        grammar_path = path / "grammar" / "grammar.json"
+        if grammar_path.exists():
+            from section_grammar import SectionGrammar
+
+            grammar = SectionGrammar.load(path / "grammar")
+
         log.info("Loaded model from %s (k=%d)", path, n)
         return cls(
             clusterer=clusterer,
             transition_matrix=transition_matrix,
             persistence_duration=persistence_duration,
             start_distribution=start_distribution,
+            section_results=section_results,
+            grammar=grammar,
         )
 
     # -- summary ---------------------------------------------------------------
@@ -283,8 +368,28 @@ class MusicModel:
             "",
             "--- Start Distribution ---",
             str(self.start_distribution.summary()),
-            "=" * 65,
         ]
+        if self.section_results:
+            total_families = sum(
+                len(result.get("families", []))
+                for result in self.section_results.values()
+            )
+            files_with_sections = len(self.section_results)
+            lines.extend([
+                "",
+                "--- Section Structure ---",
+                f"  Files with sections: {files_with_sections}",
+                f"  Total section families: {total_families}",
+            ])
+        if self.grammar is not None and self.grammar.files:
+            lines.extend([
+                "",
+                "--- Section Grammar ---",
+                f"  Template files: {len(self.grammar.files)}",
+                f"  FREE length range: {min(self.grammar.global_free_lengths)}"
+                f" – {max(self.grammar.global_free_lengths)} bars",
+            ])
+        lines.append("=" * 65)
         return "\n".join(lines)
 
 
@@ -324,6 +429,23 @@ def _build_parser() -> "argparse.ArgumentParser":
         required=True,
         help="Path to save the trained model directory.",
     )
+    parser.add_argument(
+        "--analyze-sections",
+        action="store_true",
+        help="Run section structure miner on each file after clustering.",
+    )
+    parser.add_argument(
+        "--section-min-len",
+        type=int,
+        default=3,
+        help="Minimum section length in bars (for --analyze-sections).",
+    )
+    parser.add_argument(
+        "--section-transposition-invariant", "--section-ti",
+        action="store_true",
+        dest="section_ti",
+        help="Enable transposition-invariant section matching.",
+    )
     return parser
 
 
@@ -338,6 +460,13 @@ def main() -> None:
 
     patterns = [p.strip() for p in args.file_patterns.split(",") if p.strip()]
 
+    section_config = None
+    if args.analyze_sections:
+        section_config = {
+            "min_len": args.section_min_len,
+            "transposition_invariant": args.section_ti,
+        }
+
     log.info("Training MusicModel ...")
     model = MusicModel.fit(
         music_dir=args.music_dir,
@@ -346,6 +475,8 @@ def main() -> None:
         min_run_length=args.min_run_length,
         skip_self_transitions=not args.include_self_transitions,
         file_patterns=patterns,
+        analyze_sections=args.analyze_sections,
+        section_config=section_config,
     )
 
     print()

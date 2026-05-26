@@ -117,7 +117,7 @@ class MeasureInfo:
 
 @dataclass
 class MeasureVector:
-    """8-dimensional feature vector for one measure."""
+    """8-D texture + 12-D pitch-class feature vector for one measure."""
 
     note_density: float = 0.0
     mean_duration: float = 0.0
@@ -128,12 +128,22 @@ class MeasureVector:
     syncopation_score: float = 0.0
     entropy: float = 0.0
 
+    # Duration-weighted pitch-class histogram (12 semitones, normalised to 1).
+    pitch_class_histogram: np.ndarray = field(
+        default_factory=lambda: np.zeros(12, dtype=np.float64),
+    )
+
     file_path: str = ""
     measure_index: int = 0
     cluster_label: int = -1
 
     def as_array(self) -> np.ndarray:
-        """Return the 8 features as a numpy array (float64)."""
+        """Return the 8 texture features as a numpy array (float64).
+
+        This is the vector used for KMeans clustering — it intentionally
+        excludes the pitch-class histogram so clusters describe *how* the
+        music is played, not *which* notes are played.
+        """
         return np.array([
             self.note_density,
             self.mean_duration,
@@ -145,10 +155,23 @@ class MeasureVector:
             self.entropy,
         ], dtype=np.float64)
 
+    def as_full_array(self) -> np.ndarray:
+        """Return 20-D array: 8 texture features + 12 pitch-class histogram.
+
+        Used by the section miner for transposition-invariant similarity.
+        """
+        return np.concatenate([self.as_array(), self.pitch_class_histogram])
+
     @classmethod
     def from_array(cls, arr: np.ndarray, file_path: str = "",
                    measure_index: int = 0, cluster_label: int = -1) -> "MeasureVector":
-        """Construct from a numpy array (for centroid reconstruction)."""
+        """Construct from a numpy array (for centroid reconstruction).
+
+        Handles both 8-D (legacy) and 20-D (with pitch-class) arrays.
+        """
+        pc_hist = np.zeros(12, dtype=np.float64)
+        if len(arr) >= 20:
+            pc_hist = arr[8:20].astype(np.float64)
         return cls(
             note_density=float(arr[0]),
             mean_duration=float(arr[1]),
@@ -158,6 +181,7 @@ class MeasureVector:
             offbeat_ratio=float(arr[5]),
             syncopation_score=float(arr[6]),
             entropy=float(arr[7]),
+            pitch_class_histogram=pc_hist,
             file_path=file_path,
             measure_index=measure_index,
             cluster_label=cluster_label,
@@ -310,6 +334,9 @@ class MeasureExtractor:
         # 8. rhythmic entropy
         ent = self._rhythmic_entropy(durations)
 
+        # 9. pitch-class histogram (duration-weighted, 12-bin, normalised)
+        pc_hist = self._pitch_class_histogram(notes)
+
         return MeasureVector(
             note_density=density,
             mean_duration=mean_dur,
@@ -319,6 +346,7 @@ class MeasureExtractor:
             offbeat_ratio=offbeat,
             syncopation_score=sync_count / n,
             entropy=ent,
+            pitch_class_histogram=pc_hist,
             file_path=measure.file_path,
             measure_index=measure.measure_index,
         )
@@ -359,6 +387,27 @@ class MeasureExtractor:
         probs = probs[probs > 0]
         return float(-np.sum(probs * np.log2(probs)))
 
+    @staticmethod
+    def _pitch_class_histogram(notes: List[Dict[str, Any]]) -> np.ndarray:
+        """Duration-weighted pitch-class histogram (12 bins, normalised to 1).
+
+        Each note contributes its quarterLength to its pitch class bin, so
+        longer notes have more weight than short ornamental ones.  Returns
+        a zero vector when there are no pitched notes.
+        """
+        hist = np.zeros(12, dtype=np.float64)
+        total = 0.0
+        for nd in notes:
+            dur = nd.get("quarterLength", 0.0)
+            pitch = nd.get("pitch", -1)
+            if pitch < 0 or dur <= 0:
+                continue
+            hist[pitch % 12] += dur
+            total += dur
+        if total > 0:
+            hist /= total
+        return hist
+
     # -- batch extraction ----------------------------------------------------
 
     def extract_all(
@@ -376,6 +425,30 @@ class MeasureExtractor:
         Returns:
             All extracted measure vectors.
         """
+        file_map = self.extract_file_map(music_dir, file_patterns)
+        all_vectors: List[MeasureVector] = []
+        for vectors in file_map.values():
+            all_vectors.extend(vectors)
+        log.info(
+            "Extracted %d measure vectors from %d files.",
+            len(all_vectors), len(file_map),
+        )
+        return all_vectors
+
+    def extract_file_map(
+        self,
+        music_dir: Union[str, Path],
+        file_patterns: Optional[Union[str, Sequence[str]]] = None,
+    ) -> Dict[str, List[MeasureVector]]:
+        """Walk *music_dir*, parse every matching file, return per-file vectors.
+
+        Args:
+            music_dir: Root directory containing music files.
+            file_patterns: Glob pattern(s).  Defaults to ``["*.mid","*.midi","*.abc","*.krn"]``.
+
+        Returns:
+            Dict mapping ``str(file_path)`` → ``List[MeasureVector]``.
+        """
         if file_patterns is None:
             file_patterns = ["*.mid", "*.midi", "*.abc", "*.krn"]
         elif isinstance(file_patterns, str):
@@ -392,28 +465,30 @@ class MeasureExtractor:
                 f"No music files matching {list(file_patterns)} found in {music_dir}"
             )
 
-        all_vectors: List[MeasureVector] = []
+        result: Dict[str, List[MeasureVector]] = {}
         success = 0
         for mp in music_paths:
             try:
                 measures = self.extract(mp)
-                for m in measures:
-                    all_vectors.append(self.vectorize(m))
+                if not measures:
+                    continue
+                vectors = [self.vectorize(m) for m in measures]
+                result[str(mp)] = vectors
                 success += 1
                 log.info("Parsed %s: %d measures", mp.name, len(measures))
             except Exception as exc:
                 log.warning("Skipping %s: %s", mp, exc)
 
-        log.info(
-            "Extracted %d measure vectors from %d/%d files.",
-            len(all_vectors), success, len(music_paths),
-        )
-        if not all_vectors:
+        if not result:
             raise RuntimeError(
                 f"No valid measures extracted from {len(music_paths)} files "
                 f"in {music_dir}"
             )
-        return all_vectors
+        log.info(
+            "Extracted per-file vectors: %d/%d files succeeded.",
+            success, len(music_paths),
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +513,7 @@ class MeasureClusterer:
         self._centroids_raw: Optional[np.ndarray] = None  # in original space
         self._inertia: float = 0.0
         self._labels: Optional[np.ndarray] = None
+        self.pitch_histograms: Optional[np.ndarray] = None  # (n_clusters, 12)
 
     # -- properties ----------------------------------------------------------
 
@@ -521,6 +597,51 @@ class MeasureClusterer:
         X_scaled = self._scaler.transform(X)
         return self._kmeans.predict(X_scaled)
 
+    def compute_pitch_histograms(
+        self,
+        file_map: Dict[str, List["MeasureVector"]],
+        file_labels: List[List[int]],
+    ) -> np.ndarray:
+        """Compute per-cluster average pitch-class histograms.
+
+        For each measure in the training corpus, accumulates its 12-D
+        pitch-class histogram into the bucket for its assigned cluster,
+        then normalizes each cluster's histogram to sum to 1.
+
+        Args:
+            file_map: filename → list of MeasureVector (in order).
+            file_labels: list of label lists, same file order as file_map.
+
+        Returns:
+            Array of shape (n_clusters, 12).  Also stored in
+            ``self.pitch_histograms``.
+        """
+        self._require_fit()
+        n_clusters = self._centroids_raw.shape[0] if self._centroids_raw is not None else 0
+        if n_clusters == 0:
+            self.pitch_histograms = np.zeros((0, 12), dtype=np.float64)
+            return self.pitch_histograms
+
+        accum = np.zeros((n_clusters, 12), dtype=np.float64)
+        counts = np.zeros(n_clusters, dtype=np.int64)
+
+        for vecs, labels in zip(file_map.values(), file_labels):
+            for vec, label in zip(vecs, labels):
+                if 0 <= label < n_clusters:
+                    accum[label] += vec.pitch_class_histogram
+                    counts[label] += 1
+
+        # Normalize each row
+        for c in range(n_clusters):
+            if counts[c] > 0:
+                accum[c] /= counts[c]
+                total = float(accum[c].sum())
+                if total > 0:
+                    accum[c] /= total
+
+        self.pitch_histograms = accum
+        return accum
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -572,6 +693,7 @@ class MeasureClusterer:
             "centroids_raw": self._centroids_raw,
             "inertia": self._inertia,
             "labels": self._labels,
+            "pitch_histograms": self.pitch_histograms,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -588,6 +710,7 @@ class MeasureClusterer:
         obj._centroids_raw = state["centroids_raw"]
         obj._inertia = state.get("inertia", 0.0)
         obj._labels = state.get("labels")
+        obj.pitch_histograms = state.get("pitch_histograms")
         return obj
 
 
