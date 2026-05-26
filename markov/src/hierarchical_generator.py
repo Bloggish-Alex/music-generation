@@ -275,24 +275,27 @@ class ClusterNoteSampler:
             remaining -= dur
 
         # --- section-end breathing space ---
+        # Force the last note to end *gap* beats before the bar boundary.
+        # The natural silence between note_off and the next bar's note_on
+        # creates the audible gap.  No rest is needed with mido output.
         if is_section_end and notes:
+            gap = 0.5
             for idx in range(len(notes) - 1, -1, -1):
                 if notes[idx].pitch >= 0:
                     n = notes[idx]
-                    rest_dur = 0.5  # eighth-note breath
-                    new_dur = max(0.25, n.duration_ql - rest_dur)
-                    notes[idx] = NoteEvent(
-                        pitch=n.pitch,
-                        duration_ql=new_dur,
-                        velocity=max(35, n.velocity - 15),
-                        beat_offset=n.beat_offset,
-                    )
-                    notes.append(NoteEvent(
-                        pitch=-1,
-                        duration_ql=rest_dur,
-                        velocity=0,
-                        beat_offset=n.beat_offset + new_dur,
-                    ))
+                    new_dur = bar_length_ql - gap - n.beat_offset
+                    if new_dur > 0:
+                        notes[idx] = NoteEvent(
+                            pitch=n.pitch,
+                            duration_ql=new_dur,
+                            velocity=max(30, n.velocity - 15),
+                            beat_offset=n.beat_offset,
+                        )
+                    else:
+                        # Note starts too late — remove it and keep searching
+                        del notes[idx]
+                        continue
+                    del notes[idx + 1:]
                     break
 
         # --- post-generation perturbation (for RETURN / VARIANT) ---
@@ -546,7 +549,33 @@ class HierarchicalGenerator:
                 perturb=_perturb,
                 is_section_end=is_section_end,
             )
-            all_notes.extend(notes)
+            all_notes.append(notes)
+
+        # 3b. Shift the measure after each cadence by the gap amount so
+        # the silence after the bar boundary is actually audible.  With
+        # explicit-offset MIDI output, a rest and a note at the same
+        # offset would collide — the note wins, erasing the gap.
+        _GAP = 0.5
+        for i in range(len(all_notes) - 1):
+            # Check if this measure had is_section_end set
+            sl, bi, role, is_end = (measure_context[i] if i < len(measure_context)
+                                     else ("", 0, "", False))
+            if not is_end and role in ("FREE", "FLAT") and i + 1 < len(measure_context):
+                if measure_context[i + 1][2] not in ("FREE", "FLAT"):
+                    is_end = True
+            if i < len(measure_context) and not is_end:
+                # original is_end from section last bar
+                is_end = measure_context[i][3]
+            if is_end:
+                shifted = []
+                for nev in all_notes[i + 1]:
+                    shifted.append(NoteEvent(
+                        pitch=nev.pitch,
+                        duration_ql=nev.duration_ql,
+                        velocity=nev.velocity,
+                        beat_offset=nev.beat_offset + _GAP,
+                    ))
+                all_notes[i + 1] = shifted
 
         # 4. Write MIDI
         output_path = Path(output_path)
@@ -683,62 +712,64 @@ class HierarchicalGenerator:
         return labels, event_log
 
     # ------------------------------------------------------------------
-    # Internal: MIDI output via music21
+    # Internal: MIDI output via mido
     # ------------------------------------------------------------------
 
     @staticmethod
     def _write_midi(
-        notes: List[NoteEvent],
+        measures: List[List[NoteEvent]],
         output_path: Path,
         tempo: int,
         time_signature: Tuple[int, int],
     ) -> None:
-        """Convert NoteEvent list to a music21 Score and write MIDI."""
-        from music21 import stream, tempo as m21tempo, meter as m21meter
-        from music21 import note as m21note, instrument, midi as m21midi
+        """Write MIDI via mido — direct tick-level control.
+
+        Silence is simply the absence of note events.  No rests needed.
+        """
+        import mido
 
         ts_num, ts_den = time_signature
         bar_length_ql = ts_num * (4.0 / ts_den)
+        tpb = 480
+        us_per_beat = int(60_000_000 / tempo)
 
-        score = stream.Score()
-        score.append(m21tempo.MetronomeMark(number=tempo))
-        score.append(m21meter.TimeSignature(f"{ts_num}/{ts_den}"))
+        mid = mido.MidiFile(ticks_per_beat=tpb)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
 
-        part = stream.Part()
-        part.append(instrument.Instrument(midiProgram=0))  # piano
+        track.append(mido.MetaMessage('set_tempo', tempo=us_per_beat, time=0))
+        track.append(mido.MetaMessage(
+            'time_signature', numerator=ts_num, denominator=ts_den,
+            clocks_per_click=24, notated_32nd_notes_per_beat=8, time=0,
+        ))
 
-        current_time = 0.0
-        bar_start = 0.0
-        measure_notes: List[Tuple[float, m21note.Note | m21note.Rest]] = []
+        # Collect all (tick, note_on/off) events and sort
+        events: List[Tuple[int, str, int, int]] = []
 
-        for nev in notes:
-            # Advance bar boundary
-            if nev.beat_offset > 0 and nev.beat_offset < bar_length_ql:
-                current_time = bar_start + nev.beat_offset
+        for measure_idx, nev_list in enumerate(measures):
+            bar_base_ticks = measure_idx * bar_length_ql * tpb
+            for nev in nev_list:
+                if nev.pitch < 0:
+                    continue
+                start_tick = int(bar_base_ticks + nev.beat_offset * tpb)
+                end_tick = int(start_tick + nev.duration_ql * tpb)
+                events.append((start_tick, 'on', nev.pitch, nev.velocity))
+                events.append((end_tick, 'off', nev.pitch, 0))
 
-            if nev.pitch >= 0:
-                n = m21note.Note(pitch=nev.pitch)
-                n.duration.quarterLength = nev.duration_ql
-                n.volume.velocity = nev.velocity
-                part.append(n)
+        events.sort(key=lambda e: e[0])
+
+        prev_tick = 0
+        for tick, etype, pitch, velocity in events:
+            delta = tick - prev_tick
+            if etype == 'on':
+                track.append(mido.Message('note_on', note=pitch,
+                                          velocity=velocity, time=delta))
             else:
-                r = m21note.Rest()
-                r.duration.quarterLength = nev.duration_ql
-                part.append(r)
+                track.append(mido.Message('note_off', note=pitch,
+                                          velocity=0, time=delta))
+            prev_tick = tick
 
-            current_time += nev.duration_ql
-
-            # Check bar boundary
-            bar_elapsed = current_time - bar_start
-            if bar_elapsed >= bar_length_ql - 0.01:
-                bar_start += bar_length_ql
-                current_time = bar_start
-
-        score.append(part)
-        mf = m21midi.translate.music21ObjectToMidiFile(score)
-        mf.open(str(output_path), "wb")
-        mf.write()
-        mf.close()
+        mid.save(str(output_path))
 
 
 # ---------------------------------------------------------------------------
