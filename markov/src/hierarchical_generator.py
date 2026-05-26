@@ -274,26 +274,38 @@ class ClusterNoteSampler:
             beat += dur
             remaining -= dur
 
-        # --- section-end cadence ---
+        # --- section-end cadence (grid-aligned) ---
         if is_section_end and notes:
+            bar_end = bar_length_ql
+            # Pick the last sounding note that starts early enough to hold
+            # ≥1.5 beats without crossing the bar boundary.  Fall back to
+            # any sounding note if none qualify.
+            cadence_idx = -1
             for idx in range(len(notes) - 1, -1, -1):
-                if notes[idx].pitch >= 0:
-                    n = notes[idx]
-                    rest_dur = 1.5  # dotted-quarter pause between sections
-                    held_dur = max(2.0, n.duration_ql)  # half-note minimum
-                    notes[idx] = NoteEvent(
-                        pitch=n.pitch,
-                        duration_ql=held_dur,
-                        velocity=max(25, int(n.velocity * 0.5)),  # soft decay
-                        beat_offset=n.beat_offset,
-                    )
-                    notes.append(NoteEvent(
-                        pitch=-1,
-                        duration_ql=rest_dur,
-                        velocity=0,
-                        beat_offset=n.beat_offset + held_dur,
-                    ))
-                    break
+                n = notes[idx]
+                if n.pitch >= 0:
+                    if n.beat_offset <= bar_end - 1.5:
+                        cadence_idx = idx
+                        break
+                    if cadence_idx < 0:
+                        cadence_idx = idx  # fallback to any sounding note
+            if cadence_idx >= 0:
+                del notes[cadence_idx + 1:]
+                n = notes[cadence_idx]
+                # Duration always ends exactly at the bar boundary
+                cadence_dur = bar_end - n.beat_offset
+                notes[cadence_idx] = NoteEvent(
+                    pitch=n.pitch,
+                    duration_ql=cadence_dur,
+                    velocity=max(20, int(n.velocity * 0.4)),
+                    beat_offset=n.beat_offset,
+                )
+                notes.append(NoteEvent(
+                    pitch=-1,
+                    duration_ql=1.5,
+                    velocity=0,
+                    beat_offset=bar_end,
+                ))
 
         # --- post-generation perturbation (for RETURN / VARIANT) ---
         if perturb > 0.0 and notes:
