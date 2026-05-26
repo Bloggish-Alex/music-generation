@@ -274,38 +274,26 @@ class ClusterNoteSampler:
             beat += dur
             remaining -= dur
 
-        # --- section-end cadence (grid-aligned) ---
+        # --- section-end breathing space ---
         if is_section_end and notes:
-            bar_end = bar_length_ql
-            # Pick the last sounding note that starts early enough to hold
-            # ≥1.5 beats without crossing the bar boundary.  Fall back to
-            # any sounding note if none qualify.
-            cadence_idx = -1
             for idx in range(len(notes) - 1, -1, -1):
-                n = notes[idx]
-                if n.pitch >= 0:
-                    if n.beat_offset <= bar_end - 1.5:
-                        cadence_idx = idx
-                        break
-                    if cadence_idx < 0:
-                        cadence_idx = idx  # fallback to any sounding note
-            if cadence_idx >= 0:
-                del notes[cadence_idx + 1:]
-                n = notes[cadence_idx]
-                # Duration always ends exactly at the bar boundary
-                cadence_dur = bar_end - n.beat_offset
-                notes[cadence_idx] = NoteEvent(
-                    pitch=n.pitch,
-                    duration_ql=cadence_dur,
-                    velocity=max(20, int(n.velocity * 0.4)),
-                    beat_offset=n.beat_offset,
-                )
-                notes.append(NoteEvent(
-                    pitch=-1,
-                    duration_ql=1.5,
-                    velocity=0,
-                    beat_offset=bar_end,
-                ))
+                if notes[idx].pitch >= 0:
+                    n = notes[idx]
+                    rest_dur = 0.5  # eighth-note breath
+                    new_dur = max(0.25, n.duration_ql - rest_dur)
+                    notes[idx] = NoteEvent(
+                        pitch=n.pitch,
+                        duration_ql=new_dur,
+                        velocity=max(35, n.velocity - 15),
+                        beat_offset=n.beat_offset,
+                    )
+                    notes.append(NoteEvent(
+                        pitch=-1,
+                        duration_ql=rest_dur,
+                        velocity=0,
+                        beat_offset=n.beat_offset + new_dur,
+                    ))
+                    break
 
         # --- post-generation perturbation (for RETURN / VARIANT) ---
         if perturb > 0.0 and notes:
@@ -499,8 +487,8 @@ class HierarchicalGenerator:
             seed=seed,
         )
 
-        # 2. Build section-context map: measure_idx → (section_label, bar_in_section, role)
-        measure_context: List[Tuple[str, int, str]] = []
+        # 2. Build section-context map: measure_idx → (section_label, bar_in_section, role, is_end)
+        measure_context: List[Tuple[str, int, str, bool]] = []
         measure_idx = 0
         for event in event_log:
             length = event["length"]
@@ -508,13 +496,14 @@ class HierarchicalGenerator:
                 label = event["label"]
                 role = event["role"]
                 for bar_in_sec in range(length):
-                    measure_context.append((label, bar_in_sec, role))
+                    is_end = (bar_in_sec == length - 1)
+                    measure_context.append((label, bar_in_sec, role, is_end))
             elif event["kind"] == "FREE":
                 for bar_in_free in range(length):
-                    measure_context.append(("FREE", measure_idx, "FREE"))
+                    measure_context.append(("FREE", measure_idx, "FREE", False))
             else:
                 for k in range(length):
-                    measure_context.append(("FLAT", measure_idx + k, "FLAT"))
+                    measure_context.append(("FLAT", measure_idx + k, "FLAT", False))
             measure_idx += length
 
         # 3. Per-measure notes, seeded by section identity
@@ -523,9 +512,16 @@ class HierarchicalGenerator:
 
         for i, cluster_id in enumerate(labels):
             if i < len(measure_context):
-                sec_label, bar_in_sec, role = measure_context[i]
+                sec_label, bar_in_sec, role, is_section_end = measure_context[i]
             else:
-                sec_label, bar_in_sec, role = "FLAT", i, "FLAT"
+                sec_label, bar_in_sec, role, is_section_end = "FLAT", i, "FLAT", False
+
+            # Breathe right before each section return — only FREE/PAD
+            # bars that immediately precede a SECTION start.
+            if not is_section_end and role in ("FREE", "FLAT") and i + 1 < len(measure_context):
+                next_role = measure_context[i + 1][2]
+                if next_role not in ("FREE", "FLAT"):
+                    is_section_end = True
 
             # Derive seed from section identity — same seed for all roles
             # so RETURN/VARIANT preserve the original's contour.
@@ -543,15 +539,12 @@ class HierarchicalGenerator:
                 else:
                     _perturb = 0.0
 
-            # Cadence at every 16th bar, not at section boundaries
-            is_grid_cadence = ((i + 1) % 16 == 0)
-
             notes = self.note_sampler.sample_measure(
                 cluster_label=cluster_id,
                 time_signature=time_signature,
                 seed=measure_seed,
                 perturb=_perturb,
-                is_section_end=is_grid_cadence,
+                is_section_end=is_section_end,
             )
             all_notes.extend(notes)
 
