@@ -65,7 +65,7 @@ _DURATION_BIN_EDGES: np.ndarray = np.array(
 
 SHORT_NOTE_THRESHOLD: float = 0.5  # quarterLength < 0.5 = "short" (shorter than eighth)
 
-FEATURE_NAMES: Tuple[str, ...] = (
+TEXTURE_FEATURE_NAMES: Tuple[str, ...] = (
     "note_density",
     "mean_duration",
     "duration_variance",
@@ -75,6 +75,21 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "syncopation_score",
     "entropy",
 )
+
+MELODIC_FEATURE_NAMES: Tuple[str, ...] = (
+    "pitch_mean",
+    "pitch_range",
+    "pitch_slope",
+    "first_last_interval",
+    "peak_position",
+    "direction_changes",
+    "step_ratio",
+    "leap_ratio",
+    "ending_duration_ratio",
+    "cadence_closure",
+)
+
+FEATURE_NAMES: Tuple[str, ...] = TEXTURE_FEATURE_NAMES + MELODIC_FEATURE_NAMES
 
 # music21 time-signature → quarterLength per bar
 _TS_BAR_LENGTH: Dict[str, float] = {
@@ -117,7 +132,7 @@ class MeasureInfo:
 
 @dataclass
 class MeasureVector:
-    """8-D texture + 12-D pitch-class feature vector for one measure."""
+    """Texture + melodic-contour feature vector for one measure."""
 
     note_density: float = 0.0
     mean_duration: float = 0.0
@@ -127,6 +142,20 @@ class MeasureVector:
     offbeat_ratio: float = 0.0
     syncopation_score: float = 0.0
     entropy: float = 0.0
+
+    # Melody-shape features.  They are transposition tolerant because they
+    # describe direction, span, contour, and closure rather than exact pitch
+    # class identity.
+    pitch_mean: float = 60.0
+    pitch_range: float = 0.0
+    pitch_slope: float = 0.0
+    first_last_interval: float = 0.0
+    peak_position: float = 0.0
+    direction_changes: float = 0.0
+    step_ratio: float = 0.0
+    leap_ratio: float = 0.0
+    ending_duration_ratio: float = 0.0
+    cadence_closure: float = 0.0
 
     # Duration-weighted pitch-class histogram (12 semitones, normalised to 1).
     pitch_class_histogram: np.ndarray = field(
@@ -163,6 +192,16 @@ class MeasureVector:
             self.offbeat_ratio,
             self.syncopation_score,
             self.entropy,
+            self.pitch_mean,
+            self.pitch_range,
+            self.pitch_slope,
+            self.first_last_interval,
+            self.peak_position,
+            self.direction_changes,
+            self.step_ratio,
+            self.leap_ratio,
+            self.ending_duration_ratio,
+            self.cadence_closure,
         ], dtype=np.float64)
 
     def as_full_array(self) -> np.ndarray:
@@ -180,8 +219,9 @@ class MeasureVector:
         Handles both 8-D (legacy) and 20-D (with pitch-class) arrays.
         """
         pc_hist = np.zeros(12, dtype=np.float64)
-        if len(arr) >= 20:
-            pc_hist = arr[8:20].astype(np.float64)
+        feature_dim = len(FEATURE_NAMES)
+        if len(arr) >= feature_dim + 12:
+            pc_hist = arr[feature_dim:feature_dim + 12].astype(np.float64)
         return cls(
             note_density=float(arr[0]),
             mean_duration=float(arr[1]),
@@ -191,6 +231,16 @@ class MeasureVector:
             offbeat_ratio=float(arr[5]),
             syncopation_score=float(arr[6]),
             entropy=float(arr[7]),
+            pitch_mean=float(arr[8]) if len(arr) > 8 else 60.0,
+            pitch_range=float(arr[9]) if len(arr) > 9 else 0.0,
+            pitch_slope=float(arr[10]) if len(arr) > 10 else 0.0,
+            first_last_interval=float(arr[11]) if len(arr) > 11 else 0.0,
+            peak_position=float(arr[12]) if len(arr) > 12 else 0.0,
+            direction_changes=float(arr[13]) if len(arr) > 13 else 0.0,
+            step_ratio=float(arr[14]) if len(arr) > 14 else 0.0,
+            leap_ratio=float(arr[15]) if len(arr) > 15 else 0.0,
+            ending_duration_ratio=float(arr[16]) if len(arr) > 16 else 0.0,
+            cadence_closure=float(arr[17]) if len(arr) > 17 else 0.0,
             pitch_class_histogram=pc_hist,
             file_path=file_path,
             measure_index=measure_index,
@@ -236,6 +286,90 @@ def _step_histogram(notes: List[Dict[str, Any]]) -> np.ndarray:
     if total > 0:
         hist /= total
     return hist
+
+
+def _melody_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Approximate the melody line by taking the top pitch at each onset.
+
+    The extractor expands chords into simultaneous notes.  For contour
+    features we need a single melodic path, so grouped-onset highest pitch is
+    a practical and deterministic proxy.
+    """
+    by_onset: Dict[float, Dict[str, Any]] = {}
+    for nd in notes:
+        if nd.get("pitch", -1) < 0:
+            continue
+        onset = round(float(nd.get("onset_in_measure", 0.0)), 5)
+        current = by_onset.get(onset)
+        if current is None or int(nd["pitch"]) > int(current["pitch"]):
+            by_onset[onset] = nd
+    return [by_onset[k] for k in sorted(by_onset)]
+
+
+def _melodic_contour_features(
+    notes: List[Dict[str, Any]],
+    bar_length: float,
+) -> Dict[str, float]:
+    """Compute contour and cadence-like shape features for one bar."""
+    melody = _melody_notes(notes)
+    if not melody:
+        return {
+            "pitch_mean": 60.0,
+            "pitch_range": 0.0,
+            "pitch_slope": 0.0,
+            "first_last_interval": 0.0,
+            "peak_position": 0.0,
+            "direction_changes": 0.0,
+            "step_ratio": 0.0,
+            "leap_ratio": 0.0,
+            "ending_duration_ratio": 0.0,
+            "cadence_closure": 0.0,
+        }
+
+    pitches = np.array([nd["pitch"] for nd in melody], dtype=np.float64)
+    onsets = np.array([nd["onset_in_measure"] for nd in melody], dtype=np.float64)
+    durations = np.array([nd["quarterLength"] for nd in melody], dtype=np.float64)
+    intervals = np.diff(pitches)
+    abs_intervals = np.abs(intervals)
+
+    if len(pitches) >= 2 and float(np.var(onsets)) > 1e-9:
+        slope = float(np.polyfit(onsets, pitches, 1)[0])
+    else:
+        slope = 0.0
+
+    signs = np.sign(intervals[abs_intervals > 0])
+    if len(signs) >= 2:
+        direction_changes = float(np.sum(signs[1:] != signs[:-1]) / (len(signs) - 1))
+    else:
+        direction_changes = 0.0
+
+    interval_count = max(1, len(abs_intervals))
+    step_ratio = float(np.sum((abs_intervals >= 1) & (abs_intervals <= 2)) / interval_count)
+    leap_ratio = float(np.sum(abs_intervals >= 5) / interval_count)
+
+    peak_idx = int(np.argmax(pitches))
+    peak_position = float(onsets[peak_idx] / bar_length) if bar_length > 0 else 0.0
+    last_end = float(onsets[-1] + durations[-1])
+    end_alignment = 1.0 - min(1.0, abs(bar_length - last_end) / max(bar_length, 1e-6))
+    ending_duration_ratio = float(min(1.0, durations[-1] / max(bar_length, 1e-6)))
+    # A long final note near the bar end after small incoming motion behaves
+    # more cadence-like than a short note or unresolved leap.
+    incoming = float(abs_intervals[-1]) if len(abs_intervals) else 0.0
+    incoming_stability = 1.0 - min(1.0, incoming / 12.0)
+    cadence_closure = float(ending_duration_ratio * end_alignment * incoming_stability)
+
+    return {
+        "pitch_mean": float(np.mean(pitches)),
+        "pitch_range": float(np.max(pitches) - np.min(pitches)),
+        "pitch_slope": slope,
+        "first_last_interval": float(pitches[-1] - pitches[0]),
+        "peak_position": peak_position,
+        "direction_changes": direction_changes,
+        "step_ratio": step_ratio,
+        "leap_ratio": leap_ratio,
+        "ending_duration_ratio": ending_duration_ratio,
+        "cadence_closure": cadence_closure,
+    }
 
 
 class MeasureExtractor:
@@ -386,6 +520,7 @@ class MeasureExtractor:
 
         # 9. pitch-class histogram (duration-weighted, 12-bin, normalised)
         pc_hist = self._pitch_class_histogram(notes)
+        contour = _melodic_contour_features(notes, measure.beats)
 
         return MeasureVector(
             note_density=density,
@@ -396,6 +531,16 @@ class MeasureExtractor:
             offbeat_ratio=offbeat,
             syncopation_score=sync_count / n,
             entropy=ent,
+            pitch_mean=contour["pitch_mean"],
+            pitch_range=contour["pitch_range"],
+            pitch_slope=contour["pitch_slope"],
+            first_last_interval=contour["first_last_interval"],
+            peak_position=contour["peak_position"],
+            direction_changes=contour["direction_changes"],
+            step_ratio=contour["step_ratio"],
+            leap_ratio=contour["leap_ratio"],
+            ending_duration_ratio=contour["ending_duration_ratio"],
+            cadence_closure=contour["cadence_closure"],
             pitch_class_histogram=pc_hist,
             file_path=measure.file_path,
             measure_index=measure.measure_index,
@@ -572,6 +717,7 @@ class MeasureClusterer:
         self.velocity_means: Optional[np.ndarray] = None     # (n_clusters,)
         self.velocity_stds: Optional[np.ndarray] = None      # (n_clusters,)
         self.bass_histograms: Optional[np.ndarray] = None    # (n_clusters, 128)
+        self.phrase_role_stats: Optional[Dict[int, Dict[str, Dict[str, float]]]] = None
 
     # -- properties ----------------------------------------------------------
 
@@ -611,7 +757,7 @@ class MeasureClusterer:
         from sklearn.cluster import KMeans
         from sklearn.preprocessing import StandardScaler
 
-        X = np.stack([v.as_array() for v in vectors], axis=0)
+        X = np.stack([self._vector_array(v) for v in vectors], axis=0)
         log.info("Feature matrix shape: %s", X.shape)
 
         self._scaler = StandardScaler()
@@ -644,16 +790,37 @@ class MeasureClusterer:
     def predict(self, vector: MeasureVector) -> int:
         """Classify a single MeasureVector. Returns cluster label (0..n-1)."""
         self._require_fit()
-        X = vector.as_array().reshape(1, -1)
+        X = self._vector_array(vector).reshape(1, -1)
         X_scaled = self._scaler.transform(X)
         return int(self._kmeans.predict(X_scaled)[0])
 
     def predict_many(self, vectors: List[MeasureVector]) -> np.ndarray:
         """Classify multiple MeasureVectors. Returns array of cluster labels."""
         self._require_fit()
-        X = np.stack([v.as_array() for v in vectors], axis=0)
+        X = np.stack([self._vector_array(v) for v in vectors], axis=0)
         X_scaled = self._scaler.transform(X)
         return self._kmeans.predict(X_scaled)
+
+    def _expected_feature_dim(self) -> int:
+        """Feature count expected by the fitted scaler/KMeans.
+
+        This preserves compatibility with older 8-D models while allowing new
+        models to train on the richer 18-D representation.
+        """
+        if self._scaler is not None and hasattr(self._scaler, "n_features_in_"):
+            return int(self._scaler.n_features_in_)
+        if self._centroids_raw is not None:
+            return int(self._centroids_raw.shape[1])
+        return len(FEATURE_NAMES)
+
+    def _vector_array(self, vector: MeasureVector) -> np.ndarray:
+        arr = vector.as_array()
+        dim = self._expected_feature_dim()
+        if len(arr) > dim:
+            return arr[:dim]
+        if len(arr) < dim:
+            return np.pad(arr, (0, dim - len(arr)), constant_values=0.0)
+        return arr
 
     def compute_pitch_histograms(
         self,
@@ -773,6 +940,103 @@ class MeasureClusterer:
         self.bass_histograms = accum
         return accum
 
+    def compute_phrase_role_statistics(
+        self,
+        file_map: Dict[str, List["MeasureVector"]],
+        file_labels: List[List[int]],
+        phrase_length: int = 4,
+    ) -> Dict[int, Dict[str, Dict[str, float]]]:
+        """Learn role-conditioned generation biases from the corpus.
+
+        This is deliberately statistical rather than a hand-authored rule
+        table.  Measures are assigned a coarse phrase role from their position
+        in a regular phrase grid, then each cluster stores how that role
+        changes density, duration, entropy, register, and cadence closure
+        relative to the cluster's own centroid.
+        """
+        self._require_fit()
+        n_clusters = self._centroids_raw.shape[0] if self._centroids_raw is not None else 0
+        if n_clusters == 0:
+            self.phrase_role_stats = {}
+            return self.phrase_role_stats
+
+        phrase_length = max(2, int(phrase_length))
+        accum: Dict[int, Dict[str, Dict[str, float]]] = {
+            c: {} for c in range(n_clusters)
+        }
+
+        for vecs, labels in zip(file_map.values(), file_labels):
+            for vec, label in zip(vecs, labels):
+                if not (0 <= label < n_clusters):
+                    continue
+                role = self._infer_phrase_role(vec.measure_index, phrase_length)
+                bucket = accum[label].setdefault(role, {
+                    "count": 0.0,
+                    "note_density": 0.0,
+                    "mean_duration": 0.0,
+                    "entropy": 0.0,
+                    "offbeat_ratio": 0.0,
+                    "pitch_offset": 0.0,
+                    "pitch_slope": 0.0,
+                    "pitch_range": 0.0,
+                    "ending_duration_ratio": 0.0,
+                    "cadence_closure": 0.0,
+                    "leap_ratio": 0.0,
+                })
+                bucket["count"] += 1.0
+                bucket["note_density"] += vec.note_density
+                bucket["mean_duration"] += vec.mean_duration
+                bucket["entropy"] += vec.entropy
+                bucket["offbeat_ratio"] += vec.offbeat_ratio
+                bucket["pitch_offset"] += vec.pitch_mean - float(self._centroids_raw[label, 8] if self._centroids_raw.shape[1] > 8 else 60.0)
+                bucket["pitch_slope"] += vec.pitch_slope
+                bucket["pitch_range"] += vec.pitch_range
+                bucket["ending_duration_ratio"] += vec.ending_duration_ratio
+                bucket["cadence_closure"] += vec.cadence_closure
+                bucket["leap_ratio"] += vec.leap_ratio
+
+        stats: Dict[int, Dict[str, Dict[str, float]]] = {}
+        for c, role_map in accum.items():
+            stats[c] = {}
+            centroid = self._centroids_raw[c]
+            for role, values in role_map.items():
+                count = max(1.0, values["count"])
+                density = values["note_density"] / count
+                duration = values["mean_duration"] / count
+                entropy = values["entropy"] / count
+                offbeat = values["offbeat_ratio"] / count
+                stats[c][role] = {
+                    "count": count,
+                    "density_scale": density / max(float(centroid[0]), 1e-6),
+                    "duration_scale": duration / max(float(centroid[1]), 1e-6),
+                    "entropy_scale": entropy / max(float(centroid[7]), 1e-6),
+                    "offbeat_scale": offbeat / max(float(centroid[5]), 1e-6),
+                    "pitch_offset": values["pitch_offset"] / count,
+                    "pitch_slope": values["pitch_slope"] / count,
+                    "pitch_range": values["pitch_range"] / count,
+                    "ending_duration_ratio": values["ending_duration_ratio"] / count,
+                    "cadence_closure": values["cadence_closure"] / count,
+                    "leap_ratio": values["leap_ratio"] / count,
+                }
+
+        self.phrase_role_stats = stats
+        return stats
+
+    @staticmethod
+    def _infer_phrase_role(measure_index: int, phrase_length: int) -> str:
+        """Infer a coarse role from position in a regular phrase grid."""
+        pos = measure_index % max(2, phrase_length)
+        if pos == 0:
+            return "OPENING"
+        if pos == 1:
+            return "ANSWER"
+        if pos == phrase_length - 1:
+            return "CADENCE"
+        if pos == phrase_length - 2:
+            return "CADENCE_PREP"
+        midpoint = phrase_length // 2
+        return "DEVELOPMENT" if pos >= midpoint else "CONTINUATION"
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -796,9 +1060,11 @@ class MeasureClusterer:
                 self._centroids_raw[c],
                 cluster_label=c,
             )
-            std_arr = np.std(cluster_x, axis=0) if len(cluster_x) > 0 else np.zeros(8)
+            feature_count = self._centroids_raw.shape[1]
+            std_arr = np.std(cluster_x, axis=0) if len(cluster_x) > 0 else np.zeros(feature_count)
             feature_means = {
-                FEATURE_NAMES[i]: float(self._centroids_raw[c, i]) for i in range(8)
+                FEATURE_NAMES[i]: float(self._centroids_raw[c, i])
+                for i in range(min(len(FEATURE_NAMES), feature_count))
             }
             stats.append({
                 "cluster": c,
@@ -829,6 +1095,7 @@ class MeasureClusterer:
             "velocity_means": self.velocity_means,
             "velocity_stds": self.velocity_stds,
             "bass_histograms": self.bass_histograms,
+            "phrase_role_stats": self.phrase_role_stats,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -850,6 +1117,7 @@ class MeasureClusterer:
         obj.velocity_means = state.get("velocity_means")
         obj.velocity_stds = state.get("velocity_stds")
         obj.bass_histograms = state.get("bass_histograms")
+        obj.phrase_role_stats = state.get("phrase_role_stats")
         return obj
 
 

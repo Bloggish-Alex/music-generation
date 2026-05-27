@@ -562,8 +562,9 @@ class SectionGrammar:
     ) -> List[int]:
         """Convert bar vectors (list of lists) to cluster labels.
 
-        Each token is a 20-D list.  We extract the first 8 dimensions
-        (texture features) and predict via the KMeans clusterer.
+        Tokens may come from legacy 20-D vectors or the current richer
+        clustering representation.  The clusterer pads/truncates through
+        ``predict_many`` for backwards compatibility.
         """
         if not tokens:
             return []
@@ -573,8 +574,7 @@ class SectionGrammar:
 
         vecs = [
             MeasureVector.from_array(
-                np.array(t[:8] if isinstance(t, (list, tuple)) else t,
-                        dtype=np.float64),
+                np.array(t if isinstance(t, (list, tuple)) else t, dtype=np.float64),
             )
             for t in tokens
         ]

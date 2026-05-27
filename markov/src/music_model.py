@@ -126,7 +126,7 @@ class MusicModel:
         vectors = [v for vecs in file_map.values() for v in vecs]
         log.info("Extracted %d measure vectors from %d files.", len(vectors), len(file_map))
 
-        # 2. Fit KMeans on flat vector list (8-D texture features only)
+        # 2. Fit KMeans on texture + melodic-contour features.
         clusterer = MeasureClusterer()
         clusterer.fit(vectors, n_clusters=n_clusters, random_seed=seed)
         log.info("Clusterer fitted: k=%d, inertia=%.3f", n_clusters, clusterer.inertia)
@@ -144,6 +144,8 @@ class MusicModel:
         clusterer.compute_note_statistics(file_map, file_labels)
         log.info("Computing per-cluster bass histograms ...")
         clusterer.compute_bass_histograms(file_map, file_labels)
+        log.info("Computing phrase-role statistics ...")
+        clusterer.compute_phrase_role_statistics(file_map, file_labels)
 
         # 4. Build sub-models
         log.info("Building transition matrix ...")
@@ -174,7 +176,7 @@ class MusicModel:
             for filepath, measure_vecs in file_map.items():
                 if len(measure_vecs) < miner_config.min_len * 2:
                     continue
-                # Feed 20-D full arrays (texture + pitch-class histogram)
+                # Feed full arrays (cluster features + pitch-class histogram)
                 full_arrays = [v.as_full_array().tolist() for v in measure_vecs]
                 try:
                     result = miner.analyze(full_arrays)
