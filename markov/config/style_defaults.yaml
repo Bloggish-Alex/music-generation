@@ -1,0 +1,42 @@
+# Hierarchical Music Generation — Style Configuration
+#
+# These are genuine musical style choices, not derivable from data.
+# Override via --config my_style.yaml on the CLI, or edit here.
+# All values shown are the defaults tuned on the Corelli corpus.
+
+cadence:
+  gap: 0.5                # beats of silence at section boundaries
+
+melody:
+  step_weights: [0.35, 0.25, 0.15, 0.15, 0.05, 0.03, 0.02]  # [0,±1,±2,±3,≥4]
+  step_upward_bias: 0.55  # probability of ascending (0.5 = symmetric)
+  register_window: 10     # semitone range per measure (± from centre)
+  pc_reject_threshold: 4.0  # if histogram[pc] * this < random, reduce leap
+
+rhythm:
+  min_duration: 0.25      # shortest allowed note (quarterLength)
+  max_rest_prob: 0.6      # cap on rest probability per note
+
+velocity:
+  peak_mean: 100
+  peak_std: 8
+  trough_mean: 55
+  trough_std: 10
+  peak_frac_min: 0.25     # where the peak hits in the bar
+  peak_frac_max: 0.55
+
+structure:
+  grid_size: 4             # snap section starts to N-bar boundaries
+  max_grid_pad: 3          # max bars padded to reach grid
+  multi_family_preference: 0.7  # probability of using multi-family template
+  grid_weights: [7, 2, 1]  # [grid-aligned, mostly-grid, irregular] template ratio
+
+variation:
+  progression_denominator: 3  # k/(k+N) curve steepness
+  min_strength: 0.02      # below this, skip transforms
+
+transforms:
+  diminution_bias: 0.6    # P(diminution) vs P(augmentation)
+  ornament_duration_frac: 0.3  # passing tone duration fraction
+  ornament_velocity_offset: 20  # velocity reduction for passing tones
+  min_normalized_duration: 0.1  # floor after normalization

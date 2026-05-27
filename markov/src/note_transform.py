@@ -23,6 +23,46 @@ import numpy as np
 if TYPE_CHECKING:
     from hierarchical_generator import NoteEvent
 
+# ---------------------------------------------------------------------------
+# Transform Parameters
+# ---------------------------------------------------------------------------
+# Co-adapted with hierarchical_generator.py parameters.  Documented so
+# they can be adjusted for new corpora or musical styles.
+
+# ---- transform selection weights ----
+# Each weight normalizes a centroid feature to [0, ~1].  The floor ensures
+# every transform has a non-zero chance of being selected.
+WEIGHT_FLOOR_SHIFT_REGISTER = 0.1
+WEIGHT_FLOOR_SCALE_DURATION = 0.1
+WEIGHT_FLOOR_ORNAMENT = 0.1
+WEIGHT_FLOOR_INVERT_CONTOUR = 0.05
+WEIGHT_FLOOR_DEVIATION = 0.1
+WEIGHT_DIV_NOTE_DENSITY = 8.0     # divisor for note_density → weight
+WEIGHT_DIV_ENTROPY = 2.0          # divisor for entropy → weight
+WEIGHT_DIV_DUR_VAR = 0.5          # divisor for dur_var → weight
+
+# ---- diminution / augmentation ----
+DIMINUTION_BIAS = 0.6             # probability of picking diminution over augmentation
+DIMINUTION_FACTOR = 0.5           # dur_ql *= (1 - strength * this) for diminution
+AUGMENTATION_FACTOR = 0.8         # dur_ql *= (1 + strength * this) for augmentation
+MIN_DURATION_FACTOR = 0.4         # minimum scale factor for duration
+MAX_DURATION_FACTOR = 2.5         # maximum scale factor for duration
+
+# ---- register shift ----
+REGISTER_SHIFT_SCALE = 12         # strength * this → semitones of shift
+
+# ---- ornament ----
+ORNAMENT_DURATION_FRACTION = 0.3  # passing tone duration as fraction of target
+ORNAMENT_VELOCITY_OFFSET = 20     # velocity reduction for passing tones
+
+# ---- deviation ----
+DEVIATION_PITCH_STD = 2.5         # std of pitch jitter (multiplied by strength)
+DEVIATION_DUR_STD = 0.15         # std of duration jitter (multiplied by strength)
+DEVIATION_VEL_STD = 3             # std of velocity jitter
+
+# ---- normalization ----
+MIN_NORMALIZED_DURATION = 0.1     # shortest allowed duration after normalization
+
 TRANSFORM_REGISTRY: Dict[str, Callable] = {}
 
 
@@ -260,13 +300,19 @@ def select_transforms(
     syncopation = float(avg_centroid[6])
     entropy = float(avg_centroid[7])
 
-    # Transform selection weights derived from centroid features
+    # Transform selection weights derived from centroid features.
+    # Normalization divisors are computed from the training data (max
+    # observed value per feature), with safe fallbacks.
+    max_density = float(centroids[:, 0].max()) or 8.0
+    max_entropy = float(centroids[:, 7].max()) or 3.5
+    max_dur_var = float(centroids[:, 2].max()) or 0.5
+
     weights = {
-        "shift_register":  max(0.1, 1.0 - silence_ratio),
-        "scale_duration":  max(0.1, note_density / 8.0),
-        "ornament":        max(0.1, entropy / 2.0),
-        "invert_contour":  max(0.05, syncopation),
-        "deviation":       max(0.1, dur_var / 0.5),
+        "shift_register":  max(WEIGHT_FLOOR_SHIFT_REGISTER, 1.0 - silence_ratio),
+        "scale_duration":  max(WEIGHT_FLOOR_SCALE_DURATION, note_density / max_density),
+        "ornament":        max(WEIGHT_FLOOR_ORNAMENT, entropy / max_entropy),
+        "invert_contour":  max(WEIGHT_FLOOR_INVERT_CONTOUR, syncopation),
+        "deviation":       max(WEIGHT_FLOOR_DEVIATION, dur_var / max_dur_var),
     }
 
     # Normalize to probabilities
