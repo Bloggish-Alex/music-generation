@@ -8,7 +8,7 @@ cadence:
   gap: 0.5                # beats of silence at section boundaries
 
 melody:
-  step_weights: [0.35, 0.25, 0.15, 0.15, 0.05, 0.03, 0.02]  # [0,±1,±2,±3,≥4]
+  # step_weights: now derived per-cluster from training data (step_histograms)
   step_upward_bias: 0.55  # probability of ascending (0.5 = symmetric)
   register_window: 10     # semitone range per measure (± from centre)
   pc_reject_threshold: 4.0  # if histogram[pc] * this < random, reduce leap

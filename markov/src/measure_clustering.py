@@ -137,6 +137,13 @@ class MeasureVector:
     measure_index: int = 0
     cluster_label: int = -1
 
+    # Per-measure note statistics (for data-driven generation)
+    step_histogram: np.ndarray = field(
+        default_factory=lambda: np.zeros(7, dtype=np.float64),
+    )  # intervals: [0, 1, 2, 3, 4-5, 6-8, 9+] semitones
+    velocity_mean: float = 0.0
+    velocity_std: float = 0.0
+
     def as_array(self) -> np.ndarray:
         """Return the 8 texture features as a numpy array (float64).
 
@@ -193,6 +200,35 @@ class MeasureVector:
 # ---------------------------------------------------------------------------
 
 
+def _step_histogram(notes: List[Dict[str, Any]]) -> np.ndarray:
+    """7-bin histogram of absolute intervals between consecutive notes."""
+    hist = np.zeros(7, dtype=np.float64)
+    sorted_notes = sorted(
+        [nd for nd in notes if nd.get("pitch", -1) >= 0],
+        key=lambda nd: nd["onset_in_measure"],
+    )
+    for i in range(len(sorted_notes) - 1):
+        interval = abs(sorted_notes[i + 1]["pitch"] - sorted_notes[i]["pitch"])
+        if interval == 0:
+            hist[0] += 1
+        elif interval == 1:
+            hist[1] += 1
+        elif interval == 2:
+            hist[2] += 1
+        elif interval == 3:
+            hist[3] += 1
+        elif interval <= 5:
+            hist[4] += 1
+        elif interval <= 8:
+            hist[5] += 1
+        else:
+            hist[6] += 1
+    total = hist.sum()
+    if total > 0:
+        hist /= total
+    return hist
+
+
 class MeasureExtractor:
     """Parse music files and extract per-measure feature vectors."""
 
@@ -222,7 +258,7 @@ class MeasureExtractor:
         ts_str = self._primary_time_signature(score)
 
         # Collect all notes/rests from all parts
-        all_notes: List[Dict[str, Any]] = []  # {offset, quarterLength, pitch, is_rest}
+        all_notes: List[Dict[str, Any]] = []  # {offset, quarterLength, pitch, is_rest, velocity}
         for part in score.parts:
             for el in part.flatten().notesAndRests:
                 offset = float(el.offset)
@@ -230,19 +266,23 @@ class MeasureExtractor:
                 if el.isRest:
                     all_notes.append({
                         "offset": offset, "quarterLength": ql,
-                        "pitch": -1, "is_rest": True,
+                        "pitch": -1, "is_rest": True, "velocity": 0,
                     })
                 elif el.isNote:
                     midi = el.pitch.midi if el.pitch else 60
+                    vel = el.volume.velocity if el.volume.velocity else 80
                     all_notes.append({
                         "offset": offset, "quarterLength": ql,
                         "pitch": int(midi), "is_rest": False,
+                        "velocity": int(vel),
                     })
                 elif el.isChord:
                     for p in el.pitches:
+                        vel = el.volume.velocity if el.volume.velocity else 80
                         all_notes.append({
                             "offset": offset, "quarterLength": ql,
                             "pitch": p.midi, "is_rest": False,
+                            "velocity": int(vel),
                         })
 
         # Group by measure
@@ -270,6 +310,7 @@ class MeasureExtractor:
                     "pitch": e["pitch"],
                     "quarterLength": e["quarterLength"],
                     "onset_in_measure": onset_in_measure,
+                    "velocity": e.get("velocity", 80),
                 })
 
             if not notes_data:
@@ -349,6 +390,9 @@ class MeasureExtractor:
             pitch_class_histogram=pc_hist,
             file_path=measure.file_path,
             measure_index=measure.measure_index,
+            step_histogram=_step_histogram(notes),
+            velocity_mean=float(np.mean([nd["velocity"] for nd in notes])),
+            velocity_std=float(np.std([nd["velocity"] for nd in notes])),
         )
 
     @staticmethod
@@ -514,6 +558,9 @@ class MeasureClusterer:
         self._inertia: float = 0.0
         self._labels: Optional[np.ndarray] = None
         self.pitch_histograms: Optional[np.ndarray] = None  # (n_clusters, 12)
+        self.step_histograms: Optional[np.ndarray] = None   # (n_clusters, 7)
+        self.velocity_means: Optional[np.ndarray] = None     # (n_clusters,)
+        self.velocity_stds: Optional[np.ndarray] = None      # (n_clusters,)
 
     # -- properties ----------------------------------------------------------
 
@@ -642,6 +689,51 @@ class MeasureClusterer:
         self.pitch_histograms = accum
         return accum
 
+    def compute_note_statistics(
+        self,
+        file_map: Dict[str, List["MeasureVector"]],
+        file_labels: List[List[int]],
+    ) -> None:
+        """Compute per-cluster average step histograms and velocity stats.
+
+        Stores results in ``self.step_histograms`` (k × 7),
+        ``self.velocity_means`` (k,), and ``self.velocity_stds`` (k,).
+        """
+        self._require_fit()
+        n_clusters = self._centroids_raw.shape[0] if self._centroids_raw is not None else 0
+        if n_clusters == 0:
+            return
+
+        step_accum = np.zeros((n_clusters, 7), dtype=np.float64)
+        vel_sums = np.zeros(n_clusters, dtype=np.float64)
+        vel_sq_sums = np.zeros(n_clusters, dtype=np.float64)
+        counts = np.zeros(n_clusters, dtype=np.int64)
+
+        for vecs, labels in zip(file_map.values(), file_labels):
+            for vec, label in zip(vecs, labels):
+                if 0 <= label < n_clusters:
+                    step_accum[label] += vec.step_histogram
+                    vel_sums[label] += vec.velocity_mean
+                    vel_sq_sums[label] += vec.velocity_std ** 2
+                    counts[label] += 1
+
+        for c in range(n_clusters):
+            if counts[c] > 0:
+                step_accum[c] /= counts[c]
+                total = float(step_accum[c].sum())
+                if total > 0:
+                    step_accum[c] /= total
+
+        self.step_histograms = step_accum
+        self.velocity_means = np.divide(
+            vel_sums, counts, where=counts > 0,
+            out=np.full_like(vel_sums, 80.0),
+        )
+        self.velocity_stds = np.sqrt(
+            np.divide(vel_sq_sums, counts, where=counts > 0,
+                      out=np.full_like(vel_sq_sums, 100.0))
+        )
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -694,6 +786,9 @@ class MeasureClusterer:
             "inertia": self._inertia,
             "labels": self._labels,
             "pitch_histograms": self.pitch_histograms,
+            "step_histograms": self.step_histograms,
+            "velocity_means": self.velocity_means,
+            "velocity_stds": self.velocity_stds,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -711,6 +806,9 @@ class MeasureClusterer:
         obj._inertia = state.get("inertia", 0.0)
         obj._labels = state.get("labels")
         obj.pitch_histograms = state.get("pitch_histograms")
+        obj.step_histograms = state.get("step_histograms")
+        obj.velocity_means = state.get("velocity_means")
+        obj.velocity_stds = state.get("velocity_stds")
         return obj
 
 

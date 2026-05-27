@@ -71,8 +71,8 @@ CADENCE_GAP = 0.5          # beats of silence at section boundaries (4/4 eighth-
 
 # ---- melody / pitch walk ----
 
-# Step-size probabilities: [0, ±1, ±2, ±3, ≥4] semitones.  Must sum to 1.
-STEP_WEIGHTS = [0.35, 0.25, 0.15, 0.15, 0.05, 0.03, 0.02]
+# Step-size distribution: now derived per-cluster from training data.
+# See clusterer.step_histograms — computed during MusicModel.fit().
 STEP_UPWARD_BIAS = 0.55          # probability of ascending vs descending
 REGISTER_WINDOW = 10             # semi-octave range per measure (±10 from centre)
 REGISTER_LO = 28                 # MIDI E2 — absolute floor
@@ -164,6 +164,7 @@ class ClusterNoteSampler:
         self,
         centroids: np.ndarray,               # (n_clusters, 8)
         pitch_histograms: np.ndarray | None,  # (n_clusters, 12) or None
+        step_histograms: np.ndarray | None = None,  # (n_clusters, 7) or None
     ) -> None:
         if centroids.ndim != 2 or centroids.shape[1] < 8:
             raise ValueError("centroids must be (n_clusters, >=8)")
@@ -175,6 +176,15 @@ class ClusterNoteSampler:
         else:
             self._pitch_hists = np.full(
                 (self._n_clusters, 12), 1.0 / 12, dtype=np.float64,
+            )
+
+        if step_histograms is not None and step_histograms.shape == (self._n_clusters, 7):
+            self._step_hists = step_histograms
+        else:
+            # Fallback: uniform + slight bias toward smaller steps
+            self._step_hists = np.array(
+                [[0.20, 0.18, 0.18, 0.15, 0.12, 0.10, 0.07]] * self._n_clusters,
+                dtype=np.float64,
             )
 
     # ------------------------------------------------------------------
@@ -298,9 +308,9 @@ class ClusterNoteSampler:
             if note_idx == 1:
                 pitch = current_pitch
             else:
-                # Step size: prefer small steps (≤ 2 semitones), allow small leaps
-                step_weights = [0.35, 0.25, 0.15, 0.15, 0.05, 0.03, 0.02]  # 0..6+ semitones
-                step_dir = 1 if rng.random() < 0.55 else -1  # slight upward bias
+                # Step size: from per-cluster interval distribution (learned from data)
+                step_weights = self._step_hists[c]
+                step_dir = 1 if rng.random() < STEP_UPWARD_BIAS else -1
                 max_step = int(rng.choice(len(step_weights), p=step_weights))
                 step = rng.randint(0, max_step + 3) * step_dir
 
@@ -475,7 +485,8 @@ class HierarchicalGenerator:
             raise ValueError("Model clusterer has no centroids — is it trained?")
 
         pitch_hists = getattr(model.clusterer, "pitch_histograms", None)
-        self.note_sampler = ClusterNoteSampler(centroids, pitch_hists)
+        step_hists = getattr(model.clusterer, "step_histograms", None)
+        self.note_sampler = ClusterNoteSampler(centroids, pitch_hists, step_hists)
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
 

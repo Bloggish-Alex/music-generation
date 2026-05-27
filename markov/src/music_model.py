@@ -137,9 +137,11 @@ class MusicModel:
             music_dir, clusterer, extractor, file_patterns
         )
 
-        # 3b. Learn per-cluster pitch-class histograms
+        # 3b. Learn per-cluster statistics from note-level data
         log.info("Computing per-cluster pitch histograms ...")
         clusterer.compute_pitch_histograms(file_map, file_labels)
+        log.info("Computing per-cluster note statistics ...")
+        clusterer.compute_note_statistics(file_map, file_labels)
 
         # 4. Build sub-models
         log.info("Building transition matrix ...")
