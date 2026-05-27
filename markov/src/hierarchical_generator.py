@@ -1024,7 +1024,47 @@ class HierarchicalGenerator:
 
             cycle += 1
 
+        self._end_with_return(labels, event_log, fs, variation_strength, rng)
         return labels, event_log
+
+    def _end_with_return(
+        self,
+        labels: List[int],
+        event_log: List[Dict[str, Any]],
+        fs: Any,
+        variation_strength: float,
+        rng: np.random.RandomState,
+    ) -> None:
+        """Replace trailing FREE blocks with a RETURN of the primary theme."""
+        if not event_log or event_log[-1]["kind"] != "FREE":
+            return
+
+        grammar = self.grammar
+        primary_label = fs.label_sequence[0]
+
+        # Count and remove trailing FREE
+        free_len = 0
+        while event_log and event_log[-1]["kind"] == "FREE":
+            free_len += event_log[-1]["length"]
+            event_log.pop()
+        del labels[-free_len:]
+
+        # Fill with RETURN of the primary section
+        content: List[int] = []
+        while len(content) < free_len:
+            content.extend(grammar.generate_section_content(
+                primary_label, fs, vary=True,
+                variation_strength=variation_strength,
+                seed=None if rng is None else int(rng.randint(0, 2 ** 31 - 1)),
+            ))
+        labels.extend(content[:free_len])
+        event_log.append({
+            "kind": "SECTION",
+            "label": primary_label,
+            "role": "RETURN",
+            "length": free_len,
+            "labels": content[:free_len],
+        })
 
     # ------------------------------------------------------------------
     # Internal: MIDI output via mido
