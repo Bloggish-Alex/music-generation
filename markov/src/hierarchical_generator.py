@@ -388,6 +388,7 @@ class HierarchicalGenerator:
 
         pitch_hists = getattr(model.clusterer, "pitch_histograms", None)
         self.note_sampler = ClusterNoteSampler(centroids, pitch_hists)
+        self._current_variation_profile: Optional[List] = None
 
     @property
     def grammar(self):
@@ -476,8 +477,14 @@ class HierarchicalGenerator:
         time_signature: Tuple[int, int] = (4, 4),
         tempo: int = 120,
         seed: Optional[int] = None,
+        enable_variation: bool = True,
     ) -> List[int]:
         """Generate a full MIDI file.
+
+        Args:
+            enable_variation: If True (default), apply controlled transforms
+                to non-NEW section occurrences.  Set to False for
+                exact repeats only.
 
         Returns the cluster label timeline used.
         """
@@ -490,100 +497,275 @@ class HierarchicalGenerator:
             seed=seed,
         )
 
-        # 2. Build section-context map: measure_idx → (section_label, bar_in_section, role, is_end)
-        measure_context: List[Tuple[str, int, str, bool]] = []
-        measure_idx = 0
+        # 2. Build measure-level context:
+        #    (section_label, bar_in_section, role) for each measure
+        measure_context: List[Tuple[str, int, str]] = []
         for event in event_log:
             length = event["length"]
             if event["kind"] == "SECTION":
-                label = event["label"]
-                role = event["role"]
                 for bar_in_sec in range(length):
-                    is_end = (bar_in_sec == length - 1)
-                    measure_context.append((label, bar_in_sec, role, is_end))
+                    measure_context.append(
+                        (event["label"], bar_in_sec, event["role"]))
             elif event["kind"] == "FREE":
-                for bar_in_free in range(length):
-                    measure_context.append(("FREE", measure_idx, "FREE", False))
+                for _ in range(length):
+                    measure_context.append(("FREE", 0, "FREE"))
             else:
-                for k in range(length):
-                    measure_context.append(("FLAT", measure_idx + k, "FLAT", False))
-            measure_idx += length
+                for _ in range(length):
+                    measure_context.append(("FLAT", 0, "FLAT"))
 
-        # 3. Per-measure notes, seeded by section identity
-        all_notes: List[NoteEvent] = []
-        base_seed = seed if seed is not None else 0
-
-        for i, cluster_id in enumerate(labels):
-            if i < len(measure_context):
-                sec_label, bar_in_sec, role, is_section_end = measure_context[i]
-            else:
-                sec_label, bar_in_sec, role, is_section_end = "FLAT", i, "FLAT", False
-
-            # Breathe right before each section return — only FREE/PAD
-            # bars that immediately precede a SECTION start.
-            if not is_section_end and role in ("FREE", "FLAT") and i + 1 < len(measure_context):
+        # 2b. Pre-compute breathing points:
+        #     a bar breathes if it is the last bar of a SECTION, or a
+        #     FREE/FLAT bar immediately before a SECTION start.
+        #     The final bar of the piece never breathes.
+        n = len(measure_context)
+        breathing = [False] * n
+        for i in range(n):
+            sl, bi, role = measure_context[i]
+            if role not in ("FREE", "FLAT") and bi > 0:
+                # Find section length for this label
+                sec_len = sum(1 for j in range(i - bi, n)
+                              if measure_context[j][0] == sl)
+                if bi == sec_len - 1:  # last bar of this section
+                    breathing[i] = True
+            elif role in ("FREE", "FLAT") and i + 1 < n:
                 next_role = measure_context[i + 1][2]
                 if next_role not in ("FREE", "FLAT"):
-                    is_section_end = True
+                    breathing[i] = True
+        if breathing:
+            breathing[-1] = False  # end of piece never breathes
 
-            # Derive seed from section identity — same seed for all roles
-            # so RETURN/VARIANT preserve the original's contour.
-            if sec_label in ("FREE", "FLAT"):
-                measure_seed = _stable_hash(base_seed, sec_label, i)
-                _perturb = 0.0
+        # 3. Per-measure note generation
+        all_notes: List[List[NoteEvent]] = []
+        base_seed = seed if seed is not None else 0
+        occurrence_count: Dict[str, int] = {}
+
+        _select = _apply = None
+        if enable_variation:
+            from note_transform import select_transforms, apply_variation
+            _select = select_transforms
+            _apply = apply_variation
+
+        for i, cluster_id in enumerate(labels):
+            sl, bi, role = measure_context[i]
+            is_end = breathing[i]
+
+            # Seed from section identity (FREE/FLAT use per-measure seed)
+            if role in ("FREE", "FLAT"):
+                measure_seed = _stable_hash(base_seed, "FREE", i)
             else:
-                measure_seed = _stable_hash(base_seed, sec_label, bar_in_sec)
-                if role in ("NEW", "REPEAT"):
-                    _perturb = 0.0
-                elif role == "RETURN":
-                    _perturb = 0.25
-                elif role == "VARIANT":
-                    _perturb = 0.5
-                else:
-                    _perturb = 0.0
+                measure_seed = _stable_hash(base_seed, sl, bi)
 
             notes = self.note_sampler.sample_measure(
                 cluster_label=cluster_id,
                 time_signature=time_signature,
                 seed=measure_seed,
-                perturb=_perturb,
-                is_section_end=is_section_end,
+                perturb=0.0,
+                is_section_end=is_end,
             )
+
+            # Controlled variation: non-NEW sections get transforms.
+            # Strength s is data-driven: average cluster entropy scaled
+            # by an information-theoretic progression k/(k+1).
+            if (_select is not None and _apply is not None
+                    and role not in ("FREE", "FLAT", "NEW")):
+                if bi == 0:
+                    k = occurrence_count.get(sl, 0)
+                    if k > 0:
+                        sec_len = sum(1 for j in range(i, n)
+                                      if measure_context[j][0] == sl)
+                        sec_labels = labels[i:i + sec_len]
+                        s = (self._section_entropy(sec_labels) / 3.5
+                             ) * (k / (k + 3))
+                        self._current_variation_profile = _select(
+                            self.model.clusterer.centroids,
+                            sec_labels, s,
+                        ) if s > 0.02 else None
+                    else:
+                        self._current_variation_profile = None
+                if self._current_variation_profile:
+                    notes = _apply(notes, self._current_variation_profile)
+            if role not in ("FREE", "FLAT") and bi == 0:
+                occurrence_count[sl] = occurrence_count.get(sl, 0) + 1
+
             all_notes.append(notes)
 
-        # 3b. Shift the measure after each cadence by the gap amount so
-        # the silence after the bar boundary is actually audible.  With
-        # explicit-offset MIDI output, a rest and a note at the same
-        # offset would collide — the note wins, erasing the gap.
-        _GAP = 0.5
-        for i in range(len(all_notes) - 1):
-            # Check if this measure had is_section_end set
-            sl, bi, role, is_end = (measure_context[i] if i < len(measure_context)
-                                     else ("", 0, "", False))
-            if not is_end and role in ("FREE", "FLAT") and i + 1 < len(measure_context):
-                if measure_context[i + 1][2] not in ("FREE", "FLAT"):
-                    is_end = True
-            if i < len(measure_context) and not is_end:
-                # original is_end from section last bar
-                is_end = measure_context[i][3]
-            if is_end:
-                shifted = []
-                for nev in all_notes[i + 1]:
-                    shifted.append(NoteEvent(
-                        pitch=nev.pitch,
-                        duration_ql=nev.duration_ql,
-                        velocity=nev.velocity,
-                        beat_offset=nev.beat_offset + _GAP,
-                    ))
-                all_notes[i + 1] = shifted
-
-        # 4. Write MIDI
+        # 4. Write MIDI via mido (silence = absence of note events)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_midi(all_notes, output_path, tempo, time_signature)
-        log.info("Wrote MIDI to %s (%d notes).", output_path, len(all_notes))
+        log.info("Wrote MIDI to %s (%d measures).", output_path, len(all_notes))
+
+        # 5. Save structure visualization
+        plot_path = output_path.with_suffix('.png')
+        self.plot_structure(labels, event_log, plot_path)
 
         return labels
+
+    def _section_entropy(self, sec_labels: List[int]) -> float:
+        """Average entropy across the cluster labels in a section."""
+        centroids = self.model.clusterer.centroids
+        indices = [c for c in sec_labels if 0 <= c < len(centroids)]
+        if not indices:
+            return 0.0
+        return float(centroids[indices, 7].mean())
+
+    # ------------------------------------------------------------------
+    # Structure visualization
+    # ------------------------------------------------------------------
+
+    def plot_structure(
+        self,
+        labels: List[int],
+        event_log: List[Dict[str, Any]],
+        save_path: Union[str, Path],
+    ) -> None:
+        """Render the generated structure as a color-coded form diagram.
+
+        Each measure is a colored square; section blocks are grouped and
+        labeled (A, B, FREE).  Cadence boundaries are marked with gaps.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle, FancyBboxPatch
+
+        n_clusters = self.model.n_clusters
+        n_measures = len(labels)
+        cmap = plt.get_cmap("tab10")
+        cluster_colors = [cmap(i % 10) for i in range(n_clusters)]
+
+        # Layout: rows of measures, 16 per row
+        measures_per_row = 16
+        n_rows = (n_measures + measures_per_row - 1) // measures_per_row
+        square_w = 0.35
+        square_h = 0.30
+        gap = 0.03
+        row_gap = 0.08
+        section_label_offset = 0.12
+
+        fig_w = measures_per_row * (square_w + gap) + 3.0
+        fig_h = n_rows * (square_h + row_gap + section_label_offset) + 1.5
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ax.set_xlim(0, measures_per_row * (square_w + gap) + 2.5)
+        ax.set_ylim(-n_rows * (square_h + row_gap + section_label_offset) - 0.5, 0.5)
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        # Build measure → section mapping
+        measure_section: List[Optional[str]] = [None] * n_measures
+        measure_role: List[Optional[str]] = [None] * n_measures
+        pos = 0
+        for event in event_log:
+            length = event["length"]
+            if event["kind"] == "SECTION":
+                for k in range(length):
+                    if pos + k < n_measures:
+                        measure_section[pos + k] = event["label"]
+                        measure_role[pos + k] = event.get("role", "")
+            elif event["kind"] == "FREE":
+                for k in range(length):
+                    if pos + k < n_measures:
+                        measure_section[pos + k] = "FREE"
+            pos += length
+
+        # Draw measures row by row
+        for row in range(n_rows):
+            y_base = -row * (square_h + row_gap + section_label_offset)
+            for col in range(measures_per_row):
+                idx = row * measures_per_row + col
+                if idx >= n_measures:
+                    break
+                x = col * (square_w + gap)
+                y = y_base
+                c = labels[idx]
+                color = cluster_colors[c]
+                rect = Rectangle(
+                    (x, y), square_w, square_h,
+                    facecolor=color, edgecolor="white", linewidth=0.3,
+                )
+                ax.add_patch(rect)
+
+                # Section start marker
+                if idx == 0 or (idx > 0 and measure_section[idx] != measure_section[idx - 1]):
+                    ax.plot(
+                        [x - gap, x - gap],
+                        [y - 0.05, y + square_h + 0.05],
+                        color="#333333", linewidth=1.0,
+                    )
+
+            # Section labels above each row
+            prev_sec = None
+            for col in range(measures_per_row):
+                idx = row * measures_per_row + col
+                if idx >= n_measures:
+                    break
+                sec = measure_section[idx]
+                if sec is not None and sec != prev_sec:
+                    x_start = col * (square_w + gap)
+                    # Span to end of this contiguous block
+                    end_col = col
+                    while (end_col + 1 < measures_per_row and
+                           row * measures_per_row + end_col + 1 < n_measures and
+                           measure_section[row * measures_per_row + end_col + 1] == sec):
+                        end_col += 1
+                    x_end = end_col * (square_w + gap) + square_w
+                    x_mid = (x_start + x_end) / 2
+                    label_text = f"{sec}"
+                    if measure_role[idx] and measure_role[idx] not in ("NEW",):
+                        label_text = f"{sec}'" if measure_role[idx] == "RETURN" else sec
+                    ax.text(
+                        x_mid, y_base + square_h + 0.06,
+                        label_text, ha="center", va="bottom",
+                        fontsize=7, color="#333333", fontweight="bold",
+                    )
+                    prev_sec = sec
+
+        # 4-bar and 8-bar vertical grid lines
+        for col in [4, 8, 12]:
+            x = col * (square_w + gap) - gap
+            ax.plot([x, x], [0.2, -n_rows * (square_h + row_gap + section_label_offset)],
+                    color="#aaaaaa", linewidth=0.5, linestyle="--", alpha=0.5)
+        for col in [8]:
+            x = col * (square_w + gap) - gap
+            ax.plot([x, x], [0.2, -n_rows * (square_h + row_gap + section_label_offset)],
+                    color="#666666", linewidth=0.8, linestyle="--")
+
+        # Bar number labels (every 4 bars)
+        for row in range(n_rows):
+            for col in range(0, measures_per_row, 4):
+                idx = row * measures_per_row + col
+                if idx < n_measures:
+                    x = col * (square_w + gap) + square_w / 2
+                    y = -row * (square_h + row_gap + section_label_offset)
+                    ax.text(
+                        x, y - 0.06, str(idx + 1),
+                        ha="center", va="top", fontsize=5, color="#999999",
+                    )
+
+        # Legend
+        legend_handles = [
+            Rectangle((0, 0), 1, 1, facecolor=cluster_colors[c], edgecolor="white")
+            for c in range(n_clusters)
+        ]
+        legend_labels = [f"Cluster {c}" for c in range(n_clusters)]
+        ax.legend(
+            legend_handles, legend_labels,
+            loc="upper right", fontsize=6, ncol=min(4, n_clusters),
+            markerscale=0.6, framealpha=0.8,
+        )
+
+        # Title
+        n_sections = sum(1 for e in event_log if e["kind"] == "SECTION")
+        n_free = sum(1 for e in event_log if e["kind"] == "FREE")
+        ax.set_title(
+            f"Generated Structure — {n_measures} measures, "
+            f"{n_sections} sections, {n_free} FREE blocks",
+            fontsize=11, pad=6,
+        )
+
+        fig.tight_layout(pad=0.5)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
 
     # ------------------------------------------------------------------
     # Internal: grammar-aware timeline
@@ -834,6 +1016,11 @@ def _build_parser() -> "argparse.ArgumentParser":
         default=42,
         help="Random seed.",
     )
+    parser.add_argument(
+        "--no-variation",
+        action="store_true",
+        help="Disable controlled variation transforms (exact repeats only).",
+    )
     return parser
 
 
@@ -875,6 +1062,7 @@ def main() -> None:
         time_signature=time_sig,
         tempo=args.tempo,
         seed=args.seed,
+        enable_variation=not args.no_variation,
     )
 
     print(f"\nGenerated {len(labels)} measures → {args.output}")
