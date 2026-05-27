@@ -692,6 +692,9 @@ class HierarchicalGenerator:
 
             all_notes.append(notes)
 
+        # 3c. Rendering: clamp overlaps on every measure
+        self._clamp_overlaps(all_notes)
+
         # 4. Write MIDI via mido (silence = absence of note events)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -711,6 +714,33 @@ class HierarchicalGenerator:
         if not indices:
             return 0.0
         return float(centroids[indices, 7].mean())
+
+    def _clamp_overlaps(self, all_notes: List[List[NoteEvent]]) -> None:
+        """Rendering constraint: clamp per-measure note durations so
+        consecutive notes do not overlap beyond the configured maximum."""
+        max_ov = self.config.get("monophonic", {}).get("max_overlap", 0.15)
+        _min_dur = 0.1
+        for mi in range(len(all_notes)):
+            sounding = sorted(
+                [n for n in all_notes[mi] if n.pitch >= 0],
+                key=lambda n: n.beat_offset,
+            )
+            for i in range(len(sounding) - 1):
+                if sounding[i + 1].beat_offset - sounding[i].beat_offset < 0.02:
+                    continue
+                cur_end = sounding[i].beat_offset + sounding[i].duration_ql
+                allowed = sounding[i + 1].beat_offset + max_ov
+                if cur_end > allowed:
+                    sounding[i] = NoteEvent(
+                        pitch=sounding[i].pitch,
+                        duration_ql=max(_min_dur,
+                                        allowed - sounding[i].beat_offset),
+                        velocity=sounding[i].velocity,
+                        beat_offset=sounding[i].beat_offset,
+                    )
+            rests = [n for n in all_notes[mi] if n.pitch < 0]
+            all_notes[mi] = sorted(sounding + rests,
+                                   key=lambda n: n.beat_offset)
 
     # ------------------------------------------------------------------
     # Structure visualization

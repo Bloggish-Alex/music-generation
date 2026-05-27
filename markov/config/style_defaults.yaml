@@ -35,6 +35,9 @@ variation:
   progression_denominator: 3  # k/(k+N) curve steepness
   min_strength: 0.02      # below this, skip transforms
 
+monophonic:
+  max_overlap: 0.15       # beats. 0=strict, 0.15=legato, higher=loose
+
 transforms:
   diminution_bias: 0.6    # P(diminution) vs P(augmentation)
   ornament_duration_frac: 0.3  # passing tone duration fraction

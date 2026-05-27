@@ -342,8 +342,7 @@ def apply_variation(
 
     After transforms, note durations are normalized so the total equals
     the original total duration.  This preserves cadence gaps and breathing
-    space that the note sampler created, while keeping the measure grid
-    intact regardless of which transforms are applied.
+    space that the note sampler created.
 
     Args:
         notes: Original NoteEvent list for a measure.
@@ -376,7 +375,7 @@ def apply_variation(
     for n in result:
         normalized.append(_NoteEvent(
             pitch=n.pitch,
-            duration_ql=max(0.1, n.duration_ql * scale),
+            duration_ql=max(MIN_NORMALIZED_DURATION, n.duration_ql * scale),
             velocity=n.velocity,
             beat_offset=n.beat_offset * scale if n.beat_offset > 0 else 0.0,
         ))
