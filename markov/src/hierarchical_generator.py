@@ -353,66 +353,76 @@ class ClusterNoteSampler:
             beat += dur
             remaining -= dur
 
-        # --- section-end breathing space ---
-        # Force the last note to end *gap* beats before the bar boundary.
-        # The natural silence between note_off and the next bar's note_on
-        # creates the audible gap.  No rest is needed with mido output.
-        if is_section_end and notes:
-            gap = 0.5
-            for idx in range(len(notes) - 1, -1, -1):
-                if notes[idx].pitch >= 0:
-                    n = notes[idx]
-                    new_dur = bar_length_ql - gap - n.beat_offset
-                    if new_dur > 0:
-                        notes[idx] = NoteEvent(
-                            pitch=n.pitch,
-                            duration_ql=new_dur,
-                            velocity=max(30, n.velocity - 15),
-                            beat_offset=n.beat_offset,
-                        )
-                    else:
-                        # Note starts too late — remove it and keep searching
-                        del notes[idx]
-                        continue
-                    del notes[idx + 1:]
-                    break
-
-        # --- post-generation perturbation (for RETURN / VARIANT) ---
-        if perturb > 0.0 and notes:
-            perturb_rng = np.random.RandomState(
-                None if seed is None else seed + 999999,
-            )
-            for idx in range(len(notes)):
-                n = notes[idx]
-                if n.pitch < 0:
-                    continue  # don't perturb rests
-
-                # Pitch: shift by ±1-2 semitones with probability = perturb
-                if perturb_rng.random() < perturb:
-                    shift = int(perturb_rng.choice([-2, -1, 1, 2]))
-                    new_pitch = max(lo_pitch, min(hi_pitch, n.pitch + shift))
-                    # Duration: sometimes adjust to a neighbor
-                    dur = n.duration_ql
-                    if perturb_rng.random() < perturb * 0.5:
-                        neighbors = [
-                            d for d in _USABLE_DUR_VALUES
-                            if abs(d - dur) < dur * 0.6 and d != dur
-                        ]
-                        if neighbors:
-                            dur = float(perturb_rng.choice(neighbors))
-                    # Velocity: small jitter
-                    vel = n.velocity
-                    if vel > 0:
-                        vel = max(35, min(127, int(vel + perturb_rng.normal(0, 5))))
-
-                    notes[idx] = NoteEvent(
-                        pitch=new_pitch,
-                        duration_ql=dur,
-                        velocity=vel,
-                        beat_offset=n.beat_offset,
-                    )
+        self._apply_breathing(notes, is_section_end, bar_length_ql)
+        self._apply_perturbation(notes, perturb, lo_pitch, hi_pitch, seed)
 
         return notes
+
+    @staticmethod
+    def _apply_breathing(
+        notes: List[NoteEvent],
+        is_section_end: bool,
+        bar_length_ql: float,
+    ) -> None:
+        """Shorten the last note to create a gap at section boundaries."""
+        if not is_section_end or not notes:
+            return
+        gap = 0.5
+        for idx in range(len(notes) - 1, -1, -1):
+            if notes[idx].pitch >= 0:
+                n = notes[idx]
+                new_dur = bar_length_ql - gap - n.beat_offset
+                if new_dur > 0:
+                    notes[idx] = NoteEvent(
+                        pitch=n.pitch,
+                        duration_ql=new_dur,
+                        velocity=max(30, n.velocity - 15),
+                        beat_offset=n.beat_offset,
+                    )
+                else:
+                    del notes[idx]
+                    continue
+                del notes[idx + 1:]
+                break
+
+    @staticmethod
+    def _apply_perturbation(
+        notes: List[NoteEvent],
+        perturb: float,
+        lo_pitch: int,
+        hi_pitch: int,
+        seed: int | None,
+    ) -> None:
+        """Post-generation random perturbation for RETURN / VARIANT."""
+        if perturb <= 0.0 or not notes:
+            return
+        rng = np.random.RandomState(
+            None if seed is None else seed + 999999,
+        )
+        for idx in range(len(notes)):
+            n = notes[idx]
+            if n.pitch < 0:
+                continue
+            if rng.random() < perturb:
+                shift = int(rng.choice([-2, -1, 1, 2]))
+                new_pitch = max(lo_pitch, min(hi_pitch, n.pitch + shift))
+                dur = n.duration_ql
+                if rng.random() < perturb * 0.5:
+                    neighbors = [
+                        d for d in _USABLE_DUR_VALUES
+                        if abs(d - dur) < dur * 0.6 and d != dur
+                    ]
+                    if neighbors:
+                        dur = float(rng.choice(neighbors))
+                vel = n.velocity
+                if vel > 0:
+                    vel = max(35, min(127, int(vel + rng.normal(0, 5))))
+                notes[idx] = NoteEvent(
+                    pitch=new_pitch,
+                    duration_ql=dur,
+                    velocity=vel,
+                    beat_offset=n.beat_offset,
+                )
 
     # ------------------------------------------------------------------
     # Internal
@@ -600,42 +610,10 @@ class HierarchicalGenerator:
             seed=seed,
         )
 
-        # 2. Build measure-level context:
-        #    (section_label, bar_in_section, role) for each measure
-        measure_context: List[Tuple[str, int, str]] = []
-        for event in event_log:
-            length = event["length"]
-            if event["kind"] == "SECTION":
-                for bar_in_sec in range(length):
-                    measure_context.append(
-                        (event["label"], bar_in_sec, event["role"]))
-            elif event["kind"] == "FREE":
-                for _ in range(length):
-                    measure_context.append(("FREE", 0, "FREE"))
-            else:
-                for _ in range(length):
-                    measure_context.append(("FLAT", 0, "FLAT"))
-
-        # 2b. Pre-compute breathing points:
-        #     a bar breathes if it is the last bar of a SECTION, or a
-        #     FREE/FLAT bar immediately before a SECTION start.
-        #     The final bar of the piece never breathes.
+        # 2. Build measure-level context and breathing points
+        measure_context = self._build_measure_context(event_log)
+        breathing = self._compute_breathing(measure_context)
         n = len(measure_context)
-        breathing = [False] * n
-        for i in range(n):
-            sl, bi, role = measure_context[i]
-            if role not in ("FREE", "FLAT") and bi > 0:
-                # Find section length for this label
-                sec_len = sum(1 for j in range(i - bi, n)
-                              if measure_context[j][0] == sl)
-                if bi == sec_len - 1:  # last bar of this section
-                    breathing[i] = True
-            elif role in ("FREE", "FLAT") and i + 1 < n:
-                next_role = measure_context[i + 1][2]
-                if next_role not in ("FREE", "FLAT"):
-                    breathing[i] = True
-        if breathing:
-            breathing[-1] = False  # end of piece never breathes
 
         # 3. Per-measure note generation
         all_notes: List[List[NoteEvent]] = []
@@ -702,8 +680,9 @@ class HierarchicalGenerator:
         log.info("Wrote MIDI to %s (%d measures).", output_path, len(all_notes))
 
         # 5. Save structure visualization
+        from structure_plotter import StructurePlotter
         plot_path = output_path.with_suffix('.png')
-        self.plot_structure(labels, event_log, plot_path)
+        StructurePlotter.plot(labels, event_log, self.model.n_clusters, plot_path)
 
         return labels
 
@@ -742,163 +721,50 @@ class HierarchicalGenerator:
             all_notes[mi] = sorted(sounding + rests,
                                    key=lambda n: n.beat_offset)
 
-    # ------------------------------------------------------------------
-    # Structure visualization
-    # ------------------------------------------------------------------
-
-    def plot_structure(
-        self,
-        labels: List[int],
+    @staticmethod
+    def _build_measure_context(
         event_log: List[Dict[str, Any]],
-        save_path: Union[str, Path],
-    ) -> None:
-        """Render the generated structure as a color-coded form diagram.
-
-        Each measure is a colored square; section blocks are grouped and
-        labeled (A, B, FREE).  Cadence boundaries are marked with gaps.
-        """
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle, FancyBboxPatch
-
-        n_clusters = self.model.n_clusters
-        n_measures = len(labels)
-        cmap = plt.get_cmap("tab10")
-        cluster_colors = [cmap(i % 10) for i in range(n_clusters)]
-
-        # Layout: rows of measures, 16 per row
-        measures_per_row = 16
-        n_rows = (n_measures + measures_per_row - 1) // measures_per_row
-        square_w = 0.35
-        square_h = 0.30
-        gap = 0.03
-        row_gap = 0.08
-        section_label_offset = 0.12
-
-        fig_w = measures_per_row * (square_w + gap) + 3.0
-        fig_h = n_rows * (square_h + row_gap + section_label_offset) + 1.5
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-        ax.set_xlim(0, measures_per_row * (square_w + gap) + 2.5)
-        ax.set_ylim(-n_rows * (square_h + row_gap + section_label_offset) - 0.5, 0.5)
-        ax.set_aspect("equal")
-        ax.axis("off")
-
-        # Build measure → section mapping
-        measure_section: List[Optional[str]] = [None] * n_measures
-        measure_role: List[Optional[str]] = [None] * n_measures
-        pos = 0
+    ) -> List[Tuple[str, int, str]]:
+        """Flatten event_log into per-measure (label, bar_index, role) tuples."""
+        ctx: List[Tuple[str, int, str]] = []
         for event in event_log:
             length = event["length"]
             if event["kind"] == "SECTION":
-                for k in range(length):
-                    if pos + k < n_measures:
-                        measure_section[pos + k] = event["label"]
-                        measure_role[pos + k] = event.get("role", "")
+                for bar_in_sec in range(length):
+                    ctx.append((event["label"], bar_in_sec, event["role"]))
             elif event["kind"] == "FREE":
-                for k in range(length):
-                    if pos + k < n_measures:
-                        measure_section[pos + k] = "FREE"
-            pos += length
+                for _ in range(length):
+                    ctx.append(("FREE", 0, "FREE"))
+            else:
+                for _ in range(length):
+                    ctx.append(("FLAT", 0, "FLAT"))
+        return ctx
 
-        # Draw measures row by row
-        for row in range(n_rows):
-            y_base = -row * (square_h + row_gap + section_label_offset)
-            for col in range(measures_per_row):
-                idx = row * measures_per_row + col
-                if idx >= n_measures:
-                    break
-                x = col * (square_w + gap)
-                y = y_base
-                c = labels[idx]
-                color = cluster_colors[c]
-                rect = Rectangle(
-                    (x, y), square_w, square_h,
-                    facecolor=color, edgecolor="white", linewidth=0.3,
-                )
-                ax.add_patch(rect)
+    @staticmethod
+    def _compute_breathing(
+        measure_context: List[Tuple[str, int, str]],
+    ) -> List[bool]:
+        """Mark bars that should breathe: section-end bars and FREE bars
+        immediately before a SECTION start.  The final bar never breathes."""
+        n = len(measure_context)
+        breathing = [False] * n
+        for i in range(n):
+            sl, bi, role = measure_context[i]
+            if role not in ("FREE", "FLAT") and bi > 0:
+                sec_len = sum(1 for j in range(i - bi, n)
+                              if measure_context[j][0] == sl)
+                if bi == sec_len - 1:
+                    breathing[i] = True
+            elif role in ("FREE", "FLAT") and i + 1 < n:
+                if measure_context[i + 1][2] not in ("FREE", "FLAT"):
+                    breathing[i] = True
+        if breathing:
+            breathing[-1] = False
+        return breathing
 
-                # Section start marker
-                if idx == 0 or (idx > 0 and measure_section[idx] != measure_section[idx - 1]):
-                    ax.plot(
-                        [x - gap, x - gap],
-                        [y - 0.05, y + square_h + 0.05],
-                        color="#333333", linewidth=1.0,
-                    )
-
-            # Section labels above each row
-            prev_sec = None
-            for col in range(measures_per_row):
-                idx = row * measures_per_row + col
-                if idx >= n_measures:
-                    break
-                sec = measure_section[idx]
-                if sec is not None and sec != prev_sec:
-                    x_start = col * (square_w + gap)
-                    # Span to end of this contiguous block
-                    end_col = col
-                    while (end_col + 1 < measures_per_row and
-                           row * measures_per_row + end_col + 1 < n_measures and
-                           measure_section[row * measures_per_row + end_col + 1] == sec):
-                        end_col += 1
-                    x_end = end_col * (square_w + gap) + square_w
-                    x_mid = (x_start + x_end) / 2
-                    label_text = f"{sec}"
-                    if measure_role[idx] and measure_role[idx] not in ("NEW",):
-                        label_text = f"{sec}'" if measure_role[idx] == "RETURN" else sec
-                    ax.text(
-                        x_mid, y_base + square_h + 0.06,
-                        label_text, ha="center", va="bottom",
-                        fontsize=7, color="#333333", fontweight="bold",
-                    )
-                    prev_sec = sec
-
-        # 4-bar and 8-bar vertical grid lines
-        for col in [4, 8, 12]:
-            x = col * (square_w + gap) - gap
-            ax.plot([x, x], [0.2, -n_rows * (square_h + row_gap + section_label_offset)],
-                    color="#aaaaaa", linewidth=0.5, linestyle="--", alpha=0.5)
-        for col in [8]:
-            x = col * (square_w + gap) - gap
-            ax.plot([x, x], [0.2, -n_rows * (square_h + row_gap + section_label_offset)],
-                    color="#666666", linewidth=0.8, linestyle="--")
-
-        # Bar number labels (every 4 bars)
-        for row in range(n_rows):
-            for col in range(0, measures_per_row, 4):
-                idx = row * measures_per_row + col
-                if idx < n_measures:
-                    x = col * (square_w + gap) + square_w / 2
-                    y = -row * (square_h + row_gap + section_label_offset)
-                    ax.text(
-                        x, y - 0.06, str(idx + 1),
-                        ha="center", va="top", fontsize=5, color="#999999",
-                    )
-
-        # Legend
-        legend_handles = [
-            Rectangle((0, 0), 1, 1, facecolor=cluster_colors[c], edgecolor="white")
-            for c in range(n_clusters)
-        ]
-        legend_labels = [f"Cluster {c}" for c in range(n_clusters)]
-        ax.legend(
-            legend_handles, legend_labels,
-            loc="upper right", fontsize=6, ncol=min(4, n_clusters),
-            markerscale=0.6, framealpha=0.8,
-        )
-
-        # Title
-        n_sections = sum(1 for e in event_log if e["kind"] == "SECTION")
-        n_free = sum(1 for e in event_log if e["kind"] == "FREE")
-        ax.set_title(
-            f"Generated Structure — {n_measures} measures, "
-            f"{n_sections} sections, {n_free} FREE blocks",
-            fontsize=11, pad=6,
-        )
-
-        fig.tight_layout(pad=0.5)
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
+    # ------------------------------------------------------------------
+    # Structure visualization
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Internal: grammar-aware timeline
@@ -915,36 +781,7 @@ class HierarchicalGenerator:
     ) -> Tuple[List[int], List[Dict[str, Any]]]:
         grammar = self.grammar
 
-        if template_file is None:
-            # Prefer multi-family templates with grid-aligned section lengths
-            multi = [f for f in grammar.files if f.n_families >= 2]
-            # Also prefer templates whose sections are multiples of 4 bars
-            by_grid = {0: [], 1: [], 2: []}  # 0=grid, 1=mostly-grid, 2=irregular
-            for f in (multi if multi and rng.random() < 0.7 else grammar.files):
-                lengths = [len(seq) for seq in f.prototypes.values()]
-                aligned = sum(1 for L in lengths if L % 4 == 0)
-                if aligned == len(lengths) and lengths:
-                    by_grid[0].append(f)
-                elif aligned >= len(lengths) // 2:
-                    by_grid[1].append(f)
-                else:
-                    by_grid[2].append(f)
-            # Weighted draw: 70% grid-aligned, 20% mostly-grid, 10% irregular
-            pool = (by_grid[0] * 7 + by_grid[1] * 2 + by_grid[2]) or grammar.files
-            fs = pool[rng.randint(0, len(pool))]
-        elif isinstance(template_file, int):
-            fs = grammar.files[template_file % len(grammar.files)]
-        else:
-            match = next(
-                (f for f in grammar.files
-                 if f.filename == template_file
-                 or f.filename.endswith(template_file)
-                 or Path(f.filename).stem == template_file),
-                None,
-            )
-            if match is None:
-                raise KeyError(f"No file matching '{template_file}'")
-            fs = match
+        fs = self._select_template(grammar, template_file, rng)
 
         label_seen: set[str] = set()
         cycle = 0
@@ -958,21 +795,10 @@ class HierarchicalGenerator:
                 if len(labels) >= target_measures:
                     break
 
-                if cycle == 0 and i == 0:
-                    role = "NEW"
-                    vary = False
-                elif (
-                    (i > 0 and sec_label == section_labels[i - 1])
-                    or (i == 0 and sec_label == section_labels[-1])
-                ):
-                    role = "REPEAT"
-                    vary = False  # exact repeat — same cluster labels, same notes
-                elif sec_label in label_seen:
-                    role = "RETURN"
-                    vary = variation_strength > 0
-                else:
-                    role = "NEW"
-                    vary = False
+                role, vary = self._assign_role(
+                    sec_label, i, cycle, section_labels,
+                    label_seen, variation_strength,
+                )
 
                 content = grammar.generate_section_content(
                     sec_label, fs, vary=vary,
@@ -1026,6 +852,61 @@ class HierarchicalGenerator:
 
         self._end_with_return(labels, event_log, fs, variation_strength, rng)
         return labels, event_log
+
+    @staticmethod
+    def _select_template(
+        grammar: Any,
+        template_file: Optional[Union[int, str]],
+        rng: np.random.RandomState,
+    ) -> Any:
+        """Pick a template file, preferring multi-family and grid-aligned."""
+        if template_file is not None:
+            if isinstance(template_file, int):
+                return grammar.files[template_file % len(grammar.files)]
+            match = next(
+                (f for f in grammar.files
+                 if f.filename == template_file
+                 or f.filename.endswith(template_file)
+                 or Path(f.filename).stem == template_file),
+                None,
+            )
+            if match is None:
+                raise KeyError(f"No file matching '{template_file}'")
+            return match
+
+        multi = [f for f in grammar.files if f.n_families >= 2]
+        by_grid = {0: [], 1: [], 2: []}
+        candidates = multi if multi and rng.random() < 0.7 else grammar.files
+        for f in candidates:
+            lengths = [len(seq) for seq in f.prototypes.values()]
+            aligned = sum(1 for L in lengths if L % 4 == 0)
+            if aligned == len(lengths) and lengths:
+                by_grid[0].append(f)
+            elif aligned >= len(lengths) // 2:
+                by_grid[1].append(f)
+            else:
+                by_grid[2].append(f)
+        pool = (by_grid[0] * 7 + by_grid[1] * 2 + by_grid[2]) or grammar.files
+        return pool[rng.randint(0, len(pool))]
+
+    @staticmethod
+    def _assign_role(
+        sec_label: str,
+        i: int,
+        cycle: int,
+        section_labels: List[str],
+        label_seen: set[str],
+        variation_strength: float,
+    ) -> Tuple[str, bool]:
+        """Determine the structural role of a section occurrence."""
+        if cycle == 0 and i == 0:
+            return "NEW", False
+        if (i > 0 and sec_label == section_labels[i - 1]) \
+                or (i == 0 and sec_label == section_labels[-1]):
+            return "REPEAT", False
+        if sec_label in label_seen:
+            return "RETURN", variation_strength > 0
+        return "NEW", False
 
     def _end_with_return(
         self,
