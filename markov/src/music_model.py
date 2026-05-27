@@ -142,6 +142,8 @@ class MusicModel:
         clusterer.compute_pitch_histograms(file_map, file_labels)
         log.info("Computing per-cluster note statistics ...")
         clusterer.compute_note_statistics(file_map, file_labels)
+        log.info("Computing per-cluster bass histograms ...")
+        clusterer.compute_bass_histograms(file_map, file_labels)
 
         # 4. Build sub-models
         log.info("Building transition matrix ...")

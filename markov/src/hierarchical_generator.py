@@ -137,6 +137,7 @@ class NoteEvent:
     duration_ql: float   # quarterLength
     velocity: int        # 1–127, 0 for rests
     beat_offset: float   # position within the bar (0.0 = downbeat)
+    voice: str = "melody"
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,8 @@ class ClusterNoteSampler:
         centroids: np.ndarray,               # (n_clusters, 8)
         pitch_histograms: np.ndarray | None,  # (n_clusters, 12) or None
         step_histograms: np.ndarray | None = None,  # (n_clusters, 7) or None
+        bass_histograms: np.ndarray | None = None,  # (n_clusters, 128) or None
+        bass_config: Dict[str, Any] | None = None,
     ) -> None:
         if centroids.ndim != 2 or centroids.shape[1] < 8:
             raise ValueError("centroids must be (n_clusters, >=8)")
@@ -181,11 +184,18 @@ class ClusterNoteSampler:
         if step_histograms is not None and step_histograms.shape == (self._n_clusters, 7):
             self._step_hists = step_histograms
         else:
-            # Fallback: uniform + slight bias toward smaller steps
             self._step_hists = np.array(
                 [[0.20, 0.18, 0.18, 0.15, 0.12, 0.10, 0.07]] * self._n_clusters,
                 dtype=np.float64,
             )
+
+        if bass_histograms is not None and bass_histograms.shape == (self._n_clusters, 128):
+            self._bass_hists = bass_histograms
+        else:
+            self._bass_hists = None
+
+        self._bass_config = bass_config or {}
+        self._bass_enabled = self._bass_config.get("enabled", True) and self._bass_hists is not None
 
     # ------------------------------------------------------------------
     # Public API
@@ -198,6 +208,9 @@ class ClusterNoteSampler:
         seed: int | None = None,
         perturb: float = 0.0,
         is_section_end: bool = False,
+        phrase_role: str = "CONTINUATION",
+        target_pitch: int | None = None,
+        previous_pitch: int | None = None,
     ) -> List[NoteEvent]:
         """Generate notes for one measure with melodic continuity.
 
@@ -225,19 +238,43 @@ class ClusterNoteSampler:
         silence_ratio = float(centroid[4])
         offbeat_ratio = float(centroid[5])
         # syncopation = centroid[6] — unused for now
+        syncopation = float(centroid[6])
         entropy = float(centroid[7])
 
         ts_num, ts_den = time_signature
         bar_length_ql = ts_num * (4.0 / ts_den)
 
+        if phrase_role == "OPENING":
+            entropy *= 0.75
+            offbeat_ratio *= 0.7
+        elif phrase_role == "ANSWER":
+            entropy *= 0.9
+        elif phrase_role == "DEVELOPMENT":
+            entropy *= 1.2
+            syncopation *= 1.2
+        elif phrase_role == "CADENCE_PREP":
+            note_density *= 0.85
+            offbeat_ratio *= 0.6
+        elif phrase_role == "CADENCE":
+            note_density *= 0.65
+            entropy *= 0.6
+            offbeat_ratio *= 0.25
+
         # --- rest probability ---
         rest_prob = float(np.clip(silence_ratio, 0.0, 0.6))
+        if phrase_role == "CADENCE":
+            rest_prob = min(0.75, rest_prob + 0.15)
+
 
         # --- note count ---
         # density is roughly onsets per quarter note; cap at 6 notes/quarter
         raw_count = max(2, int(note_density * bar_length_ql * 2.0))
         raw_count += int(rng.normal(0, entropy * 1.5))
         target_count = max(2, min(raw_count, 24))
+        if phrase_role == "CADENCE":
+            target_count = min(target_count, 6)
+        elif phrase_role == "OPENING":
+            target_count = min(target_count, 10)
 
         # --- pick 2-4 "preferred" durations for rhythmic coherence ---
         pref_durs = self._pick_preferred_durations(
@@ -245,16 +282,23 @@ class ClusterNoteSampler:
         )
 
         # --- choose a register for this measure ---
-        # Pick a centre pitch from the pitch histogram, in octave 3 or 4
-        pc_centre = int(rng.choice(12, p=pc_hist))
-        centre_octave = int(rng.choice([3, 3, 4, 4, 4, 5]))  # weighted toward middle
-        centre_pitch = 12 * (centre_octave + 1) + pc_centre
+        # A melodic skeleton target keeps repeated sections directionally
+        # coherent; without one, fall back to the cluster pitch-class histogram.
+        if target_pitch is not None:
+            centre_pitch = int(target_pitch)
+        else:
+            pc_centre = int(rng.choice(12, p=pc_hist))
+            centre_octave = int(rng.choice([3, 3, 4, 4, 4, 5]))  # weighted toward middle
+            centre_pitch = 12 * (centre_octave + 1) + pc_centre
         centre_pitch = max(40, min(84, centre_pitch))
         lo_pitch = max(28, centre_pitch - 10)  # ~1.5 octave window
         hi_pitch = min(96, centre_pitch + 10)
 
         # Start pitch near centre
-        current_pitch = int(centre_pitch + rng.randint(-4, 5))
+        if previous_pitch is not None:
+            current_pitch = int(round(previous_pitch * 0.55 + centre_pitch * 0.45))
+        else:
+            current_pitch = int(centre_pitch + rng.randint(-4, 5))
         current_pitch = max(lo_pitch, min(hi_pitch, current_pitch))
 
         # --- velocity arc ---
@@ -320,9 +364,17 @@ class ClusterNoteSampler:
                 if rng.random() > pc_hist[candidate_pc] * 4:  # unlikely PC → reject leap
                     candidate_pitch = current_pitch + int(step * 0.5)
 
+                if target_pitch is not None:
+                    delta = int(target_pitch - candidate_pitch)
+                    if abs(delta) > 2 and rng.random() < 0.45:
+                        candidate_pitch += int(np.sign(delta) * min(abs(delta), 3))
+
                 current_pitch = max(lo_pitch, min(hi_pitch, candidate_pitch))
 
             pitch = int(current_pitch)
+            if target_pitch is not None and phrase_role == "CADENCE" and remaining - dur <= 0.03:
+                pitch = max(lo_pitch, min(hi_pitch, int(target_pitch)))
+                current_pitch = pitch
 
             # --- velocity (phrase arc) ---
             progress = beat / bar_length_ql if bar_length_ql > 0 else 0
@@ -378,6 +430,7 @@ class ClusterNoteSampler:
                         duration_ql=new_dur,
                         velocity=max(30, n.velocity - 15),
                         beat_offset=n.beat_offset,
+                        voice=n.voice,
                     )
                 else:
                     del notes[idx]
@@ -422,7 +475,46 @@ class ClusterNoteSampler:
                     duration_ql=dur,
                     velocity=vel,
                     beat_offset=n.beat_offset,
+                    voice=n.voice,
                 )
+
+    def _add_bass_note(
+        self,
+        notes: List[NoteEvent],
+        cluster_label: int,
+        bar_length_ql: float,
+        rng: np.random.RandomState,
+    ) -> None:
+        """Append a bass anchor sampled from the trained bass distribution.
+
+        The bass register and sustain are tunable. Defaults avoid two common
+        failure modes: every bar using the same sustain and the bass collapsing
+        into an impractically low register.
+        """
+        hist = self._bass_hists[cluster_label]
+        pitch = int(rng.choice(128, p=hist))
+        octave_shift = self._bass_config.get("octave_shift", 1)
+        pitch = pitch - 12 * octave_shift
+        low = int(self._bass_config.get("low", 36))
+        high = int(self._bass_config.get("high", 60))
+        pitch = max(low, min(high, pitch))
+
+        sustain = float(self._bass_config.get("sustain_fraction", 0.78))
+        full_bar_probability = float(self._bass_config.get("full_bar_probability", 0.22))
+        if rng.random() < full_bar_probability:
+            sustain = 1.0
+        vel_scale = self._bass_config.get("velocity_scale", 0.7)
+        avg_vel = int(sum(n.velocity for n in notes if n.velocity > 0)
+                      / max(1, sum(1 for n in notes if n.velocity > 0)))
+        vel = max(25, int(avg_vel * vel_scale))
+
+        notes.append(NoteEvent(
+            pitch=pitch,
+            duration_ql=bar_length_ql * sustain,
+            velocity=vel,
+            beat_offset=0.0,
+            voice="bass",
+        ))
 
     # ------------------------------------------------------------------
     # Internal
@@ -490,18 +582,22 @@ class HierarchicalGenerator:
         self.model = model
         self.phrase_gen = PhraseGenerator(model)
 
+        # Load style config first — needed by sampler
+        self.config = _load_style_config(config_path)
+
         centroids = model.clusterer.centroids
         if centroids is None:
             raise ValueError("Model clusterer has no centroids — is it trained?")
 
         pitch_hists = getattr(model.clusterer, "pitch_histograms", None)
         step_hists = getattr(model.clusterer, "step_histograms", None)
-        self.note_sampler = ClusterNoteSampler(centroids, pitch_hists, step_hists)
+        bass_hists = getattr(model.clusterer, "bass_histograms", None)
+        self.note_sampler = ClusterNoteSampler(
+            centroids, pitch_hists, step_hists, bass_hists,
+            bass_config=self.config.get("bass", {}),
+        )
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
-
-        # Load style config (defaults or from file)
-        self.config = _load_style_config(config_path)
 
     @property
     def grammar(self):
@@ -619,6 +715,11 @@ class HierarchicalGenerator:
         all_notes: List[List[NoteEvent]] = []
         base_seed = seed if seed is not None else 0
         occurrence_count: Dict[str, int] = {}
+        motif_memory: Dict[str, List[List[NoteEvent]]] = {}
+        melodic_skeleton = self._build_melodic_skeleton(
+            labels, measure_context, base_seed,
+        )
+        previous_melody_pitch: Optional[int] = None
 
         _select = _apply = None
         if enable_variation:
@@ -627,8 +728,11 @@ class HierarchicalGenerator:
             _apply = apply_variation
 
         for i, cluster_id in enumerate(labels):
-            sl, bi, role = measure_context[i]
+            sl, bi, role, occurrence_id, section_len = measure_context[i]
             is_end = breathing[i]
+
+            phrase_role = self._phrase_role(bi, section_len, role)
+            target_pitch = melodic_skeleton.get(i)
 
             # Seed from section identity (FREE/FLAT use per-measure seed)
             if role in ("FREE", "FLAT"):
@@ -636,42 +740,87 @@ class HierarchicalGenerator:
             else:
                 measure_seed = _stable_hash(base_seed, sl, bi)
 
-            notes = self.note_sampler.sample_measure(
-                cluster_label=cluster_id,
-                time_signature=time_signature,
-                seed=measure_seed,
-                perturb=0.0,
-                is_section_end=is_end,
-            )
+            reused_motif = False
+            if role not in ("FREE", "FLAT", "NEW") and sl in motif_memory and bi < len(motif_memory[sl]):
+                notes = self._clone_notes(motif_memory[sl][bi])
+                reused_motif = True
+            else:
+                notes = self.note_sampler.sample_measure(
+                    cluster_label=cluster_id,
+                    time_signature=time_signature,
+                    seed=measure_seed,
+                    perturb=0.0,
+                    is_section_end=is_end,
+                    phrase_role=phrase_role,
+                    target_pitch=target_pitch,
+                    previous_pitch=previous_melody_pitch,
+                )
+                if role == "NEW":
+                    motif_memory.setdefault(sl, [])
+                    while len(motif_memory[sl]) <= bi:
+                        motif_memory[sl].append([])
+                    motif_memory[sl][bi] = self._clone_notes(notes)
 
             # Controlled variation: non-NEW sections get transforms.
             # Strength s is data-driven: average cluster entropy scaled
             # by an information-theoretic progression k/(k+1).
             if (_select is not None and _apply is not None
-                    and role not in ("FREE", "FLAT", "NEW")):
+                    and role not in ("FREE", "FLAT", "NEW", "REPEAT")):
                 if bi == 0:
                     k = occurrence_count.get(sl, 0)
                     if k > 0:
-                        sec_len = sum(1 for j in range(i, n)
-                                      if measure_context[j][0] == sl)
-                        sec_labels = labels[i:i + sec_len]
+                        sec_labels = labels[i:i + section_len]
+                        variation_rng = np.random.RandomState(
+                            _stable_hash(base_seed, sl, occurrence_id, "variation")
+                        )
                         s = (self._section_entropy(sec_labels) / self._max_entropy
                              ) * (k / (k + VARIATION_PROGRESSION_DENOM))
                         self._current_variation_profile = _select(
                             self.model.clusterer.centroids,
-                            sec_labels, s,
+                            sec_labels, s, rng=variation_rng,
                         ) if s > 0.02 else None
                     else:
                         self._current_variation_profile = None
                 if self._current_variation_profile:
-                    notes = _apply(notes, self._current_variation_profile)
+                    variation_rng = np.random.RandomState(
+                        _stable_hash(base_seed, sl, occurrence_id, bi, "variation")
+                    )
+                    notes = _apply(notes, self._current_variation_profile, rng=variation_rng)
+            if reused_motif and enable_variation and role in ("RETURN", "VARIANT"):
+                k = occurrence_count.get(sl, 1)
+                motif_cfg = self.config.get("motif_return", {})
+                base_strength = float(motif_cfg.get("base_strength", 0.10))
+                occurrence_growth = float(motif_cfg.get("occurrence_growth", 0.06))
+                max_strength = float(motif_cfg.get("max_strength", 0.38))
+                variation_rng = np.random.RandomState(
+                    _stable_hash(base_seed, sl, occurrence_id, bi, "motif-return")
+                )
+                notes = self._vary_return_motif(
+                    notes,
+                    strength=min(max_strength, base_strength + occurrence_growth * k),
+                    rng=variation_rng,
+                    target_pitch=target_pitch,
+                )
             if role not in ("FREE", "FLAT") and bi == 0:
                 occurrence_count[sl] = occurrence_count.get(sl, 0) + 1
 
             all_notes.append(notes)
+            previous_melody_pitch = self._last_melody_pitch(notes, previous_melody_pitch)
 
-        # 3c. Rendering: clamp overlaps on every measure
+        # 3c. Add bass line (after transforms, so bass is unaffected)
+        if self.note_sampler._bass_enabled:
+            bl_ql = time_signature[0] * (4.0 / time_signature[1])
+            for mi in range(len(all_notes)):
+                cid = labels[mi]
+                self.note_sampler._add_bass_note(
+                    all_notes[mi], cid, bl_ql,
+                    np.random.RandomState(_stable_hash(base_seed, "bass", mi)),
+                )
+
+        # 3d. Rendering: clamp overlaps on every measure (melody only — bass is
+        # added after transforms so it never participates in clamping).
         self._clamp_overlaps(all_notes)
+        self._ensure_final_bar_end(all_notes, time_signature)
 
         # 4. Write MIDI via mido (silence = absence of note events)
         output_path = Path(output_path)
@@ -694,6 +843,161 @@ class HierarchicalGenerator:
             return 0.0
         return float(centroids[indices, 7].mean())
 
+    @staticmethod
+    def _clone_notes(notes: List[NoteEvent]) -> List[NoteEvent]:
+        """Copy note events so motif memory can be reused without mutation."""
+        return [
+            NoteEvent(
+                pitch=n.pitch,
+                duration_ql=n.duration_ql,
+                velocity=n.velocity,
+                beat_offset=n.beat_offset,
+                voice=n.voice,
+            )
+            for n in notes
+        ]
+
+    @staticmethod
+    def _last_melody_pitch(notes: List[NoteEvent], fallback: Optional[int]) -> Optional[int]:
+        sounding = [n for n in notes if n.pitch >= 0 and n.voice == "melody"]
+        return sounding[-1].pitch if sounding else fallback
+
+    @staticmethod
+    def _phrase_role(bar_index: int, section_len: int, structural_role: str) -> str:
+        """Assign a simple intra-section role used by the note renderer."""
+        if structural_role in ("FREE", "FLAT") or section_len <= 1:
+            return "CONTINUATION"
+        if bar_index == 0:
+            return "OPENING"
+        if bar_index == 1:
+            return "ANSWER"
+        if bar_index >= section_len - 1:
+            return "CADENCE"
+        if bar_index == section_len - 2:
+            return "CADENCE_PREP"
+        midpoint = max(2, section_len // 2)
+        if bar_index >= midpoint:
+            return "DEVELOPMENT"
+        return "CONTINUATION"
+
+    def _build_melodic_skeleton(
+        self,
+        labels: List[int],
+        measure_context: List[Tuple[str, int, str, int, int]],
+        base_seed: int,
+    ) -> Dict[int, int]:
+        """Create bar-level target pitches for phrase direction.
+
+        This is intentionally lightweight: it does not force a melody, but it
+        gives each section an opening point, a high point, and a cadence target.
+        """
+        skeleton: Dict[int, int] = {}
+        by_occurrence: Dict[int, List[int]] = {}
+        for idx, ctx in enumerate(measure_context):
+            _, _, role, occurrence_id, _ = ctx
+            if role not in ("FREE", "FLAT"):
+                by_occurrence.setdefault(occurrence_id, []).append(idx)
+
+        for occurrence_id, indices in by_occurrence.items():
+            if not indices:
+                continue
+            rng = np.random.RandomState(_stable_hash(base_seed, "skeleton", occurrence_id))
+            first_cluster = labels[indices[0]] % self.note_sampler._n_clusters
+            last_cluster = labels[indices[-1]] % self.note_sampler._n_clusters
+            first_pc = int(np.argmax(self.note_sampler._pitch_hists[first_cluster]))
+            last_pc = int(np.argmax(self.note_sampler._pitch_hists[last_cluster]))
+            start_pitch = self._nearest_pitch(first_pc, int(rng.choice([60, 62, 64, 65, 67])))
+            cadence_pitch = self._nearest_pitch(last_pc, start_pitch)
+            high_pitch = min(84, max(start_pitch, cadence_pitch) + int(rng.choice([3, 4, 5, 7])))
+            peak_pos = max(1, int(round((len(indices) - 1) * rng.uniform(0.45, 0.65))))
+
+            for local_i, global_i in enumerate(indices):
+                if len(indices) == 1:
+                    target = cadence_pitch
+                elif local_i <= peak_pos:
+                    frac = local_i / max(1, peak_pos)
+                    target = round(start_pitch + (high_pitch - start_pitch) * frac)
+                else:
+                    frac = (local_i - peak_pos) / max(1, len(indices) - 1 - peak_pos)
+                    target = round(high_pitch + (cadence_pitch - high_pitch) * frac)
+                skeleton[global_i] = int(max(40, min(84, target)))
+        return skeleton
+
+    @staticmethod
+    def _nearest_pitch(pc: int, reference: int) -> int:
+        candidates = [reference + offset for offset in range(-12, 13) if (reference + offset) % 12 == pc]
+        return min(candidates, key=lambda p: (abs(p - reference), p)) if candidates else reference
+
+    def _vary_return_motif(
+        self,
+        notes: List[NoteEvent],
+        strength: float,
+        rng: np.random.RandomState,
+        target_pitch: Optional[int],
+    ) -> List[NoteEvent]:
+        """Convert a recalled motif into a same-family variant.
+
+        Motif memory should preserve identity, but RETURN must not mean
+        byte-for-byte repetition forever.  This function keeps onset rhythm
+        stable and changes only a small number of melody pitches, velocities,
+        and occasional short durations.  That gives recognisable recurrence
+        without allowing long exact-copy loops to dominate the output.
+        """
+        varied = self._clone_notes(notes)
+        melody_indices = [
+            idx for idx, note in enumerate(varied)
+            if note.pitch >= 0 and note.voice == "melody"
+        ]
+        if not melody_indices:
+            return varied
+
+        motif_cfg = self.config.get("motif_return", {})
+        min_pitch = int(motif_cfg.get("min_pitch", 40))
+        max_pitch = int(motif_cfg.get("max_pitch", 84))
+        target_attraction = float(motif_cfg.get("target_attraction", 0.55))
+        velocity_change_prob = float(motif_cfg.get("velocity_change_prob", 0.35))
+        velocity_jitter_std = float(motif_cfg.get("velocity_jitter_std", 3.0))
+        rhythm_change_scale = float(motif_cfg.get("rhythm_change_scale", 0.35))
+
+        max_changes = max(1, int(round(len(melody_indices) * strength)))
+        change_count = min(len(melody_indices), max_changes)
+        selected = set(rng.choice(melody_indices, size=change_count, replace=False))
+
+        for idx in melody_indices:
+            note = varied[idx]
+            pitch = note.pitch
+            duration = note.duration_ql
+            velocity = note.velocity
+
+            if idx in selected:
+                step = int(rng.choice([-2, -1, 1, 2]))
+                if target_pitch is not None and rng.random() < target_attraction:
+                    step = 1 if target_pitch > pitch else -1
+                pitch = int(max(min_pitch, min(max_pitch, pitch + step)))
+
+                # Keep rhythmic identity on returns; only very short gestures
+                # may breathe a little so the bar is not mechanically copied.
+                if duration <= 0.75 and rng.random() < strength * rhythm_change_scale:
+                    candidates = [
+                        d for d in _USABLE_DUR_VALUES
+                        if 0.1 <= d <= 1.0 and abs(d - duration) <= 0.25
+                    ]
+                    if candidates:
+                        duration = float(rng.choice(candidates))
+
+            if velocity > 0 and rng.random() < velocity_change_prob:
+                velocity = int(max(35, min(127, velocity + rng.normal(0, velocity_jitter_std))))
+
+            varied[idx] = NoteEvent(
+                pitch=pitch,
+                duration_ql=duration,
+                velocity=velocity,
+                beat_offset=note.beat_offset,
+                voice=note.voice,
+            )
+
+        return varied
+
     def _clamp_overlaps(self, all_notes: List[List[NoteEvent]]) -> None:
         """Rendering constraint: clamp per-measure note durations so
         consecutive notes do not overlap beyond the configured maximum."""
@@ -701,7 +1005,7 @@ class HierarchicalGenerator:
         _min_dur = 0.1
         for mi in range(len(all_notes)):
             sounding = sorted(
-                [n for n in all_notes[mi] if n.pitch >= 0],
+                [n for n in all_notes[mi] if n.pitch >= 0 and n.voice == "melody"],
                 key=lambda n: n.beat_offset,
             )
             for i in range(len(sounding) - 1):
@@ -716,47 +1020,105 @@ class HierarchicalGenerator:
                                         allowed - sounding[i].beat_offset),
                         velocity=sounding[i].velocity,
                         beat_offset=sounding[i].beat_offset,
+                        voice=sounding[i].voice,
                     )
-            rests = [n for n in all_notes[mi] if n.pitch < 0]
-            all_notes[mi] = sorted(sounding + rests,
+            others = [n for n in all_notes[mi] if n.pitch < 0 or n.voice != "melody"]
+            all_notes[mi] = sorted(sounding + others,
                                    key=lambda n: n.beat_offset)
+
+    @staticmethod
+    def _ensure_final_bar_end(
+        all_notes: List[List[NoteEvent]],
+        time_signature: Tuple[int, int],
+    ) -> None:
+        """Guarantee the rendered MIDI reaches the requested final bar.
+
+        This is a rendering invariant, not a stylistic hack: the structure
+        layer asks for N measures, so the MIDI should end at exactly N bars
+        unless the user explicitly requests a pickup or fade-out.
+        """
+        if not all_notes:
+            return
+        final_measure = all_notes[-1]
+        sounding = [
+            (idx, note) for idx, note in enumerate(final_measure)
+            if note.pitch >= 0
+        ]
+        if not sounding:
+            return
+
+        bar_length_ql = time_signature[0] * (4.0 / time_signature[1])
+        idx, note = max(
+            sounding,
+            key=lambda pair: pair[1].beat_offset + pair[1].duration_ql,
+        )
+        end = note.beat_offset + note.duration_ql
+        if end >= bar_length_ql - 1e-6:
+            return
+
+        final_measure[idx] = NoteEvent(
+            pitch=note.pitch,
+            duration_ql=max(0.1, bar_length_ql - note.beat_offset),
+            velocity=note.velocity,
+            beat_offset=note.beat_offset,
+            voice=note.voice,
+        )
 
     @staticmethod
     def _build_measure_context(
         event_log: List[Dict[str, Any]],
-    ) -> List[Tuple[str, int, str]]:
-        """Flatten event_log into per-measure (label, bar_index, role) tuples."""
-        ctx: List[Tuple[str, int, str]] = []
+    ) -> List[Tuple[str, int, str, int, int]]:
+        """Flatten event_log into per-measure section context.
+
+        Each tuple is ``(label, bar_index, role, occurrence_id, section_len)``.
+        The occurrence id prevents repeated labels such as A ... A ... A from
+        being merged when calculating phrase length or cadences.
+        """
+        ctx: List[Tuple[str, int, str, int, int]] = []
+        occurrence_id = 0
         for event in event_log:
             length = event["length"]
             if event["kind"] == "SECTION":
                 for bar_in_sec in range(length):
-                    ctx.append((event["label"], bar_in_sec, event["role"]))
+                    ctx.append((event["label"], bar_in_sec, event["role"], occurrence_id, length))
+                occurrence_id += 1
             elif event["kind"] == "FREE":
                 for _ in range(length):
-                    ctx.append(("FREE", 0, "FREE"))
+                    ctx.append(("FREE", 0, "FREE", occurrence_id, length))
+                occurrence_id += 1
             else:
                 for _ in range(length):
-                    ctx.append(("FLAT", 0, "FLAT"))
+                    ctx.append(("FLAT", 0, "FLAT", occurrence_id, length))
+                occurrence_id += 1
         return ctx
 
     @staticmethod
     def _compute_breathing(
-        measure_context: List[Tuple[str, int, str]],
+        measure_context: List[Tuple[str, int, str, int, int]],
     ) -> List[bool]:
-        """Mark bars that should breathe: section-end bars and FREE bars
-        immediately before a SECTION start.  The final bar never breathes."""
+        """Mark bars that should breathe at structural boundaries.
+
+        A boundary is detected both from the local bar index and from the next
+        occurrence id.  The second check matters in product use because short
+        sections, truncated templates, or mixed FREE/SECTION timelines can
+        make bar-index-only cadence detection miss a phrase ending.
+        """
         n = len(measure_context)
         breathing = [False] * n
         for i in range(n):
-            sl, bi, role = measure_context[i]
-            if role not in ("FREE", "FLAT") and bi > 0:
-                sec_len = sum(1 for j in range(i - bi, n)
-                              if measure_context[j][0] == sl)
-                if bi == sec_len - 1:
+            sl, bi, role, occurrence_id, section_len = measure_context[i]
+            if role not in ("FREE", "FLAT"):
+                if bi == section_len - 1:
                     breathing[i] = True
             elif role in ("FREE", "FLAT") and i + 1 < n:
                 if measure_context[i + 1][2] not in ("FREE", "FLAT"):
+                    breathing[i] = True
+            if i + 1 < n:
+                next_role = measure_context[i + 1][2]
+                next_occurrence_id = measure_context[i + 1][3]
+                if role not in ("FREE", "FLAT") and next_occurrence_id != occurrence_id:
+                    breathing[i] = True
+                elif role in ("FREE", "FLAT") and next_role not in ("FREE", "FLAT"):
                     breathing[i] = True
         if breathing:
             breathing[-1] = False
@@ -979,8 +1341,9 @@ class HierarchicalGenerator:
             clocks_per_click=24, notated_32nd_notes_per_beat=8, time=0,
         ))
 
-        # Collect all (tick, note_on/off) events and sort
-        events: List[Tuple[int, str, int, int]] = []
+        # Collect all (tick, note_on/off) events and sort.  At identical ticks,
+        # note_off must come before note_on to avoid accidental stuck overlaps.
+        events: List[Tuple[int, str, int, int, int]] = []
 
         for measure_idx, nev_list in enumerate(measures):
             bar_base_ticks = measure_idx * bar_length_ql * tpb
@@ -989,20 +1352,25 @@ class HierarchicalGenerator:
                     continue
                 start_tick = int(bar_base_ticks + nev.beat_offset * tpb)
                 end_tick = int(start_tick + nev.duration_ql * tpb)
-                events.append((start_tick, 'on', nev.pitch, nev.velocity))
-                events.append((end_tick, 'off', nev.pitch, 0))
+                if end_tick <= start_tick:
+                    continue
+                channel = 1 if nev.voice == "bass" else 0
+                events.append((start_tick, 'on', nev.pitch, nev.velocity, channel))
+                events.append((end_tick, 'off', nev.pitch, 0, channel))
 
-        events.sort(key=lambda e: e[0])
+        events.sort(key=lambda e: (e[0], 0 if e[1] == 'off' else 1))
 
         prev_tick = 0
-        for tick, etype, pitch, velocity in events:
+        for tick, etype, pitch, velocity, channel in events:
             delta = tick - prev_tick
             if etype == 'on':
                 track.append(mido.Message('note_on', note=pitch,
-                                          velocity=velocity, time=delta))
+                                          velocity=velocity, channel=channel,
+                                          time=delta))
             else:
                 track.append(mido.Message('note_off', note=pitch,
-                                          velocity=0, time=delta))
+                                          velocity=0, channel=channel,
+                                          time=delta))
             prev_tick = tick
 
         mid.save(str(output_path))
@@ -1076,6 +1444,11 @@ def _build_parser() -> "argparse.ArgumentParser":
         help="Disable controlled variation transforms (exact repeats only).",
     )
     parser.add_argument(
+        "--no-bass",
+        action="store_true",
+        help="Disable bass line generation.",
+    )
+    parser.add_argument(
         "--config",
         default=None,
         help="Path to YAML style config (default: config/style_defaults.yaml).",
@@ -1112,6 +1485,9 @@ def main() -> None:
         "Generating %d measures (template=%s, variation=%.2f) ...",
         args.target_measures, args.template or "random", args.variation,
     )
+    if args.no_bass:
+        gen.note_sampler._bass_enabled = False
+
     labels = gen.generate_midi(
         output_path=args.output,
         target_measures=args.target_measures,

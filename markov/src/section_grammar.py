@@ -340,10 +340,16 @@ class SectionGrammar:
         result = list(prototype)
         for i in range(len(result)):
             if rng.random() < variation_strength:
-                # Replace with a different random cluster
-                candidates = [
-                    c for c in range(self.n_clusters) if c != result[i]
-                ]
+                # Prefer states already used by this section family.  This keeps
+                # VARIANT/RETURN close to the prototype instead of jumping to an
+                # arbitrary cluster with unrelated texture.
+                local = set(prototype[max(0, i - 2):i] + prototype[i + 1:i + 3])
+                local.update(prototype)
+                candidates = [c for c in sorted(local) if c != result[i]]
+                if not candidates:
+                    candidates = [
+                        c for c in range(self.n_clusters) if c != result[i]
+                    ]
                 if candidates:
                     result[i] = int(rng.choice(candidates))
 

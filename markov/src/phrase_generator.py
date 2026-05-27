@@ -69,12 +69,13 @@ class PhraseGenerator:
         model = self._model
 
         labels: List[int] = []
+        rng = np.random.RandomState(seed)
         n = seed
         state = model.start_distribution.sample(seed=n)
         n += 1
 
         while len(labels) < num_measures:
-            run_len = model.persistence_duration.sample_duration(state)
+            run_len = model.persistence_duration.sample_duration(state, rng=rng)
             run_len = min(run_len, num_measures - len(labels))
             labels.extend([state] * run_len)
             if len(labels) >= num_measures:

@@ -97,7 +97,12 @@ class PersistenceDuration:
             result.append((mean, std))
         return result
 
-    def sample_duration(self, cluster: int) -> int:
+    def sample_duration(
+        self,
+        cluster: int,
+        rng: Optional[np.random.RandomState] = None,
+        mode: str = "sample",
+    ) -> int:
         """Return the expected run-length (rounded mean) for *cluster*.
 
         Uses the weighted average of the run-length histogram — no random
@@ -109,7 +114,13 @@ class PersistenceDuration:
         rl = self.run_lengths.get(cluster, [])
         if not rl:
             return 1
-        return self._weighted_average(rl)
+        if mode == "mean":
+            return self._weighted_average(rl)
+        if mode != "sample":
+            raise ValueError("mode must be 'sample' or 'mean'")
+        if rng is None:
+            rng = np.random.RandomState()
+        return int(rng.choice(rl))
 
     def get_file_runs(self, file_index: int) -> List[Tuple[int, int]]:
         """Return the ordered run sequence for a single file.

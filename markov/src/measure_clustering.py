@@ -137,6 +137,9 @@ class MeasureVector:
     measure_index: int = 0
     cluster_label: int = -1
 
+    # Lowest sounding pitch in this measure (for bass-line generation)
+    bass_pitch: int = 60
+
     # Per-measure note statistics (for data-driven generation)
     step_histogram: np.ndarray = field(
         default_factory=lambda: np.zeros(7, dtype=np.float64),
@@ -198,6 +201,12 @@ class MeasureVector:
 # ---------------------------------------------------------------------------
 # Measure extractor
 # ---------------------------------------------------------------------------
+
+
+def _bass_pitch(notes: List[Dict[str, Any]]) -> int:
+    """Lowest MIDI pitch in the measure, excluding rests."""
+    sounding = [nd["pitch"] for nd in notes if nd.get("pitch", -1) >= 0]
+    return int(min(sounding)) if sounding else 60
 
 
 def _step_histogram(notes: List[Dict[str, Any]]) -> np.ndarray:
@@ -393,6 +402,7 @@ class MeasureExtractor:
             step_histogram=_step_histogram(notes),
             velocity_mean=float(np.mean([nd["velocity"] for nd in notes])),
             velocity_std=float(np.std([nd["velocity"] for nd in notes])),
+            bass_pitch=_bass_pitch(notes),
         )
 
     @staticmethod
@@ -561,6 +571,7 @@ class MeasureClusterer:
         self.step_histograms: Optional[np.ndarray] = None   # (n_clusters, 7)
         self.velocity_means: Optional[np.ndarray] = None     # (n_clusters,)
         self.velocity_stds: Optional[np.ndarray] = None      # (n_clusters,)
+        self.bass_histograms: Optional[np.ndarray] = None    # (n_clusters, 128)
 
     # -- properties ----------------------------------------------------------
 
@@ -734,6 +745,34 @@ class MeasureClusterer:
                       out=np.full_like(vel_sq_sums, 100.0))
         )
 
+    def compute_bass_histograms(
+        self,
+        file_map: Dict[str, List["MeasureVector"]],
+        file_labels: List[List[int]],
+    ) -> np.ndarray:
+        """Compute per-cluster bass pitch distributions (k × 128)."""
+        self._require_fit()
+        n_clusters = self._centroids_raw.shape[0] if self._centroids_raw is not None else 0
+        if n_clusters == 0:
+            self.bass_histograms = np.zeros((0, 128), dtype=np.float64)
+            return self.bass_histograms
+
+        accum = np.zeros((n_clusters, 128), dtype=np.float64)
+        counts = np.zeros(n_clusters, dtype=np.int64)
+
+        for vecs, labels in zip(file_map.values(), file_labels):
+            for vec, label in zip(vecs, labels):
+                if 0 <= label < n_clusters and 0 <= vec.bass_pitch < 128:
+                    accum[label, vec.bass_pitch] += 1
+                    counts[label] += 1
+
+        for c in range(n_clusters):
+            if counts[c] > 0:
+                accum[c] /= counts[c]
+
+        self.bass_histograms = accum
+        return accum
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -789,6 +828,7 @@ class MeasureClusterer:
             "step_histograms": self.step_histograms,
             "velocity_means": self.velocity_means,
             "velocity_stds": self.velocity_stds,
+            "bass_histograms": self.bass_histograms,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -809,6 +849,7 @@ class MeasureClusterer:
         obj.step_histograms = state.get("step_histograms")
         obj.velocity_means = state.get("velocity_means")
         obj.velocity_stds = state.get("velocity_stds")
+        obj.bass_histograms = state.get("bass_histograms")
         return obj
 
 
