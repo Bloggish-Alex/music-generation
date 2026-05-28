@@ -41,6 +41,7 @@ from hierarchical_render import (
 from development_scorer import DevelopmentCandidateScorer
 from harmonic_planner import HarmonicPlanner
 from hierarchical_planning import HierarchicalPlanningMixin
+from narrative_planner import NarrativePlanner
 from hierarchical_types import (
     BarGenerationTarget,
     BarSkeleton,
@@ -318,6 +319,7 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
 
         if len(labels) > target_measures:
             labels = labels[:target_measures]
+            event_log = self._trim_events_to_length(event_log, target_measures)
 
         log.info(
             "Timeline: %d measures, %d events.",
@@ -941,7 +943,164 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             cycle += 1
 
         self._end_with_return(labels, event_log, fs, variation_strength, rng)
+        labels, event_log = self._rebalance_narrative_timeline(
+            labels,
+            event_log,
+            fs,
+            target_measures,
+            variation_strength,
+            rng,
+        )
         return labels, event_log
+
+    def _rebalance_narrative_timeline(
+        self,
+        labels: List[int],
+        event_log: List[Dict[str, Any]],
+        fs: Any,
+        target_measures: int,
+        variation_strength: float,
+        rng: np.random.RandomState,
+    ) -> Tuple[List[int], List[Dict[str, Any]]]:
+        """Increase contrast-theme presence in narrative contrast regions.
+
+        V1 only labelled the existing timeline.  V2 gently rebalances the
+        timeline by replacing selected FREE connective blocks with secondary
+        section material, preserving total length and the original grammar
+        skeleton.
+        """
+        narrative_cfg = self.config.get("narrative", {})
+        if not isinstance(narrative_cfg, dict) or not narrative_cfg.get("enabled", True):
+            return labels, event_log
+        rebalance_cfg = narrative_cfg.get("timeline_rebalance", {})
+        if not isinstance(rebalance_cfg, dict) or not rebalance_cfg.get("enabled", True):
+            return labels, event_log
+
+        primary = fs.label_sequence[0] if fs.label_sequence else "A"
+        secondary_labels = [
+            label for label in fs.label_sequence
+            if label != primary and label in fs.prototypes
+        ]
+        if not secondary_labels:
+            return labels, event_log
+        secondary = secondary_labels[0]
+
+        total_len = sum(int(ev.get("length", 0)) for ev in event_log)
+        if total_len <= 0:
+            return labels, event_log
+        current_secondary = sum(
+            int(ev.get("length", 0))
+            for ev in event_log
+            if ev.get("kind") == "SECTION" and ev.get("label") == secondary
+        )
+        min_ratio = float(rebalance_cfg.get("min_secondary_ratio", 0.16))
+        target_secondary = int(round(total_len * min_ratio))
+        needed = max(0, target_secondary - current_secondary)
+        if needed <= 0:
+            return labels[:target_measures], event_log
+
+        allowed_regions = set(rebalance_cfg.get("secondary_regions", ["CONTRAST", "DEVELOPMENT", "CLIMAX"]))
+        max_replaced = int(round(total_len * float(rebalance_cfg.get("max_replaced_ratio", 0.18))))
+        replaced = 0
+        starts = self._event_starts(event_log)
+        candidates: List[Tuple[float, int]] = []
+        for idx, ev in enumerate(event_log):
+            if ev.get("kind") != "FREE" or ev.get("grid_pad"):
+                continue
+            start = starts[idx]
+            length = int(ev.get("length", 0))
+            if length <= 0:
+                continue
+            pos = (start + 0.5 * length) / max(1, total_len - 1)
+            macro = NarrativePlanner._macro_role(
+                pos,
+                float(narrative_cfg.get("contrast_position", 0.24)),
+                float(narrative_cfg.get("development_position", 0.42)),
+                float(narrative_cfg.get("climax_position", 0.72)),
+                float(narrative_cfg.get("recap_position", 0.84)),
+                float(narrative_cfg.get("coda_position", 0.94)),
+            )
+            if macro in allowed_regions:
+                # Prefer longer blocks near the contrast/development center.
+                priority = abs(pos - 0.50) - 0.01 * length + rng.random() * 0.001
+                candidates.append((priority, idx))
+
+        for _, idx in sorted(candidates):
+            if needed <= 0 or replaced >= max_replaced:
+                break
+            ev = event_log[idx]
+            length = int(ev.get("length", 0))
+            secondary_seen_before = any(
+                prior.get("kind") == "SECTION" and prior.get("label") == secondary
+                for prior in event_log[:idx]
+            )
+            content = self.grammar.generate_section_content(
+                secondary,
+                fs,
+                vary=secondary_seen_before,
+                variation_strength=variation_strength,
+                seed=int(rng.randint(0, 2 ** 31 - 1)),
+            )
+            if not content:
+                continue
+            fitted: List[int] = []
+            while len(fitted) < length:
+                fitted.extend(content)
+            fitted = fitted[:length]
+            event_log[idx] = {
+                "kind": "SECTION",
+                "label": secondary,
+                "role": "RETURN" if secondary_seen_before else "NEW",
+                "cycle": ev.get("cycle", 0),
+                "length": length,
+                "labels": fitted,
+                "narrative_rebalanced": True,
+                "replaced_kind": "FREE",
+            }
+            needed -= length
+            replaced += length
+
+        event_log = self._trim_events_to_length(event_log, target_measures)
+        return self._labels_from_events(event_log)[:target_measures], event_log
+
+    @staticmethod
+    def _trim_events_to_length(
+        event_log: List[Dict[str, Any]],
+        target_measures: int,
+    ) -> List[Dict[str, Any]]:
+        trimmed: List[Dict[str, Any]] = []
+        used = 0
+        for ev in event_log:
+            if used >= target_measures:
+                break
+            length = int(ev.get("length", 0))
+            keep = min(length, target_measures - used)
+            if keep <= 0:
+                break
+            new_ev = dict(ev)
+            if keep < length:
+                new_ev["length"] = keep
+                new_ev["labels"] = list(ev.get("labels", []))[:keep]
+                new_ev["truncated"] = True
+            trimmed.append(new_ev)
+            used += keep
+        return trimmed
+
+    @staticmethod
+    def _event_starts(event_log: List[Dict[str, Any]]) -> List[int]:
+        starts: List[int] = []
+        pos = 0
+        for ev in event_log:
+            starts.append(pos)
+            pos += int(ev.get("length", 0))
+        return starts
+
+    @staticmethod
+    def _labels_from_events(event_log: List[Dict[str, Any]]) -> List[int]:
+        labels: List[int] = []
+        for ev in event_log:
+            labels.extend(int(x) for x in ev.get("labels", []))
+        return labels
 
     @staticmethod
     def _select_template(

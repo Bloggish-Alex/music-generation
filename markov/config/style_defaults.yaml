@@ -361,6 +361,16 @@ narrative:
   recap_position: 0.84
   coda_position: 0.94
 
+  # V2 timeline rebalancing. When the selected grammar template overuses the
+  # primary theme, replace a limited amount of FREE connective material in
+  # contrast/development regions with secondary-theme material. This increases
+  # narrative contrast without rewriting the whole form.
+  timeline_rebalance:
+    enabled: true
+    min_secondary_ratio: 0.16
+    max_replaced_ratio: 0.18
+    secondary_regions: [CONTRAST, DEVELOPMENT, CLIMAX]
+
 monophonic:
   max_overlap: 0.15       # beats. 0=strict, 0.15=legato, higher=loose
 
