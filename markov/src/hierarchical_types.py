@@ -38,7 +38,7 @@ class CompositionPlan:
     global_tonic_pc: int
     section_affects: Dict[int, SectionAffect]
     measure_targets: Dict[int, int]
-    measure_affects: Dict[int, Dict[str, float]]
+    measure_affects: Dict[int, Dict[str, Any]]
     development_roles: Dict[int, str] = field(default_factory=dict)
 
 

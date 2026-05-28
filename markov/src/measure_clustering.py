@@ -176,6 +176,10 @@ class MeasureVector:
     velocity_mean: float = 0.0
     velocity_std: float = 0.0
 
+    # Top-line note events used by ConditionalNoteModel v2.  These are kept
+    # compact and serialisable: pitch, onset, duration, velocity, and bar length.
+    melody_events: List[Dict[str, Any]] = field(default_factory=list)
+
     def as_array(self) -> np.ndarray:
         """Return the 8 texture features as a numpy array (float64).
 
@@ -548,6 +552,16 @@ class MeasureExtractor:
             velocity_mean=float(np.mean([nd["velocity"] for nd in notes])),
             velocity_std=float(np.std([nd["velocity"] for nd in notes])),
             bass_pitch=_bass_pitch(notes),
+            melody_events=[
+                {
+                    "pitch": int(nd["pitch"]),
+                    "onset": float(nd.get("onset_in_measure", 0.0)),
+                    "duration": float(nd.get("quarterLength", 0.0)),
+                    "velocity": int(nd.get("velocity", 0)),
+                    "bar_length": float(measure.beats),
+                }
+                for nd in _melody_notes(notes)
+            ],
         )
 
     @staticmethod

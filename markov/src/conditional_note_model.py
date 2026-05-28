@@ -40,7 +40,7 @@ class ConditionalNoteModel:
         self,
         counts: Dict[str, Dict[str, float]],
         total_count: float,
-        version: int = 1,
+        version: int = 2,
     ) -> None:
         self.counts = counts
         self.total_count = float(total_count)
@@ -54,13 +54,7 @@ class ConditionalNoteModel:
         harmonic_model: LearnedHarmonicModel,
         phrase_length: int = 4,
     ) -> "ConditionalNoteModel":
-        """Fit relation priors from bar pitch-class histograms.
-
-        `MeasureVector` stores duration-weighted pitch-class mass rather than
-        individual notes.  That makes v1 conservative: it learns harmonic
-        relation distributions robustly, while leaving rhythm/onset-specific
-        learning for a later note-event extraction pass.
-        """
+        """Fit relation priors from note events, with histogram fallback."""
         counts: Dict[str, Dict[str, float]] = {}
         total = 0.0
         for file_index, vectors in enumerate(file_map.values()):
@@ -72,6 +66,32 @@ class ConditionalNoteModel:
                 label = int(labels[i]) if i < len(labels) else int(getattr(vec, "cluster_label", -1))
                 chord = harmonic_model.estimate_chord(vec, tonic_pc)
                 phrase_role = harmonic_model._phrase_role(i, len(vectors), phrase_length)
+                events = cls._melody_events_from_vector(vec)
+                if events:
+                    previous_relation = "START"
+                    for event in events:
+                        relation = cls._relation_for_pc(
+                            int(event["pitch"]) % 12,
+                            chord.root_pc,
+                            chord.quality,
+                        )
+                        beat_strength = cls._beat_strength(
+                            float(event.get("onset", 0.0)),
+                            float(event.get("bar_length", 4.0)),
+                        )
+                        amount = max(0.05, float(event.get("duration", 0.25)))
+                        for key in cls._keys(
+                            label,
+                            phrase_role,
+                            chord.roman,
+                            beat_strength=beat_strength,
+                            previous_relation=previous_relation,
+                        ):
+                            cls._inc(counts.setdefault(key, {}), relation, amount)
+                        previous_relation = relation
+                        total += amount
+                    continue
+
                 hist = np.asarray(getattr(vec, "pitch_class_histogram", np.zeros(12)), dtype=np.float64)
                 if hist.shape != (12,) or float(hist.sum()) <= 0:
                     continue
@@ -83,7 +103,7 @@ class ConditionalNoteModel:
                     for key in cls._keys(label, phrase_role, chord.roman):
                         cls._inc(counts.setdefault(key, {}), relation, float(mass))
                     total += float(mass)
-        return cls(counts=counts or {"global": {"root": 1.0}}, total_count=total)
+        return cls(counts=counts or {"global": {"root": 1.0}}, total_count=total, version=2)
 
     def score_candidate(
         self,
@@ -109,14 +129,22 @@ class ConditionalNoteModel:
         roman = str(target.harmony.get("roman", "I"))
         quality = str(target.harmony.get("quality", "maj"))
         root_pc = int(target.harmony.get("root_pc", 0)) % 12
-        keys = self._keys(cluster_label, str(target.development_role), roman)
-        priors = [self._prior_for_key(key) for key in keys]
-        mixture = self._mix_priors(priors)
-
         logp = 0.0
+        previous_relation = "START"
         for note in melody:
             relation = self._relation_for_pc(note.pitch % 12, root_pc, quality)
+            beat_strength = self._beat_strength(note.beat_offset, 4.0)
+            keys = self._keys(
+                cluster_label,
+                str(target.development_role),
+                roman,
+                beat_strength=beat_strength,
+                previous_relation=previous_relation,
+            )
+            priors = [self._prior_for_key(key) for key in keys]
+            mixture = self._mix_priors(priors)
             logp += math.log(max(1e-6, mixture.get(relation, 1e-6)))
+            previous_relation = relation
         logp /= max(1, len(melody))
 
         weights = cfg.get("diagnostic_targets", {})
@@ -157,7 +185,27 @@ class ConditionalNoteModel:
         return {rel: value / total for rel, value in mixed.items()} if total > 0 else priors[-1]
 
     @staticmethod
-    def _keys(cluster_label: int, phrase_role: str, roman: str) -> List[str]:
+    def _keys(
+        cluster_label: int,
+        phrase_role: str,
+        roman: str,
+        beat_strength: Optional[str] = None,
+        previous_relation: Optional[str] = None,
+    ) -> List[str]:
+        if beat_strength is not None and previous_relation is not None:
+            return [
+                f"cluster:{cluster_label}|role:{phrase_role}|roman:{roman}|beat:{beat_strength}|prev:{previous_relation}",
+                f"cluster:{cluster_label}|roman:{roman}|beat:{beat_strength}|prev:{previous_relation}",
+                f"role:{phrase_role}|roman:{roman}|beat:{beat_strength}|prev:{previous_relation}",
+                f"roman:{roman}|beat:{beat_strength}|prev:{previous_relation}",
+                f"roman:{roman}|beat:{beat_strength}",
+                f"roman:{roman}|prev:{previous_relation}",
+                f"cluster:{cluster_label}|role:{phrase_role}|roman:{roman}",
+                f"cluster:{cluster_label}|roman:{roman}",
+                f"role:{phrase_role}|roman:{roman}",
+                f"roman:{roman}",
+                "global",
+            ]
         return [
             f"cluster:{cluster_label}|role:{phrase_role}|roman:{roman}",
             f"cluster:{cluster_label}|roman:{roman}",
@@ -191,6 +239,34 @@ class ConditionalNoteModel:
         if (degree + 1) % 12 in chord_intervals:
             return "lower_neighbor"
         return "other_non_chord"
+
+    @staticmethod
+    def _beat_strength(onset: float, bar_length: float) -> str:
+        beat = float(onset) % max(1.0, float(bar_length))
+        if abs(beat - 0.0) <= 0.08:
+            return "strong"
+        if abs(beat - 2.0) <= 0.08:
+            return "strong"
+        if abs(beat % 1.0) <= 0.08:
+            return "medium"
+        return "weak"
+
+    @staticmethod
+    def _melody_events_from_vector(vec: Any) -> List[Dict[str, Any]]:
+        events = getattr(vec, "melody_events", None)
+        if not isinstance(events, list):
+            return []
+        clean: List[Dict[str, Any]] = []
+        for event in events:
+            if not isinstance(event, dict) or int(event.get("pitch", -1)) < 0:
+                continue
+            clean.append({
+                "pitch": int(event.get("pitch", 60)),
+                "onset": float(event.get("onset", 0.0)),
+                "duration": float(event.get("duration", 0.25)),
+                "bar_length": float(event.get("bar_length", 4.0)),
+            })
+        return sorted(clean, key=lambda e: (e["onset"], e["pitch"]))
 
     @staticmethod
     def _inc(counts: Dict[str, float], key: str, amount: float) -> None:

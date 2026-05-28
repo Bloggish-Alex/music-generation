@@ -20,6 +20,7 @@ from hierarchical_types import (
     ThemeSkeleton,
 )
 from harmonic_planner import HarmonicPlanner
+from narrative_planner import NarrativePlanner
 
 _USABLE_DUR_VALUES: List[float] = [4.0, 2.0, 1.0, 0.5, 0.25, 3.0, 1.5, 0.75]
 
@@ -893,6 +894,11 @@ class HierarchicalPlanningMixin:
         theme_identity: Dict[str, Tuple[int, int]] = {}
         label_order: Dict[str, int] = {}
         label_occurrence_count: Dict[str, int] = {}
+        narrative_plan = NarrativePlanner(self.config).build(
+            measure_context,
+            labels,
+            seed=_stable_hash(base_seed, "narrative"),
+        )
 
         by_occurrence: Dict[int, List[int]] = {}
         for idx, (_, _, role, occurrence_id, _) in enumerate(measure_context):
@@ -971,6 +977,9 @@ class HierarchicalPlanningMixin:
                     self._theme_development_config().get("force_cadential_last_bar", True)
                 ):
                     bar_development_role = "CADENTIAL"
+                narrative = narrative_plan.get(global_i)
+                if narrative is not None:
+                    bar_development_role = narrative.development_role
                 development_roles[global_i] = bar_development_role
                 if len(indices) == 1:
                     target = cadence_pitch
@@ -994,6 +1003,18 @@ class HierarchicalPlanningMixin:
                 phrase_frac = local_i / max(1, len(indices) - 1)
                 local_tension = float(np.clip(tension * (0.75 + 0.45 * math.sin(math.pi * phrase_frac)), 0.0, 1.0))
                 local_intensity = intensity
+                if narrative is not None:
+                    target += int(round(narrative.register_shift))
+                    local_tension = float(np.clip(
+                        0.42 * local_tension + 0.58 * narrative.tension,
+                        0.0,
+                        1.0,
+                    ))
+                    local_intensity = float(np.clip(
+                        0.45 * local_intensity + 0.55 * narrative.intensity,
+                        0.0,
+                        1.0,
+                    ))
                 if local_i == len(indices) - 1:
                     local_tension *= 0.55
                 final_release = max(0.0, (global_i - (len(measure_context) - 9)) / 8.0)
@@ -1006,10 +1027,12 @@ class HierarchicalPlanningMixin:
                 measure_targets[global_i] = int(max(40, min(84, target)))
                 measure_affects[global_i] = {
                     "tonal_pc": float(tonal_pc),
-                    "register_center": float(register_center),
+                    "register_center": float(register_center + (narrative.register_shift if narrative else 0.0)),
                     "intensity": local_intensity,
                     "tension": local_tension,
                 }
+                if narrative is not None:
+                    measure_affects[global_i].update(narrative.to_affect())
 
         # FREE/FLAT bars still need tonal gravity, otherwise connective tissue
         # can drift away from the emotional premise of the piece.
@@ -1020,12 +1043,22 @@ class HierarchicalPlanningMixin:
             pos = i / total
             arc = math.sin(math.pi * pos)
             measure_targets[i] = tonic_register + int(round(2 * arc))
+            narrative = narrative_plan.get(i)
+            if narrative is not None:
+                measure_targets[i] += int(round(narrative.register_shift))
             measure_affects[i] = {
                 "tonal_pc": float(global_tonic_pc),
-                "register_center": float(tonic_register),
-                "intensity": float(0.32 + 0.32 * arc),
-                "tension": float(0.18 + 0.25 * arc),
+                "register_center": float(tonic_register + (narrative.register_shift if narrative else 0.0)),
+                "intensity": float(
+                    0.32 + 0.32 * arc if narrative is None else 0.45 * (0.32 + 0.32 * arc) + 0.55 * narrative.intensity
+                ),
+                "tension": float(
+                    0.18 + 0.25 * arc if narrative is None else 0.42 * (0.18 + 0.25 * arc) + 0.58 * narrative.tension
+                ),
             }
+            if narrative is not None:
+                measure_affects[i].update(narrative.to_affect())
+                development_roles[i] = narrative.development_role
 
         return CompositionPlan(
             global_tonic_pc=global_tonic_pc,

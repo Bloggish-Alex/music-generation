@@ -117,7 +117,7 @@ harmony:
   # Raise projection_strength or max_pitch_adjust if a few repeat bars remain
   # badly mismatched; lower them if repeat identity becomes too altered.
   adaptive_repair:
-    enabled: true
+    enabled: false
     score_threshold: -1.0
     chord_tone_ratio_threshold: 0.30
     non_chord_resolution_threshold: 0.85
@@ -323,9 +323,9 @@ development_scorer:
 conditional_note_model:
   # Learned conditional prior for note selection.
   # This model is trained from the corpus and scores candidates by how their
-  # melody pitch classes relate to the current harmony under the current
-  # cluster/role context. It does not edit notes; it only helps choose among
-  # generated candidates.
+  # melody notes relate to the current harmony under the current cluster/role,
+  # beat-strength, and previous-note-relation context. It does not edit notes;
+  # it only helps choose among generated candidates.
   enabled: true
 
   # candidate_score_weight affects newly sampled bars.
@@ -345,6 +345,21 @@ conditional_note_model:
     strong_beat_chord_tone_target: 0.88
     strong_beat_chord_tone: 0.65
     non_chord_resolution: 0.55
+
+narrative:
+  # Piece-level dramatic form planner. This layer does not edit notes; it
+  # assigns each bar a macro role so repeated themes can carry different
+  # dramatic functions across the piece.
+  enabled: true
+
+  # Normalized positions of macro form regions. Move climax_position later for
+  # a longer buildup; earlier for a more compact dramatic arc. coda_position
+  # controls when the final release begins.
+  contrast_position: 0.24
+  development_position: 0.42
+  climax_position: 0.72
+  recap_position: 0.84
+  coda_position: 0.94
 
 monophonic:
   max_overlap: 0.15       # beats. 0=strict, 0.15=legato, higher=loose

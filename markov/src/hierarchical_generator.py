@@ -368,6 +368,7 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         composition_plan = self._build_composition_plan(
             labels, measure_context, base_seed=base_seed,
         )
+        self._last_composition_plan = composition_plan
         harmonic_cfg = self.config.get("harmony", {})
         harmony_mode = str(harmonic_cfg.get("mode", "auto")).lower() if isinstance(harmonic_cfg, dict) else "auto"
         learned_harmony = getattr(self.model, "harmonic_model", None)
@@ -720,6 +721,7 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         bars: List[Dict[str, Any]] = []
         chord_ratios: List[float] = []
         strong_ratios: List[float] = []
+        narrative_counts: Dict[str, int] = {}
         bass_root_or_fifth = 0
         bass_count = 0
         for i, notes in enumerate(all_notes):
@@ -737,6 +739,10 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 if diag.get("bass_is_root_or_fifth"):
                     bass_root_or_fifth += 1
             label, local_bar, role, occurrence_id, section_len = measure_context[i]
+            affect = self._last_composition_plan.measure_affects.get(i, {}) if hasattr(self, "_last_composition_plan") else {}
+            narrative_role = affect.get("narrative_role")
+            if isinstance(narrative_role, str):
+                narrative_counts[narrative_role] = narrative_counts.get(narrative_role, 0) + 1
             bars.append({
                 "bar": i + 1,
                 "cluster": int(labels[i]) if i < len(labels) else None,
@@ -745,14 +751,32 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 "local_bar": int(local_bar),
                 "occurrence_id": int(occurrence_id),
                 "section_len": int(section_len),
+                "narrative_role": narrative_role,
+                "narrative_tension": affect.get("narrative_tension"),
+                "narrative_intensity": affect.get("narrative_intensity"),
                 "harmony": harmony_dict,
                 "diagnostics": diag,
             })
+        conditional_cfg = self.config.get("conditional_note_model", {})
+        conditional_enabled = (
+            conditional_cfg.get("enabled", True)
+            if isinstance(conditional_cfg, dict)
+            else True
+        )
+        conditional_model = getattr(self.model, "conditional_note_model", None)
         summary = {
             "requested_mode": requested_mode,
             "actual_mode": actual_mode,
             "has_learned_model": has_learned_model,
+            "conditional_note_model_active": (
+                conditional_model is not None
+                and bool(conditional_enabled)
+            ),
+            "conditional_note_model_version": (
+                getattr(conditional_model, "version", None)
+            ),
             "bar_count": len(all_notes),
+            "narrative_role_counts": narrative_counts,
             "mean_chord_tone_ratio": float(np.mean(chord_ratios)) if chord_ratios else None,
             "mean_strong_beat_chord_tone_ratio": float(np.mean(strong_ratios)) if strong_ratios else None,
             "bass_root_or_fifth_ratio": (
