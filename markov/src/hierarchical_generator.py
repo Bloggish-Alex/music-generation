@@ -24,13 +24,34 @@ Usage::
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
-from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+from hierarchical_render import (
+    clamp_measure_bounds,
+    clamp_overlaps,
+    ensure_final_bar_end,
+    write_midi,
+)
+from development_scorer import DevelopmentCandidateScorer
+from harmonic_planner import HarmonicPlanner
+from hierarchical_planning import HierarchicalPlanningMixin
+from hierarchical_types import (
+    BarGenerationTarget,
+    BarSkeleton,
+    CompositionPlan,
+    NoteEvent,
+    SectionAffect,
+    StructureEdge,
+    ThemeIdentity,
+    ThemeSkeleton,
+)
+from hierarchical_sampler import ClusterNoteSampler
 from music_model import MusicModel
 from phrase_generator import PhraseGenerator
 
@@ -125,487 +146,65 @@ GRID_WEIGHTS = [7, 2, 1]          # grid-aligned, mostly-grid, irregular templat
 TICKS_PER_BEAT = 480
 
 # ---------------------------------------------------------------------------
-# NoteEvent
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class NoteEvent:
-    """One note or rest within a measure."""
-
-    pitch: int           # MIDI pitch 0–127, or -1 for rest
-    duration_ql: float   # quarterLength
-    velocity: int        # 1–127, 0 for rests
-    beat_offset: float   # position within the bar (0.0 = downbeat)
-    voice: str = "melody"
-
-
-# ---------------------------------------------------------------------------
 # ClusterNoteSampler
 # ---------------------------------------------------------------------------
 
 
-# Duration categories actually used (excludes sub-sixteenth and triplets for sanity)
+# Duration categories used by return-motif variation.
 _USABLE_DUR_VALUES: List[float] = [4.0, 2.0, 1.0, 0.5, 0.25, 3.0, 1.5, 0.75]
-_USABLE_DUR_INDICES: List[int] = [0, 1, 2, 3, 4, 6, 7, 8]
+
+def _deep_update(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge ``overrides`` into ``base``."""
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
-class ClusterNoteSampler:
-    """Generate per-measure notes from cluster centroids + pitch histograms.
+def _config_root() -> Path:
+    """Default deployment config root.
 
-    Each cluster's 8-D centroid determines rhythmic texture (density,
-    duration preferences, rest probability, syncopation).  The 12-D
-    pitch-class histogram determines which pitch classes are likely.
-
-    Pitch continuity is enforced via random walk within a constrained
-    register; velocity follows a phrase-level arc.
+    In the final layout the CLI runs from ``bin/`` and config lives in the
+    sibling ``config/`` directory, so this resolves to ``../config``.
     """
-
-    def __init__(
-        self,
-        centroids: np.ndarray,               # (n_clusters, 8)
-        pitch_histograms: np.ndarray | None,  # (n_clusters, 12) or None
-        step_histograms: np.ndarray | None = None,  # (n_clusters, 7) or None
-        bass_histograms: np.ndarray | None = None,  # (n_clusters, 128) or None
-        phrase_role_stats: Dict[int, Dict[str, Dict[str, float]]] | None = None,
-        bass_config: Dict[str, Any] | None = None,
-    ) -> None:
-        if centroids.ndim != 2 or centroids.shape[1] < 8:
-            raise ValueError("centroids must be (n_clusters, >=8)")
-        self._centroids = centroids
-        self._n_clusters = centroids.shape[0]
-
-        if pitch_histograms is not None and pitch_histograms.shape[0] == self._n_clusters:
-            self._pitch_hists = pitch_histograms
-        else:
-            self._pitch_hists = np.full(
-                (self._n_clusters, 12), 1.0 / 12, dtype=np.float64,
-            )
-
-        if step_histograms is not None and step_histograms.shape == (self._n_clusters, 7):
-            self._step_hists = step_histograms
-        else:
-            self._step_hists = np.array(
-                [[0.20, 0.18, 0.18, 0.15, 0.12, 0.10, 0.07]] * self._n_clusters,
-                dtype=np.float64,
-            )
-
-        if bass_histograms is not None and bass_histograms.shape == (self._n_clusters, 128):
-            self._bass_hists = bass_histograms
-        else:
-            self._bass_hists = None
-
-        self._bass_config = bass_config or {}
-        self._bass_enabled = self._bass_config.get("enabled", True) and self._bass_hists is not None
-        self._phrase_role_stats = phrase_role_stats or {}
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def sample_measure(
-        self,
-        cluster_label: int,
-        time_signature: Tuple[int, int] = (4, 4),
-        seed: int | None = None,
-        perturb: float = 0.0,
-        is_section_end: bool = False,
-        phrase_role: str = "CONTINUATION",
-        target_pitch: int | None = None,
-        previous_pitch: int | None = None,
-    ) -> List[NoteEvent]:
-        """Generate notes for one measure with melodic continuity.
-
-        Args:
-            cluster_label: Which cluster (0..k-1) this measure belongs to.
-            time_signature: (numerator, denominator).
-            seed: Per-measure random seed for reproducibility.
-            perturb: 0.0 = exact, ~0.25 = mild variation (RETURN),
-                ~0.5 = stronger variation (VARIANT).
-            is_section_end: If True, ends the measure with a held note or
-                rest to create breathing space at section boundaries.
-
-        Returns:
-            List of NoteEvent, whose durations sum to *bar_length_ql*.
-        """
-        rng = np.random.RandomState(seed)
-        c = cluster_label % self._n_clusters
-        centroid = self._centroids[c]
-        pc_hist = self._pitch_hists[c]
-
-        note_density = float(centroid[0])
-        mean_dur = float(centroid[1])
-        dur_var = float(centroid[2])
-        short_ratio = float(centroid[3])
-        silence_ratio = float(centroid[4])
-        offbeat_ratio = float(centroid[5])
-        # syncopation = centroid[6] — unused for now
-        syncopation = float(centroid[6])
-        entropy = float(centroid[7])
-        cluster_pitch_mean = float(centroid[8]) if len(centroid) > 8 else 60.0
-        cluster_pitch_slope = float(centroid[10]) if len(centroid) > 10 else 0.0
-        cluster_pitch_range = float(centroid[9]) if len(centroid) > 9 else 8.0
-        cluster_cadence = float(centroid[17]) if len(centroid) > 17 else 0.0
-
-        role_profile = self._phrase_role_stats.get(c, {}).get(phrase_role, {})
-        if role_profile:
-            # These are learned corpus ratios for the same cluster under the
-            # current phrase role.  Clamping keeps sparse roles from producing
-            # extreme values while still letting the training data shape the
-            # phrase direction.
-            note_density *= float(np.clip(role_profile.get("density_scale", 1.0), 0.45, 1.8))
-            mean_dur *= float(np.clip(role_profile.get("duration_scale", 1.0), 0.55, 1.8))
-            entropy *= float(np.clip(role_profile.get("entropy_scale", 1.0), 0.45, 1.8))
-            offbeat_ratio *= float(np.clip(role_profile.get("offbeat_scale", 1.0), 0.25, 2.0))
-
-        ts_num, ts_den = time_signature
-        bar_length_ql = ts_num * (4.0 / ts_den)
-
-        if phrase_role == "OPENING":
-            entropy *= 0.75
-            offbeat_ratio *= 0.7
-        elif phrase_role == "ANSWER":
-            entropy *= 0.9
-        elif phrase_role == "DEVELOPMENT":
-            entropy *= 1.2
-            syncopation *= 1.2
-        elif phrase_role == "CADENCE_PREP":
-            note_density *= 0.85
-            offbeat_ratio *= 0.6
-        elif phrase_role == "CADENCE":
-            note_density *= 0.65
-            entropy *= 0.6
-            offbeat_ratio *= 0.25
-
-        # --- rest probability ---
-        rest_prob = float(np.clip(silence_ratio, 0.0, 0.6))
-        if phrase_role == "CADENCE":
-            rest_prob = min(0.75, rest_prob + 0.15)
+    return Path.cwd().parent / "config"
 
 
-        # --- note count ---
-        # density is roughly onsets per quarter note; cap at 6 notes/quarter
-        raw_count = max(2, int(note_density * bar_length_ql * 2.0))
-        raw_count += int(rng.normal(0, entropy * 1.5))
-        target_count = max(2, min(raw_count, 24))
-        if phrase_role == "CADENCE":
-            target_count = min(target_count, 6)
-        elif phrase_role == "OPENING":
-            target_count = min(target_count, 10)
-
-        # --- pick 2-4 "preferred" durations for rhythmic coherence ---
-        pref_durs = self._pick_preferred_durations(
-            mean_dur, dur_var, short_ratio, rng,
-        )
-
-        # --- choose a register for this measure ---
-        # A melodic skeleton target keeps repeated sections directionally
-        # coherent; without one, fall back to the cluster pitch-class histogram.
-        if target_pitch is not None:
-            centre_pitch = int(target_pitch)
-        else:
-            pc_centre = int(rng.choice(12, p=pc_hist))
-            centre_octave = int(rng.choice([3, 3, 4, 4, 4, 5]))  # weighted toward middle
-            centre_pitch = 12 * (centre_octave + 1) + pc_centre
-            if len(centroid) > 8:
-                centre_pitch = int(round(centre_pitch * 0.55 + cluster_pitch_mean * 0.45))
-        if role_profile:
-            centre_pitch = int(round(centre_pitch + role_profile.get("pitch_offset", 0.0)))
-        centre_pitch = max(40, min(84, centre_pitch))
-        window = int(max(7, min(14, cluster_pitch_range * 0.65 + 5)))
-        lo_pitch = max(28, centre_pitch - window)
-        hi_pitch = min(96, centre_pitch + window)
-
-        # Start pitch near centre
-        if previous_pitch is not None:
-            current_pitch = int(round(previous_pitch * 0.55 + centre_pitch * 0.45))
-        else:
-            current_pitch = int(centre_pitch + rng.randint(-4, 5))
-        current_pitch = max(lo_pitch, min(hi_pitch, current_pitch))
-
-        # --- velocity arc ---
-        vel_peak = int(rng.normal(100, 8))  # peak velocity this measure
-        vel_trough = int(rng.normal(55, 10))
-        vel_peak_frac = rng.uniform(0.25, 0.55)  # when the peak hits in the bar
-
-        # --- generate notes ---
-        notes: List[NoteEvent] = []
-        remaining = bar_length_ql
-        beat = 0.0
-        note_idx = 0
-
-        while remaining > 0.03 and note_idx < target_count:
-            note_idx += 1
-
-            # --- rest? ---
-            if note_idx > 1 and rng.random() < rest_prob * 0.5:
-                # Insert a short rest
-                rest_dur = float(rng.choice([d for d in pref_durs if d <= remaining + 0.01]))
-                rest_dur = float(min(rest_dur, remaining))
-                notes.append(NoteEvent(
-                    pitch=-1, duration_ql=rest_dur,
-                    velocity=0, beat_offset=beat,
-                ))
-                beat += rest_dur
-                remaining -= rest_dur
-                if remaining <= 0.03:
-                    break
-
-            # --- duration ---
-            eligible = [(d, d) for d in pref_durs if d <= remaining + 0.01]
-            if not eligible:
-                dur = remaining
-            else:
-                # Weight by inverse of how often each dur has been used
-                used_counts = {d: 0 for d in pref_durs}
-                for n in notes:
-                    if n.duration_ql in used_counts:
-                        used_counts[n.duration_ql] += 1
-                w = np.array([1.0 / (1.0 + used_counts.get(d, 0))
-                               for d, _ in eligible], dtype=np.float64)
-                w /= w.sum()
-                dur = float(eligible[int(rng.choice(len(eligible), p=w))][0])
-
-            dur = float(min(dur, remaining))
-            if dur < 0.25:
-                dur = 0.25  # no shorter than sixteenth
-
-            # --- pitch (random walk with pitch-class constraint) ---
-            if note_idx == 1:
-                pitch = current_pitch
-            else:
-                # Step size: from per-cluster interval distribution (learned from data)
-                step_weights = self._step_hists[c]
-                step_dir = 1 if rng.random() < STEP_UPWARD_BIAS else -1
-                max_step = int(rng.choice(len(step_weights), p=step_weights))
-                step = rng.randint(0, max_step + 3) * step_dir
-
-                # Bias toward pitch classes in the histogram
-                candidate_pitch = current_pitch + step
-                candidate_pc = candidate_pitch % 12
-                if rng.random() > pc_hist[candidate_pc] * 4:  # unlikely PC → reject leap
-                    candidate_pitch = current_pitch + int(step * 0.5)
-
-                if target_pitch is not None:
-                    delta = int(target_pitch - candidate_pitch)
-                    if abs(delta) > 2 and rng.random() < 0.45:
-                        candidate_pitch += int(np.sign(delta) * min(abs(delta), 3))
-                elif role_profile:
-                    role_slope = float(role_profile.get("pitch_slope", cluster_pitch_slope))
-                    if abs(role_slope) > 0.2 and rng.random() < 0.35:
-                        candidate_pitch += int(np.sign(role_slope))
-
-                current_pitch = max(lo_pitch, min(hi_pitch, candidate_pitch))
-
-            pitch = int(current_pitch)
-            if target_pitch is not None and phrase_role == "CADENCE" and remaining - dur <= 0.03:
-                pitch = max(lo_pitch, min(hi_pitch, int(target_pitch)))
-                current_pitch = pitch
-            elif phrase_role == "CADENCE" and role_profile and remaining - dur <= 0.03:
-                closure = float(role_profile.get("cadence_closure", cluster_cadence))
-                if closure > 0.08:
-                    pitch = self._nearest_pitch_to_pc(int(np.argmax(pc_hist)), centre_pitch)
-                    current_pitch = pitch
-
-            # --- velocity (phrase arc) ---
-            progress = beat / bar_length_ql if bar_length_ql > 0 else 0
-            if progress < vel_peak_frac:
-                # Build toward peak
-                frac = progress / vel_peak_frac
-                vel = int(vel_trough + (vel_peak - vel_trough) * frac)
-            else:
-                # Decay after peak
-                frac = (progress - vel_peak_frac) / (1.0 - vel_peak_frac)
-                vel = int(vel_peak + (vel_trough - vel_peak) * frac)
-            vel += int(rng.normal(0, 5))  # small jitter
-            vel = max(35, min(127, vel))
-
-            # --- beat offset (subtle swing for offbeat clusters) ---
-            if rng.random() < offbeat_ratio * 0.3:
-                beat_offset = beat + rng.uniform(0.02, 0.12)
-            else:
-                beat_offset = beat
-
-            notes.append(NoteEvent(
-                pitch=pitch,
-                duration_ql=dur,
-                velocity=vel,
-                beat_offset=beat_offset,
-            ))
-
-            beat += dur
-            remaining -= dur
-
-        self._apply_breathing(notes, is_section_end, bar_length_ql)
-        self._apply_perturbation(notes, perturb, lo_pitch, hi_pitch, seed)
-
-        return notes
-
-    @staticmethod
-    def _nearest_pitch_to_pc(pc: int, reference: int) -> int:
-        """Nearest pitch with pitch class ``pc`` around ``reference``."""
-        candidates = [
-            reference + offset
-            for offset in range(-12, 13)
-            if (reference + offset) % 12 == pc
-        ]
-        return min(candidates, key=lambda p: (abs(p - reference), p)) if candidates else reference
-
-    @staticmethod
-    def _apply_breathing(
-        notes: List[NoteEvent],
-        is_section_end: bool,
-        bar_length_ql: float,
-    ) -> None:
-        """Shorten the last note to create a gap at section boundaries."""
-        if not is_section_end or not notes:
-            return
-        gap = 0.5
-        for idx in range(len(notes) - 1, -1, -1):
-            if notes[idx].pitch >= 0:
-                n = notes[idx]
-                new_dur = bar_length_ql - gap - n.beat_offset
-                if new_dur > 0:
-                    notes[idx] = NoteEvent(
-                        pitch=n.pitch,
-                        duration_ql=new_dur,
-                        velocity=max(30, n.velocity - 15),
-                        beat_offset=n.beat_offset,
-                        voice=n.voice,
-                    )
-                else:
-                    del notes[idx]
-                    continue
-                del notes[idx + 1:]
-                break
-
-    @staticmethod
-    def _apply_perturbation(
-        notes: List[NoteEvent],
-        perturb: float,
-        lo_pitch: int,
-        hi_pitch: int,
-        seed: int | None,
-    ) -> None:
-        """Post-generation random perturbation for RETURN / VARIANT."""
-        if perturb <= 0.0 or not notes:
-            return
-        rng = np.random.RandomState(
-            None if seed is None else seed + 999999,
-        )
-        for idx in range(len(notes)):
-            n = notes[idx]
-            if n.pitch < 0:
-                continue
-            if rng.random() < perturb:
-                shift = int(rng.choice([-2, -1, 1, 2]))
-                new_pitch = max(lo_pitch, min(hi_pitch, n.pitch + shift))
-                dur = n.duration_ql
-                if rng.random() < perturb * 0.5:
-                    neighbors = [
-                        d for d in _USABLE_DUR_VALUES
-                        if abs(d - dur) < dur * 0.6 and d != dur
-                    ]
-                    if neighbors:
-                        dur = float(rng.choice(neighbors))
-                vel = n.velocity
-                if vel > 0:
-                    vel = max(35, min(127, int(vel + rng.normal(0, 5))))
-                notes[idx] = NoteEvent(
-                    pitch=new_pitch,
-                    duration_ql=dur,
-                    velocity=vel,
-                    beat_offset=n.beat_offset,
-                    voice=n.voice,
-                )
-
-    def _add_bass_note(
-        self,
-        notes: List[NoteEvent],
-        cluster_label: int,
-        bar_length_ql: float,
-        rng: np.random.RandomState,
-    ) -> None:
-        """Append a bass anchor sampled from the trained bass distribution.
-
-        The bass register and sustain are tunable. Defaults avoid two common
-        failure modes: every bar using the same sustain and the bass collapsing
-        into an impractically low register.
-        """
-        hist = self._bass_hists[cluster_label]
-        pitch = int(rng.choice(128, p=hist))
-        octave_shift = self._bass_config.get("octave_shift", 1)
-        pitch = pitch - 12 * octave_shift
-        low = int(self._bass_config.get("low", 36))
-        high = int(self._bass_config.get("high", 60))
-        pitch = max(low, min(high, pitch))
-
-        sustain = float(self._bass_config.get("sustain_fraction", 0.78))
-        full_bar_probability = float(self._bass_config.get("full_bar_probability", 0.22))
-        if rng.random() < full_bar_probability:
-            sustain = 1.0
-        vel_scale = self._bass_config.get("velocity_scale", 0.7)
-        avg_vel = int(sum(n.velocity for n in notes if n.velocity > 0)
-                      / max(1, sum(1 for n in notes if n.velocity > 0)))
-        vel = max(25, int(avg_vel * vel_scale))
-
-        notes.append(NoteEvent(
-            pitch=pitch,
-            duration_ql=bar_length_ql * sustain,
-            velocity=vel,
-            beat_offset=0.0,
-            voice="bass",
-        ))
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _pick_preferred_durations(
-        self, mean_dur: float, dur_var: float, short_ratio: float,
-        rng: np.random.RandomState,
-    ) -> List[float]:
-        """Pick 2–4 preferred duration values for this measure.
-
-        Selects durations close to *mean_dur*, with spread controlled by
-        *dur_var* and a bias toward shorter values when *short_ratio* is
-        high.  Returning a small set per measure creates rhythmic motifs.
-        """
-        scored = []
-        for dv in _USABLE_DUR_VALUES:
-            z = (dv - mean_dur) / max(dur_var, 0.08)
-            score = np.exp(-0.5 * z * z)
-            if dv <= 0.5:
-                score += short_ratio * 1.5
-            scored.append((dv, score))
-
-        scored.sort(key=lambda x: -x[1])
-
-        # Take top 2–4
-        n_pick = int(rng.choice([2, 2, 3, 3, 4]))
-        picked = [dv for dv, _ in scored[:n_pick]]
-        return sorted(picked)
+def _available_profiles() -> List[str]:
+    profile_dir = _config_root() / "profiles"
+    if not profile_dir.exists():
+        return []
+    return sorted(p.stem for p in profile_dir.glob("*.yaml"))
 
 
-# ---------------------------------------------------------------------------
-# HierarchicalGenerator
-# ---------------------------------------------------------------------------
-
-
-def _load_style_config(path: str | Path | None) -> Dict[str, Any]:
+def _load_style_config(path: str | Path | None, profile: str | None = None) -> Dict[str, Any]:
     """Load style parameters from a YAML file, falling back to defaults."""
     import yaml
-    default_path = Path(__file__).resolve().parent.parent / "config" / "style_defaults.yaml"
-    if path:
-        with open(path) as f:
-            return yaml.safe_load(f)
+    config_root = _config_root()
+    default_path = config_root / "style_defaults.yaml"
+    config: Dict[str, Any] = {}
     if default_path.exists():
         with open(default_path) as f:
-            return yaml.safe_load(f)
-    return {}
+            config = yaml.safe_load(f) or {}
+    if profile:
+        profile_path = config_root / "profiles" / f"{profile.lower()}.yaml"
+        if not profile_path.exists():
+            available = _available_profiles()
+            suffix = f" Available: {', '.join(available)}" if available else ""
+            raise ValueError(
+                f"Unknown composer profile '{profile}'.{suffix}"
+            )
+        with open(profile_path) as f:
+            _deep_update(config, yaml.safe_load(f) or {})
+    if path:
+        with open(path) as f:
+            _deep_update(config, yaml.safe_load(f) or {})
+    return config
 
 
-class HierarchicalGenerator:
+class HierarchicalGenerator(HierarchicalPlanningMixin):
     """Three-tier music generator.
 
     Combines SectionGrammar (macro form), PhraseGenerator (FREE block
@@ -619,12 +218,17 @@ class HierarchicalGenerator:
             Falls back to the defaults if not provided.
     """
 
-    def __init__(self, model: MusicModel, config_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        model: MusicModel,
+        config_path: str | Path | None = None,
+        composer_profile: str | None = None,
+    ) -> None:
         self.model = model
         self.phrase_gen = PhraseGenerator(model)
 
         # Load style config first — needed by sampler
-        self.config = _load_style_config(config_path)
+        self.config = _load_style_config(config_path, composer_profile)
 
         centroids = model.clusterer.centroids
         if centroids is None:
@@ -639,6 +243,12 @@ class HierarchicalGenerator:
             phrase_role_stats=phrase_role_stats,
             bass_config=self.config.get("bass", {}),
         )
+        self.development_scorer = DevelopmentCandidateScorer(
+            step_hists,
+            pitch_hists,
+            self.config,
+        )
+        self.harmonic_planner = HarmonicPlanner(self.config)
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
 
@@ -753,15 +363,49 @@ class HierarchicalGenerator:
         measure_context = self._build_measure_context(event_log)
         breathing = self._compute_breathing(measure_context)
         n = len(measure_context)
+        base_seed = seed if seed is not None else 0
+        structure_graph = self._build_structure_graph(measure_context)
+        composition_plan = self._build_composition_plan(
+            labels, measure_context, base_seed=base_seed,
+        )
+        harmonic_cfg = self.config.get("harmony", {})
+        harmony_mode = str(harmonic_cfg.get("mode", "auto")).lower() if isinstance(harmonic_cfg, dict) else "auto"
+        learned_harmony = getattr(self.model, "harmonic_model", None)
+        actual_harmony_mode = "disabled"
+        if self.harmonic_planner.enabled and learned_harmony is not None and harmony_mode in ("auto", "learned"):
+            harmonic_plan = learned_harmony.build_plan(
+                measure_context,
+                composition_plan.measure_affects,
+                composition_plan.global_tonic_pc,
+                seed=base_seed,
+                config=self.config,
+            )
+            actual_harmony_mode = "learned"
+        elif harmony_mode == "learned" and learned_harmony is None:
+            log.warning("harmony.mode=learned but model has no learned harmony; using rule planner fallback.")
+            harmonic_plan = self.harmonic_planner.build_plan(
+                measure_context,
+                composition_plan.measure_affects,
+                composition_plan.global_tonic_pc,
+            )
+            actual_harmony_mode = "rule_fallback" if self.harmonic_planner.enabled else "disabled"
+        else:
+            harmonic_plan = self.harmonic_planner.build_plan(
+                measure_context,
+                composition_plan.measure_affects,
+                composition_plan.global_tonic_pc,
+            )
+            actual_harmony_mode = "rule" if self.harmonic_planner.enabled else "disabled"
 
         # 3. Per-measure note generation
         all_notes: List[List[NoteEvent]] = []
-        base_seed = seed if seed is not None else 0
         occurrence_count: Dict[str, int] = {}
         motif_memory: Dict[str, List[List[NoteEvent]]] = {}
+        theme_identities: Dict[str, ThemeIdentity] = {}
+        theme_skeletons: Dict[str, ThemeSkeleton] = {}
         return_variation_plans: Dict[int, List[str]] = {}
         melodic_skeleton = self._build_melodic_skeleton(
-            labels, measure_context, base_seed,
+            labels, measure_context, base_seed, composition_plan,
         )
         previous_melody_pitch: Optional[int] = None
 
@@ -777,6 +421,20 @@ class HierarchicalGenerator:
 
             phrase_role = self._phrase_role(bi, section_len, role)
             target_pitch = melodic_skeleton.get(i)
+            affect = dict(composition_plan.measure_affects.get(i) or {})
+            harmony = harmonic_plan.get(i)
+            if harmony is not None:
+                affect["harmony"] = harmony.to_dict()
+            bar_target = self._build_bar_generation_target(
+                bar_index=i,
+                label=sl,
+                local_bar=bi,
+                target_pitch=target_pitch,
+                affect=affect,
+                structure_graph=structure_graph,
+                theme_skeletons=theme_skeletons,
+                composition_plan=composition_plan,
+            )
 
             # Seed from section identity (FREE/FLAT use per-measure seed)
             if role in ("FREE", "FLAT"):
@@ -789,21 +447,29 @@ class HierarchicalGenerator:
                 notes = self._clone_notes(motif_memory[sl][bi])
                 reused_motif = True
             else:
-                notes = self.note_sampler.sample_measure(
+                notes = self._generate_scored_measure(
                     cluster_label=cluster_id,
                     time_signature=time_signature,
-                    seed=measure_seed,
-                    perturb=0.0,
                     is_section_end=is_end,
                     phrase_role=phrase_role,
                     target_pitch=target_pitch,
                     previous_pitch=previous_melody_pitch,
+                    affect=affect,
+                    bar_target=bar_target,
+                    seed=measure_seed,
                 )
                 if role == "NEW":
                     motif_memory.setdefault(sl, [])
                     while len(motif_memory[sl]) <= bi:
                         motif_memory[sl].append([])
                     motif_memory[sl][bi] = self._clone_notes(notes)
+                    self._update_theme_identity(
+                        theme_identities, sl, motif_memory[sl], section_len,
+                    )
+                    self._update_theme_skeleton(
+                        theme_skeletons, sl, motif_memory[sl],
+                        section_len, composition_plan.global_tonic_pc,
+                    )
 
             # Controlled variation: non-NEW sections get transforms.
             # Strength s is data-driven: average cluster entropy scaled
@@ -836,6 +502,19 @@ class HierarchicalGenerator:
                 base_strength = float(motif_cfg.get("base_strength", 0.10))
                 occurrence_growth = float(motif_cfg.get("occurrence_growth", 0.06))
                 max_strength = float(motif_cfg.get("max_strength", 0.38))
+                scorer_cfg = self.config.get("development_scorer", {})
+                candidate_count = int(scorer_cfg.get("candidate_count", 5))
+                scorer_weights = scorer_cfg.get("weights", {}) if isinstance(scorer_cfg, dict) else {}
+                harmony_return_weight = float(
+                    scorer_weights.get("harmony", 1.15)
+                    if isinstance(scorer_weights, dict) else 1.15
+                )
+                harmony_cfg = self.config.get("harmony", {})
+                if isinstance(harmony_cfg, dict) and harmony_cfg.get("enabled", False) and bar_target.harmony:
+                    multiplier = float(harmony_cfg.get("return_candidate_count_multiplier", 1.6))
+                    if bar_target.cadence_strength > 0.5 or bar_target.harmony.get("cadence_role") == "CADENCE":
+                        multiplier = float(harmony_cfg.get("cadence_return_candidate_count_multiplier", 2.2))
+                    candidate_count = max(candidate_count, int(round(candidate_count * multiplier)))
                 if role == "REPEAT":
                     base_strength *= float(motif_cfg.get("repeat_strength_scale", 0.55))
                     occurrence_growth *= float(motif_cfg.get("repeat_growth_scale", 0.35))
@@ -850,17 +529,118 @@ class HierarchicalGenerator:
                     ),
                 )
                 variation_mode = plan[min(bi, len(plan) - 1)] if plan else "CONTOUR"
-                variation_rng = np.random.RandomState(
-                    _stable_hash(base_seed, sl, occurrence_id, bi, "motif-return")
+                identity = theme_identities.get(sl)
+                skeleton = theme_skeletons.get(sl)
+                source_notes = self._clone_notes(notes)
+                previous_notes = all_notes[-1] if all_notes else None
+                best_notes: Optional[List[NoteEvent]] = None
+                best_score = -1e9
+                strength = min(
+                    max_strength,
+                    (base_strength + occurrence_growth * k) * bar_target.development_strength,
                 )
-                notes = self._vary_return_motif(
-                    notes,
-                    strength=min(max_strength, base_strength + occurrence_growth * k),
-                    rng=variation_rng,
-                    target_pitch=target_pitch,
-                    variation_mode=variation_mode,
-                    phrase_role=phrase_role,
-                )
+                for candidate_i in range(max(1, candidate_count)):
+                    variation_rng = np.random.RandomState(
+                        _stable_hash(base_seed, sl, occurrence_id, bi, "motif-return", candidate_i)
+                    )
+                    candidate_strength = strength * float(
+                        variation_rng.uniform(0.85, 1.15)
+                    )
+                    candidate_notes = self._vary_return_motif(
+                        source_notes,
+                        strength=candidate_strength,
+                        rng=variation_rng,
+                        target_pitch=target_pitch,
+                        variation_mode=variation_mode,
+                        phrase_role=phrase_role,
+                        development_role=bar_target.development_role,
+                        target_attraction=bar_target.target_attraction,
+                        rhythm_change_scale=bar_target.rhythm_change_scale,
+                    )
+                    if identity is not None and bar_target.development_role not in ("FRAGMENT", "INTENSIFY"):
+                        candidate_notes = self._apply_theme_identity(
+                            candidate_notes,
+                            identity=identity,
+                            bar_index=bi,
+                            section_len=section_len,
+                            target_pitch=target_pitch,
+                            rng=variation_rng,
+                        )
+                    candidate_notes = self._fit_notes_to_bar_target(
+                        candidate_notes, bar_target, variation_rng,
+                    )
+                    development_score = self.development_scorer.score(
+                        candidate_notes,
+                        bar_target,
+                        cluster_id,
+                        source_notes=source_notes,
+                        previous_notes=previous_notes,
+                    ).total
+                    harmony_score = HarmonicPlanner.score_melody(
+                        candidate_notes,
+                        bar_target.harmony,
+                        self.config,
+                    )
+                    conditional_score = 0.0
+                    conditional_model = getattr(self.model, "conditional_note_model", None)
+                    conditional_cfg = self.config.get("conditional_note_model", {})
+                    if (
+                        conditional_model is not None
+                        and isinstance(conditional_cfg, dict)
+                        and conditional_cfg.get("enabled", True)
+                    ):
+                        conditional_score = float(conditional_cfg.get("return_score_weight", 0.85)) * (
+                            conditional_model.score_candidate(
+                                candidate_notes,
+                                bar_target,
+                                cluster_id,
+                                self.config,
+                            )
+                        )
+                    score = development_score + harmony_return_weight * harmony_score + conditional_score
+                    if score > best_score:
+                        best_score = score
+                        best_notes = candidate_notes
+                if best_notes is not None:
+                    repaired_notes = self._repair_harmony_mismatch(best_notes, bar_target)
+                    if repaired_notes is not best_notes:
+                        repaired_development = self.development_scorer.score(
+                            repaired_notes,
+                            bar_target,
+                            cluster_id,
+                            source_notes=source_notes,
+                            previous_notes=previous_notes,
+                        ).total
+                        repaired_harmony = HarmonicPlanner.score_melody(
+                            repaired_notes,
+                            bar_target.harmony,
+                            self.config,
+                        )
+                        repaired_conditional = 0.0
+                        conditional_model = getattr(self.model, "conditional_note_model", None)
+                        conditional_cfg = self.config.get("conditional_note_model", {})
+                        if (
+                            conditional_model is not None
+                            and isinstance(conditional_cfg, dict)
+                            and conditional_cfg.get("enabled", True)
+                        ):
+                            repaired_conditional = float(conditional_cfg.get("return_score_weight", 0.85)) * (
+                                conditional_model.score_candidate(
+                                    repaired_notes,
+                                    bar_target,
+                                    cluster_id,
+                                    self.config,
+                                )
+                            )
+                        repaired_score = (
+                            repaired_development
+                            + harmony_return_weight * repaired_harmony
+                            + repaired_conditional
+                        )
+                        if repaired_score > best_score:
+                            best_score = repaired_score
+                            best_notes = repaired_notes
+                notes = best_notes if best_notes is not None else notes
             if role not in ("FREE", "FLAT") and bi == 0:
                 occurrence_count[sl] = occurrence_count.get(sl, 0) + 1
 
@@ -868,7 +648,21 @@ class HierarchicalGenerator:
             previous_melody_pitch = self._last_melody_pitch(notes, previous_melody_pitch)
 
         # 3c. Add bass line (after transforms, so bass is unaffected)
-        if self.note_sampler._bass_enabled:
+        harmony_bass_enabled = bool(self.config.get("harmony", {}).get("enabled", False)) \
+            and bool(self.config.get("harmony", {}).get("bass", {}).get("enabled", True))
+        if harmony_bass_enabled:
+            bl_ql = time_signature[0] * (4.0 / time_signature[1])
+            for mi in range(len(all_notes)):
+                harmony = harmonic_plan.get(mi)
+                if harmony is not None:
+                    HarmonicPlanner.add_bass_note(
+                        all_notes[mi],
+                        harmony,
+                        bl_ql,
+                        self.config,
+                        np.random.RandomState(_stable_hash(base_seed, "harmony-bass", mi)),
+                    )
+        elif self.note_sampler._bass_enabled:
             bl_ql = time_signature[0] * (4.0 / time_signature[1])
             for mi in range(len(all_notes)):
                 cid = labels[mi]
@@ -879,16 +673,27 @@ class HierarchicalGenerator:
 
         # 3d. Rendering: clamp overlaps on every measure (melody only — bass is
         # added after transforms so it never participates in clamping).
-        self._clamp_overlaps(all_notes)
-        self._clamp_measure_bounds(all_notes, time_signature)
-        self._ensure_final_bar_end(all_notes, time_signature)
-        self._clamp_measure_bounds(all_notes, time_signature)
+        clamp_overlaps(all_notes, self.config)
+        clamp_measure_bounds(all_notes, time_signature)
+        ensure_final_bar_end(all_notes, time_signature)
+        clamp_measure_bounds(all_notes, time_signature)
 
         # 4. Write MIDI via mido (silence = absence of note events)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_midi(all_notes, output_path, tempo, time_signature)
+        write_midi(all_notes, output_path, tempo, time_signature)
         log.info("Wrote MIDI to %s (%d measures).", output_path, len(all_notes))
+
+        self._write_harmony_diagnostics(
+            output_path=output_path,
+            labels=labels,
+            measure_context=measure_context,
+            all_notes=all_notes,
+            harmonic_plan=harmonic_plan,
+            requested_mode=harmony_mode,
+            actual_mode=actual_harmony_mode,
+            has_learned_model=learned_harmony is not None,
+        )
 
         # 5. Save structure visualization
         from structure_plotter import StructurePlotter
@@ -897,332 +702,71 @@ class HierarchicalGenerator:
 
         return labels
 
-    def _section_entropy(self, sec_labels: List[int]) -> float:
-        """Average entropy across the cluster labels in a section."""
-        centroids = self.model.clusterer.centroids
-        indices = [c for c in sec_labels if 0 <= c < len(centroids)]
-        if not indices:
-            return 0.0
-        return float(centroids[indices, 7].mean())
-
-    @staticmethod
-    def _clone_notes(notes: List[NoteEvent]) -> List[NoteEvent]:
-        """Copy note events so motif memory can be reused without mutation."""
-        return [
-            NoteEvent(
-                pitch=n.pitch,
-                duration_ql=n.duration_ql,
-                velocity=n.velocity,
-                beat_offset=n.beat_offset,
-                voice=n.voice,
-            )
-            for n in notes
-        ]
-
-    @staticmethod
-    def _last_melody_pitch(notes: List[NoteEvent], fallback: Optional[int]) -> Optional[int]:
-        sounding = [n for n in notes if n.pitch >= 0 and n.voice == "melody"]
-        return sounding[-1].pitch if sounding else fallback
-
-    @staticmethod
-    def _phrase_role(bar_index: int, section_len: int, structural_role: str) -> str:
-        """Assign a simple intra-section role used by the note renderer."""
-        if structural_role in ("FREE", "FLAT") or section_len <= 1:
-            return "CONTINUATION"
-        if bar_index == 0:
-            return "OPENING"
-        if bar_index == 1:
-            return "ANSWER"
-        if bar_index >= section_len - 1:
-            return "CADENCE"
-        if bar_index == section_len - 2:
-            return "CADENCE_PREP"
-        midpoint = max(2, section_len // 2)
-        if bar_index >= midpoint:
-            return "DEVELOPMENT"
-        return "CONTINUATION"
-
-    def _build_melodic_skeleton(
+    def _write_harmony_diagnostics(
         self,
+        output_path: Path,
         labels: List[int],
         measure_context: List[Tuple[str, int, str, int, int]],
-        base_seed: int,
-    ) -> Dict[int, int]:
-        """Create bar-level target pitches for phrase direction.
-
-        This is intentionally lightweight: it does not force a melody, but it
-        gives each section an opening point, a high point, and a cadence target.
-        """
-        skeleton: Dict[int, int] = {}
-        by_occurrence: Dict[int, List[int]] = {}
-        for idx, ctx in enumerate(measure_context):
-            _, _, role, occurrence_id, _ = ctx
-            if role not in ("FREE", "FLAT"):
-                by_occurrence.setdefault(occurrence_id, []).append(idx)
-
-        for occurrence_id, indices in by_occurrence.items():
-            if not indices:
-                continue
-            rng = np.random.RandomState(_stable_hash(base_seed, "skeleton", occurrence_id))
-            first_cluster = labels[indices[0]] % self.note_sampler._n_clusters
-            last_cluster = labels[indices[-1]] % self.note_sampler._n_clusters
-            first_pc = int(np.argmax(self.note_sampler._pitch_hists[first_cluster]))
-            last_pc = int(np.argmax(self.note_sampler._pitch_hists[last_cluster]))
-            start_pitch = self._nearest_pitch(first_pc, int(rng.choice([60, 62, 64, 65, 67])))
-            cadence_pitch = self._nearest_pitch(last_pc, start_pitch)
-            high_pitch = min(84, max(start_pitch, cadence_pitch) + int(rng.choice([3, 4, 5, 7])))
-            peak_pos = max(1, int(round((len(indices) - 1) * rng.uniform(0.45, 0.65))))
-
-            for local_i, global_i in enumerate(indices):
-                if len(indices) == 1:
-                    target = cadence_pitch
-                elif local_i <= peak_pos:
-                    frac = local_i / max(1, peak_pos)
-                    target = round(start_pitch + (high_pitch - start_pitch) * frac)
-                else:
-                    frac = (local_i - peak_pos) / max(1, len(indices) - 1 - peak_pos)
-                    target = round(high_pitch + (cadence_pitch - high_pitch) * frac)
-                skeleton[global_i] = int(max(40, min(84, target)))
-        return skeleton
-
-    @staticmethod
-    def _nearest_pitch(pc: int, reference: int) -> int:
-        candidates = [reference + offset for offset in range(-12, 13) if (reference + offset) % 12 == pc]
-        return min(candidates, key=lambda p: (abs(p - reference), p)) if candidates else reference
-
-    def _build_return_variation_plan(
-        self,
-        section_len: int,
-        role: str,
-        rng: np.random.RandomState,
-    ) -> List[str]:
-        """Create a phrase-level plan for a returned section.
-
-        The important product behavior is that a RETURN is recognisable as the
-        same family without replaying every bar literally.  The plan assigns a
-        distinct variation role per bar, so contour and cadence evolve across
-        the phrase instead of each bar receiving an isolated random nudge.
-        """
-        section_len = max(1, int(section_len))
-        if role == "REPEAT":
-            palette = ["ANCHOR", "CONTOUR", "ANCHOR", "RHYTHM"]
-        else:
-            palette = ["ANCHOR", "CONTOUR", "DEVELOP", "RHYTHM"]
-
-        plan: List[str] = []
-        rotation = int(rng.randint(0, len(palette)))
-        for i in range(section_len):
-            if i == section_len - 1:
-                plan.append("CADENCE")
-            elif i == 0:
-                plan.append("ANCHOR" if role == "REPEAT" else "CONTOUR")
-            else:
-                plan.append(palette[(i + rotation) % len(palette)])
-
-        # Avoid long runs of exact anchors, which were the main cause of
-        # repeated bar signatures in returned material.
-        for i in range(1, len(plan) - 1):
-            if plan[i - 1] == "ANCHOR" and plan[i] == "ANCHOR":
-                plan[i] = "CONTOUR"
-        return plan
-
-    def _vary_return_motif(
-        self,
-        notes: List[NoteEvent],
-        strength: float,
-        rng: np.random.RandomState,
-        target_pitch: Optional[int],
-        variation_mode: str = "CONTOUR",
-        phrase_role: str = "CONTINUATION",
-    ) -> List[NoteEvent]:
-        """Convert a recalled motif into a same-family variant.
-
-        Motif memory should preserve identity, but RETURN must not mean
-        byte-for-byte repetition forever.  This function keeps onset rhythm
-        stable and changes only a small number of melody pitches, velocities,
-        and occasional short durations.  That gives recognisable recurrence
-        without allowing long exact-copy loops to dominate the output.
-        """
-        varied = self._clone_notes(notes)
-        melody_indices = [
-            idx for idx, note in enumerate(varied)
-            if note.pitch >= 0 and note.voice == "melody"
-        ]
-        if not melody_indices:
-            return varied
-
-        motif_cfg = self.config.get("motif_return", {})
-        min_pitch = int(motif_cfg.get("min_pitch", 40))
-        max_pitch = int(motif_cfg.get("max_pitch", 84))
-        target_attraction = float(motif_cfg.get("target_attraction", 0.55))
-        velocity_change_prob = float(motif_cfg.get("velocity_change_prob", 0.35))
-        velocity_jitter_std = float(motif_cfg.get("velocity_jitter_std", 3.0))
-        rhythm_change_scale = float(motif_cfg.get("rhythm_change_scale", 0.35))
-        mode = variation_mode.upper()
-        mode_scale = {
-            "ANCHOR": 0.65,
-            "CONTOUR": 1.15,
-            "DEVELOP": 1.35,
-            "RHYTHM": 1.05,
-            "CADENCE": 1.10,
-        }.get(mode, 1.0)
-        effective_strength = min(0.8, max(0.02, strength * mode_scale))
-
-        max_changes = max(1, int(round(len(melody_indices) * effective_strength)))
-        change_count = min(len(melody_indices), max_changes)
-        selected = set(rng.choice(melody_indices, size=change_count, replace=False))
-        if mode in ("CONTOUR", "DEVELOP", "CADENCE"):
-            selected.add(melody_indices[-1])
-
-        for local_pos, idx in enumerate(melody_indices):
-            note = varied[idx]
-            pitch = note.pitch
-            duration = note.duration_ql
-            velocity = note.velocity
-
-            if idx in selected:
-                step = int(rng.choice([-2, -1, 1, 2]))
-                if mode == "DEVELOP":
-                    step = int(rng.choice([-3, -2, 2, 3]))
-                elif mode == "CADENCE" and target_pitch is not None:
-                    step = 1 if target_pitch > pitch else -1
-                elif mode == "CONTOUR" and target_pitch is not None:
-                    # Push later notes more strongly toward the section-level
-                    # skeleton target, producing a phrase-level direction.
-                    progress = local_pos / max(1, len(melody_indices) - 1)
-                    if progress > 0.45:
-                        step = 1 if target_pitch > pitch else -1
-                if target_pitch is not None and rng.random() < target_attraction:
-                    step = 1 if target_pitch > pitch else -1
-                pitch = int(max(min_pitch, min(max_pitch, pitch + step)))
-
-                # Keep rhythmic identity on returns; only very short gestures
-                # may breathe a little so the bar is not mechanically copied.
-                rhythm_prob = effective_strength * rhythm_change_scale
-                if mode == "RHYTHM":
-                    rhythm_prob = min(0.8, rhythm_prob * 2.0)
-                if duration <= 0.75 and rng.random() < rhythm_prob:
-                    candidates = [
-                        d for d in _USABLE_DUR_VALUES
-                        if 0.1 <= d <= 1.0 and abs(d - duration) <= 0.25
-                    ]
-                    if candidates:
-                        duration = float(rng.choice(candidates))
-
-            if mode == "CADENCE" and idx == melody_indices[-1] and target_pitch is not None:
-                pitch = int(max(min_pitch, min(max_pitch, target_pitch)))
-                if phrase_role == "CADENCE":
-                    duration = max(duration, 0.75)
-
-            if velocity > 0 and rng.random() < velocity_change_prob:
-                velocity = int(max(35, min(127, velocity + rng.normal(0, velocity_jitter_std))))
-
-            varied[idx] = NoteEvent(
-                pitch=pitch,
-                duration_ql=duration,
-                velocity=velocity,
-                beat_offset=note.beat_offset,
-                voice=note.voice,
-            )
-
-        return varied
-
-    def _clamp_overlaps(self, all_notes: List[List[NoteEvent]]) -> None:
-        """Rendering constraint: clamp per-measure note durations so
-        consecutive notes do not overlap beyond the configured maximum."""
-        max_ov = self.config.get("monophonic", {}).get("max_overlap", 0.15)
-        _min_dur = 0.1
-        for mi in range(len(all_notes)):
-            sounding = sorted(
-                [n for n in all_notes[mi] if n.pitch >= 0 and n.voice == "melody"],
-                key=lambda n: n.beat_offset,
-            )
-            for i in range(len(sounding) - 1):
-                if sounding[i + 1].beat_offset - sounding[i].beat_offset < 0.02:
-                    continue
-                cur_end = sounding[i].beat_offset + sounding[i].duration_ql
-                allowed = sounding[i + 1].beat_offset + max_ov
-                if cur_end > allowed:
-                    sounding[i] = NoteEvent(
-                        pitch=sounding[i].pitch,
-                        duration_ql=max(_min_dur,
-                                        allowed - sounding[i].beat_offset),
-                        velocity=sounding[i].velocity,
-                        beat_offset=sounding[i].beat_offset,
-                        voice=sounding[i].voice,
-                    )
-            others = [n for n in all_notes[mi] if n.pitch < 0 or n.voice != "melody"]
-            all_notes[mi] = sorted(sounding + others,
-                                   key=lambda n: n.beat_offset)
-
-    @staticmethod
-    def _clamp_measure_bounds(
         all_notes: List[List[NoteEvent]],
-        time_signature: Tuple[int, int],
+        harmonic_plan: Dict[int, Any],
+        requested_mode: str,
+        actual_mode: str,
+        has_learned_model: bool,
     ) -> None:
-        """Clamp every event to its containing bar.
-
-        Earlier render constraints handled overlaps and final extension, but a
-        transformed short-note chain could still place notes just past beat 4.
-        This method makes bar bounds a hard invariant for all voices.
-        """
-        bar_length_ql = time_signature[0] * (4.0 / time_signature[1])
-        min_dur = 0.05
-        for mi, notes in enumerate(all_notes):
-            bounded: List[NoteEvent] = []
-            for note in notes:
-                if note.beat_offset >= bar_length_ql - min_dur:
-                    continue
-                max_duration = bar_length_ql - note.beat_offset
-                duration = min(note.duration_ql, max_duration)
-                if duration < min_dur:
-                    continue
-                bounded.append(NoteEvent(
-                    pitch=note.pitch,
-                    duration_ql=duration,
-                    velocity=note.velocity,
-                    beat_offset=max(0.0, note.beat_offset),
-                    voice=note.voice,
-                ))
-            all_notes[mi] = sorted(bounded, key=lambda n: (n.beat_offset, n.pitch))
-
-    @staticmethod
-    def _ensure_final_bar_end(
-        all_notes: List[List[NoteEvent]],
-        time_signature: Tuple[int, int],
-    ) -> None:
-        """Guarantee the rendered MIDI reaches the requested final bar.
-
-        This is a rendering invariant, not a stylistic hack: the structure
-        layer asks for N measures, so the MIDI should end at exactly N bars
-        unless the user explicitly requests a pickup or fade-out.
-        """
-        if not all_notes:
+        """Write a compact JSON report for harmony debugging."""
+        cfg = self.config.get("harmony", {})
+        if not isinstance(cfg, dict) or not cfg.get("diagnostics", True):
             return
-        final_measure = all_notes[-1]
-        sounding = [
-            (idx, note) for idx, note in enumerate(final_measure)
-            if note.pitch >= 0
-        ]
-        if not sounding:
-            return
-
-        bar_length_ql = time_signature[0] * (4.0 / time_signature[1])
-        idx, note = max(
-            sounding,
-            key=lambda pair: pair[1].beat_offset + pair[1].duration_ql,
-        )
-        end = note.beat_offset + note.duration_ql
-        if end >= bar_length_ql - 1e-6:
-            return
-
-        final_measure[idx] = NoteEvent(
-            pitch=note.pitch,
-            duration_ql=max(0.1, bar_length_ql - note.beat_offset),
-            velocity=note.velocity,
-            beat_offset=note.beat_offset,
-            voice=note.voice,
-        )
+        bars: List[Dict[str, Any]] = []
+        chord_ratios: List[float] = []
+        strong_ratios: List[float] = []
+        bass_root_or_fifth = 0
+        bass_count = 0
+        for i, notes in enumerate(all_notes):
+            harmony = harmonic_plan.get(i)
+            harmony_dict = harmony.to_dict() if harmony is not None else None
+            diag = HarmonicPlanner.diagnostics(notes, harmony_dict, self.config)
+            chord_ratio = diag.get("chord_tone_ratio")
+            strong_ratio = diag.get("strong_beat_chord_tone_ratio")
+            if isinstance(chord_ratio, (int, float)):
+                chord_ratios.append(float(chord_ratio))
+            if isinstance(strong_ratio, (int, float)):
+                strong_ratios.append(float(strong_ratio))
+            if diag.get("bass_pc") is not None:
+                bass_count += 1
+                if diag.get("bass_is_root_or_fifth"):
+                    bass_root_or_fifth += 1
+            label, local_bar, role, occurrence_id, section_len = measure_context[i]
+            bars.append({
+                "bar": i + 1,
+                "cluster": int(labels[i]) if i < len(labels) else None,
+                "section_label": label,
+                "section_role": role,
+                "local_bar": int(local_bar),
+                "occurrence_id": int(occurrence_id),
+                "section_len": int(section_len),
+                "harmony": harmony_dict,
+                "diagnostics": diag,
+            })
+        summary = {
+            "requested_mode": requested_mode,
+            "actual_mode": actual_mode,
+            "has_learned_model": has_learned_model,
+            "bar_count": len(all_notes),
+            "mean_chord_tone_ratio": float(np.mean(chord_ratios)) if chord_ratios else None,
+            "mean_strong_beat_chord_tone_ratio": float(np.mean(strong_ratios)) if strong_ratios else None,
+            "bass_root_or_fifth_ratio": (
+                bass_root_or_fifth / bass_count if bass_count else None
+            ),
+        }
+        report = {
+            "summary": summary,
+            "bars": bars,
+        }
+        diag_path = output_path.with_suffix(".harmony.json")
+        with open(diag_path, "w") as f:
+            json.dump(report, f, indent=2)
+        log.info("Wrote harmony diagnostics to %s", diag_path)
 
     @staticmethod
     def _build_measure_context(
@@ -1469,72 +1013,6 @@ class HierarchicalGenerator:
             "labels": content[:free_len],
         })
 
-    # ------------------------------------------------------------------
-    # Internal: MIDI output via mido
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _write_midi(
-        measures: List[List[NoteEvent]],
-        output_path: Path,
-        tempo: int,
-        time_signature: Tuple[int, int],
-    ) -> None:
-        """Write MIDI via mido — direct tick-level control.
-
-        Silence is simply the absence of note events.  No rests needed.
-        """
-        import mido
-
-        ts_num, ts_den = time_signature
-        bar_length_ql = ts_num * (4.0 / ts_den)
-        tpb = 480
-        us_per_beat = int(60_000_000 / tempo)
-
-        mid = mido.MidiFile(ticks_per_beat=tpb)
-        track = mido.MidiTrack()
-        mid.tracks.append(track)
-
-        track.append(mido.MetaMessage('set_tempo', tempo=us_per_beat, time=0))
-        track.append(mido.MetaMessage(
-            'time_signature', numerator=ts_num, denominator=ts_den,
-            clocks_per_click=24, notated_32nd_notes_per_beat=8, time=0,
-        ))
-
-        # Collect all (tick, note_on/off) events and sort.  At identical ticks,
-        # note_off must come before note_on to avoid accidental stuck overlaps.
-        events: List[Tuple[int, str, int, int, int]] = []
-
-        for measure_idx, nev_list in enumerate(measures):
-            bar_base_ticks = measure_idx * bar_length_ql * tpb
-            for nev in nev_list:
-                if nev.pitch < 0:
-                    continue
-                start_tick = int(bar_base_ticks + nev.beat_offset * tpb)
-                end_tick = int(start_tick + nev.duration_ql * tpb)
-                if end_tick <= start_tick:
-                    continue
-                channel = 1 if nev.voice == "bass" else 0
-                events.append((start_tick, 'on', nev.pitch, nev.velocity, channel))
-                events.append((end_tick, 'off', nev.pitch, 0, channel))
-
-        events.sort(key=lambda e: (e[0], 0 if e[1] == 'off' else 1))
-
-        prev_tick = 0
-        for tick, etype, pitch, velocity, channel in events:
-            delta = tick - prev_tick
-            if etype == 'on':
-                track.append(mido.Message('note_on', note=pitch,
-                                          velocity=velocity, channel=channel,
-                                          time=delta))
-            else:
-                track.append(mido.Message('note_off', note=pitch,
-                                          velocity=0, channel=channel,
-                                          time=delta))
-            prev_tick = tick
-
-        mid.save(str(output_path))
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1611,7 +1089,12 @@ def _build_parser() -> "argparse.ArgumentParser":
     parser.add_argument(
         "--config",
         default=None,
-        help="Path to YAML style config (default: config/style_defaults.yaml).",
+        help="Optional YAML overrides applied after defaults/profile.",
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Composer profile name from ../config/profiles/<name>.yaml.",
     )
     return parser
 
@@ -1639,7 +1122,11 @@ def main() -> None:
             int(x.strip()) for x in args.start_states.split(",") if x.strip()
         ]
 
-    gen = HierarchicalGenerator(model, config_path=args.config)
+    gen = HierarchicalGenerator(
+        model,
+        config_path=args.config,
+        composer_profile=args.profile,
+    )
 
     log.info(
         "Generating %d measures (template=%s, variation=%.2f) ...",

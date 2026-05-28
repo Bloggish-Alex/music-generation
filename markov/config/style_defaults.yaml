@@ -1,8 +1,9 @@
 # Hierarchical Music Generation — Style Configuration
 #
 # These are genuine musical style choices, not derivable from data.
-# Override via --config my_style.yaml on the CLI, or edit here.
-# All values shown are the defaults tuned on the Corelli corpus.
+# Use --profile <name> to apply ../config/profiles/<name>.yaml, then optionally
+# override any value with --config my_style.yaml.
+# Values shown here are neutral defaults; profiles override selected fields.
 
 cadence:
   gap: 0.5                # beats of silence at section boundaries
@@ -25,6 +26,117 @@ velocity:
   peak_frac_min: 0.25     # where the peak hits in the bar
   peak_frac_max: 0.55
 
+harmony:
+  # Optional harmonic planning layer.
+  # Set enabled: false to bypass the module and return to the previous
+  # melody/theme-only path. When enabled, each bar receives a functional
+  # Roman-numeral context used by candidate scoring and, optionally, bass.
+  enabled: true
+  # mode:
+  #   auto    = use LearnedHarmonicModel when the trained model contains one,
+  #             otherwise fall back to the rule progression below.
+  #   learned = require learned harmony when available; warn and fall back if
+  #             loading an older model without harmony/harmony.json.
+  #   rule    = ignore learned harmony and use the progression below.
+  mode: auto
+  diagnostics: true       # write <output>.harmony.json after each generation
+
+  # Harmony-aware melody realization generates extra local candidates when a
+  # bar has a harmony target. Increase these if the diagnostics still show low
+  # strong-beat chord-tone ratios; lower them if generation becomes too slow.
+  candidate_count_multiplier: 1.5
+  cadence_candidate_count_multiplier: 2.5
+
+  # Reused motif/return bars are harder because theme identity can conflict
+  # with the current harmony. These multipliers give the return-motif sampler
+  # more variants to choose from before applying the harmony-aware score.
+  return_candidate_count_multiplier: 1.6
+  cadence_return_candidate_count_multiplier: 2.2
+
+  # Default phrase-level harmonic rhythm. The planner maps local phrase
+  # position onto this progression, then forces penultimate bars toward V and
+  # final bars toward I. Use simpler progressions for classical/baroque styles;
+  # add more predominant/dominant motion for romantic tension.
+  progression: [I, vi, IV, V]
+  cadence:
+    final: I
+    # Chords allowed to close a structural cadence. Keep this narrow for
+    # common-practice tonal music. ii/IV should normally be cadence preparation,
+    # not the endpoint; widening this makes section endings less decisive.
+    allowed_endpoints: [I, V]
+
+  # Strong-beat chord tone scoring. In 4/4, beats 1 and 3 are treated as
+  # structurally strong. Increase tolerance if generated onsets are loose.
+  strong_beats: [0.0, 2.0]
+  strong_beat_tolerance: 0.08
+
+  # Soft scoring weights. Raise these if the music sounds harmonically vague;
+  # lower them if melody becomes too constrained or too chord-tone heavy.
+  scoring:
+    chord_tone_ratio: 1.00
+    strong_beat_chord_tone: 1.80
+    cadence_fit: 2.20
+    unresolved_dissonance: 0.70
+    non_chord_resolution: 0.85
+
+  # Final realization nudges structurally important melody notes toward the
+  # chosen harmony after motif/register shaping. This is deliberately a nudge,
+  # not a full rewrite, so the Markov texture and theme identity survive.
+  #
+  # strong_beat_chord_tone_strength: attraction for notes on strong beats.
+  # Raise if bars sound harmonically unclear; lower if melody becomes arpeggiated.
+  #
+  # cadence_final_chord_tone_strength: attraction for the last melody note in
+  # cadence bars. Keep high for classical closure; lower for freer styles.
+  #
+  # max_pitch_adjust: largest semitone correction allowed. Raise if diagnostics
+  # still show bad cadences; lower if melodic shape is being distorted.
+  #
+  # prefer_root_on_final_cadence: true makes final cadence notes prefer the
+  # chord root, especially useful for I endings.
+  realization:
+    strong_beat_chord_tone_strength: 0.65
+    cadence_final_chord_tone_strength: 0.95
+    max_pitch_adjust: 5
+    prefer_root_on_final_cadence: true
+
+    # Non-chord tones are allowed when they behave like passing/neighbor tones.
+    # This block only nudges notes that are not stepwise-resolved. Raise the
+    # strengths if diagnostics show high non_chord_resolution_cost; lower them
+    # if the melody loses expressive chromatic motion.
+    non_chord_resolution:
+      enabled: true
+      weak_note_chord_tone_strength: 0.30
+      cadence_weak_note_strength: 0.50
+      max_pitch_adjust: 3
+      preserve_stepwise_passing_tones: true
+
+  # Last-resort repair for reused/returned motif bars. It only runs when a
+  # selected return candidate still fails harmony diagnostics, then creates an
+  # extra candidate with stronger projection of unresolved non-chord tones.
+  # Raise projection_strength or max_pitch_adjust if a few repeat bars remain
+  # badly mismatched; lower them if repeat identity becomes too altered.
+  adaptive_repair:
+    enabled: true
+    score_threshold: -1.0
+    chord_tone_ratio_threshold: 0.30
+    non_chord_resolution_threshold: 0.85
+    projection_strength: 0.82
+    max_pitch_adjust: 5
+    preserve_stepwise_passing_tones: true
+
+  # Harmonic bass replaces the old sampled bass only when harmony.enabled is
+  # true. root_weight near 1.0 gives stable root-position bass; lower values
+  # allow more fifths and lighter motion.
+  bass:
+    enabled: true
+    low: 36
+    high: 60
+    reference: 45
+    root_weight: 0.78
+    sustain_fraction: 0.88
+    velocity_scale: 0.66
+
 structure:
   grid_size: 4             # snap section starts to N-bar boundaries
   max_grid_pad: 3          # max bars padded to reach grid
@@ -35,8 +147,252 @@ variation:
   progression_denominator: 3  # k/(k+N) curve steepness
   min_strength: 0.02      # below this, skip transforms
 
+theme_development:
+  # Theme development controls how repeated section families evolve.
+  # It is intentionally role-based rather than tied to a single composer:
+  # profiles can reorder the return_arc or adjust role parameters without
+  # changing code.
+  #
+  # statement_role: role assigned to a theme's first full appearance.
+  # repeat_role: role assigned to immediate/literal structural repeats.
+  # return_arc: roles assigned to later returns of the same theme family.
+  # final_role: role used when a theme occurrence reaches the end of the piece.
+  # late_cadential_threshold: after this normalized position, late_role may
+  # replace the normal return_arc role to encourage closure.
+  statement_role: STATEMENT
+  repeat_role: REPEAT
+  return_arc: [REPEAT, SEQUENCE_UP, FRAGMENT, INTENSIFY, CADENTIAL]
+  final_role: CADENTIAL
+  late_role: CADENTIAL
+  late_cadential_threshold: 0.86
+  force_cadential_last_bar: true
+
+  # Role parameters:
+  # similarity_target is the desired contour/rhythm relatedness to the theme.
+  # Raise both values for more literal recurrence; lower them for freer
+  # development. A wide range lets local Markov style decide more.
+  #
+  # strength_scale multiplies motif variation strength for this role.
+  # Increase if returns are too static; decrease if theme identity weakens.
+  #
+  # register_shift moves the role's register target in semitones.
+  # Positive values usually intensify; negative values relax.
+  #
+  # target_attraction controls how strongly altered notes move toward the
+  # skeleton target pitch. Higher = clearer direction/cadence; lower = freer.
+  #
+  # rhythm_change_scale controls how much short-note rhythm may change.
+  # Higher = more development; lower = stronger rhythmic identity.
+  roles:
+    STATEMENT:
+      similarity_target: [0.80, 1.00]
+      strength_scale: 0.00
+      register_shift: 0
+      target_attraction: 0.50
+      rhythm_change_scale: 0.60
+    REPEAT:
+      similarity_target: [0.82, 0.95]
+      strength_scale: 0.75
+      register_shift: 0
+      target_attraction: 0.55
+      rhythm_change_scale: 0.65
+      exact_copy_penalty_scale: 1.10
+    SEQUENCE_UP:
+      similarity_target: [0.62, 0.86]
+      strength_scale: 1.15
+      register_shift: 2
+      sequence_step_per_bar: 1.0
+      target_attraction: 0.62
+      rhythm_change_scale: 0.75
+      exact_copy_penalty_scale: 1.25
+    SEQUENCE_DOWN:
+      similarity_target: [0.62, 0.86]
+      strength_scale: 1.15
+      register_shift: -2
+      sequence_step_per_bar: 1.0
+      target_attraction: 0.62
+      rhythm_change_scale: 0.75
+      exact_copy_penalty_scale: 1.25
+    FRAGMENT:
+      similarity_target: [0.42, 0.72]
+      strength_scale: 1.35
+      register_shift: 0
+      target_attraction: 0.48
+      rhythm_change_scale: 1.10
+      exact_copy_penalty_scale: 1.45
+    EXTENSION:
+      similarity_target: [0.55, 0.82]
+      strength_scale: 1.10
+      register_shift: 1
+      target_attraction: 0.58
+      rhythm_change_scale: 0.90
+      exact_copy_penalty_scale: 1.20
+    INTENSIFY:
+      similarity_target: [0.50, 0.80]
+      strength_scale: 1.30
+      register_shift: 4
+      target_attraction: 0.65
+      rhythm_change_scale: 1.00
+      tension_scale: 1.12
+      intensity_scale: 1.08
+      exact_copy_penalty_scale: 1.35
+    RELAX:
+      similarity_target: [0.52, 0.82]
+      strength_scale: 0.95
+      register_shift: -3
+      target_attraction: 0.52
+      rhythm_change_scale: 0.80
+      tension_scale: 0.86
+      intensity_scale: 0.88
+      exact_copy_penalty_scale: 1.10
+    CADENTIAL:
+      similarity_target: [0.38, 0.72]
+      strength_scale: 1.05
+      register_shift: -2
+      target_attraction: 0.80
+      rhythm_change_scale: 0.55
+      cadence_strength_add: 0.25
+      tension_scale: 0.78
+      intensity_scale: 0.88
+      exact_copy_penalty_scale: 1.30
+
+development_scorer:
+  # Soft scoring layer for developed theme-return candidates.
+  # Unlike hard rules, this does not edit or clamp notes. It generates several
+  # variants, scores them against learned cluster priors plus musical targets,
+  # and keeps the best candidate.
+  #
+  # candidate_count: candidates per recalled motif bar. Increase for better
+  # musical selection at higher CPU cost; decrease for faster generation.
+  candidate_count: 5
+
+  # Weights control preference strength in candidate selection.
+  # style: fit to learned interval distribution from training data.
+  # pitch_pc: fit to learned pitch-class distribution from training data.
+  # harmony: fit to the current harmonic context after return-motif variation.
+  #          Raise if repeated/returned themes ignore harmony; lower if theme
+  #          identity becomes too weak or too chord-tone heavy.
+  # leap: penalize unlikely or excessive melodic leaps.
+  # register: penalize unexplained register jumps from the previous bar and
+  #           drift away from the skeleton register target.
+  # direction: reward role-appropriate direction, e.g. sequence up/down.
+  # cadence: reward final pitch/duration fit for cadential roles.
+  # similarity: keep role-specific similarity within the target range.
+  # exact_copy: penalize literal replay when the role calls for development.
+  weights:
+    style: 0.85
+    pitch_pc: 0.35
+    harmony: 1.15
+    leap: 0.85
+    register: 0.55
+    direction: 0.45
+    cadence: 0.70
+    similarity: 0.65
+    exact_copy: 0.55
+
+  # Role allowances decide when a big move is considered musically plausible.
+  # leap_allowance above 1.0 makes large intervals less costly for that role.
+  # register_jump_allowance is the tolerated mean-register movement from the
+  # previous bar before a soft penalty starts.
+  roles:
+    REPEAT:
+      leap_allowance: 0.75
+      register_jump_allowance: 4.0
+    SEQUENCE_UP:
+      leap_allowance: 1.10
+      register_jump_allowance: 7.0
+    SEQUENCE_DOWN:
+      leap_allowance: 1.10
+      register_jump_allowance: 7.0
+    FRAGMENT:
+      leap_allowance: 0.95
+      register_jump_allowance: 6.0
+    EXTENSION:
+      leap_allowance: 1.00
+      register_jump_allowance: 6.0
+    INTENSIFY:
+      leap_allowance: 1.25
+      register_jump_allowance: 8.0
+    RELAX:
+      leap_allowance: 0.90
+      register_jump_allowance: 5.0
+    CADENTIAL:
+      leap_allowance: 0.85
+      register_jump_allowance: 5.0
+
+conditional_note_model:
+  # Learned conditional prior for note selection.
+  # This model is trained from the corpus and scores candidates by how their
+  # melody pitch classes relate to the current harmony under the current
+  # cluster/role context. It does not edit notes; it only helps choose among
+  # generated candidates.
+  enabled: true
+
+  # candidate_score_weight affects newly sampled bars.
+  # return_score_weight affects reused/returned motif bars, where theme
+  # identity and harmony often conflict. Raise these if diagnostics show
+  # persistent harmony mismatch; lower them if generated melodies become too
+  # conservative or too chord-tone heavy.
+  candidate_score_weight: 0.85
+  return_score_weight: 0.95
+
+  # Diagnostics-as-objective: these are soft candidate-selection targets, not
+  # hard repairs. The scorer rewards candidates that approach these targets
+  # while still respecting learned relation priors.
+  diagnostic_targets:
+    chord_tone_ratio_target: 0.58
+    chord_tone_ratio: 0.35
+    strong_beat_chord_tone_target: 0.88
+    strong_beat_chord_tone: 0.65
+    non_chord_resolution: 0.55
+
 monophonic:
   max_overlap: 0.15       # beats. 0=strict, 0.15=legato, higher=loose
+
+skeleton:
+  candidate_count: 4      # candidates per bar before skeleton scoring; higher = better fit but slower
+
+  # Register spread controls how far skeleton-conditioned melody may move
+  # away from the current tonal/emotional target.
+  #
+  # Increase these for romantic/pianistic styles (Chopin/Liszt) when the music
+  # sounds too flat, over-controlled, or emotionally compressed.
+  # Decrease them for contrapuntal/classical/baroque styles when the melody
+  # sounds too jumpy or loses tonal focus.
+  #
+  # candidate_target_spread_base: minimum semitone freedom for every non-cadence bar.
+  # candidate_target_spread_tension: extra semitone freedom at high tension.
+  # Example:
+  #   conservative: base=2, tension=5
+  #   Chopin-like:  base=4, tension=9
+  candidate_target_spread_base: 4
+  candidate_target_spread_tension: 9
+
+  # Register gravity is how strongly generated notes are pulled back toward
+  # the skeleton register target after local texture generation.
+  # Lower values = freer, wider register motion.
+  # Higher values = more coherent but potentially flatter melody.
+  register_gravity_contrast: 0.06
+  register_gravity_same_theme: 0.14
+  register_gravity_variation: 0.15
+  register_gravity_cadence_return: 0.22
+
+  # Scoring penalty for mean-register distance from the skeleton target.
+  # Lower this if candidates sound too constrained; raise it if sections
+  # drift away from the tonal/emotional center.
+  register_score_weight: 0.025
+
+  # Tension curve register lift controls how high phrase peaks can rise above
+  # the section register center. Increase for more dramatic arcs; decrease
+  # for calmer or historically restrained styles.
+  tension_register_lift_base: 5
+  tension_register_lift_scale: 9
+
+bass:
+  enabled: true               # add bass line below melody
+  octave_shift: 1             # octaves below sampled pitch
+  sustain_fraction: 0.9       # fraction of bar to hold
+  velocity_scale: 0.7         # relative to melody velocity
 
 transforms:
   diminution_bias: 0.6    # P(diminution) vs P(augmentation)

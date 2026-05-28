@@ -27,12 +27,14 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 if TYPE_CHECKING:
     from section_grammar import SectionGrammar
+    from learned_harmony import LearnedHarmonicModel
+    from conditional_note_model import ConditionalNoteModel
 
 from measure_clustering import (
     MeasureClusterer,
@@ -70,6 +72,8 @@ class MusicModel:
         start_distribution: StartDistribution,
         section_results: Optional[Dict[str, Dict[str, Any]]] = None,
         grammar: Optional["SectionGrammar"] = None,
+        harmonic_model: Optional["LearnedHarmonicModel"] = None,
+        conditional_note_model: Optional["ConditionalNoteModel"] = None,
     ) -> None:
         self.clusterer = clusterer
         self.transition_matrix = transition_matrix
@@ -77,6 +81,8 @@ class MusicModel:
         self.start_distribution = start_distribution
         self.section_results = section_results
         self.grammar = grammar
+        self.harmonic_model = harmonic_model
+        self.conditional_note_model = conditional_note_model
 
     @property
     def n_clusters(self) -> int:
@@ -146,6 +152,12 @@ class MusicModel:
         clusterer.compute_bass_histograms(file_map, file_labels)
         log.info("Computing phrase-role statistics ...")
         clusterer.compute_phrase_role_statistics(file_map, file_labels)
+        log.info("Training learned harmonic model ...")
+        from learned_harmony import LearnedHarmonicModel
+        harmonic_model = LearnedHarmonicModel.fit(file_map)
+        log.info("Training conditional note model ...")
+        from conditional_note_model import ConditionalNoteModel
+        conditional_note_model = ConditionalNoteModel.fit(file_map, file_labels, harmonic_model)
 
         # 4. Build sub-models
         log.info("Building transition matrix ...")
@@ -206,6 +218,8 @@ class MusicModel:
             start_distribution=start_distribution,
             section_results=section_results,
             grammar=grammar,
+            harmonic_model=harmonic_model,
+            conditional_note_model=conditional_note_model,
         )
 
     # -- persistence -----------------------------------------------------------
@@ -278,6 +292,14 @@ class MusicModel:
         if self.grammar is not None:
             self.grammar.save(path / "grammar")
 
+        # Learned harmonic model (optional)
+        if self.harmonic_model is not None:
+            self.harmonic_model.save(path / "harmony")
+
+        # Conditional note model (optional)
+        if self.conditional_note_model is not None:
+            self.conditional_note_model.save(path / "conditional_notes")
+
         log.info("Saved model to %s", path)
 
     @classmethod
@@ -347,6 +369,22 @@ class MusicModel:
 
             grammar = SectionGrammar.load(path / "grammar")
 
+        # Learned harmonic model (optional)
+        harmonic_model: Optional["LearnedHarmonicModel"] = None
+        harmony_path = path / "harmony" / "harmony.json"
+        if harmony_path.exists():
+            from learned_harmony import LearnedHarmonicModel
+
+            harmonic_model = LearnedHarmonicModel.load(path / "harmony")
+
+        # Conditional note model (optional)
+        conditional_note_model: Optional["ConditionalNoteModel"] = None
+        conditional_path = path / "conditional_notes" / "conditional_notes.json"
+        if conditional_path.exists():
+            from conditional_note_model import ConditionalNoteModel
+
+            conditional_note_model = ConditionalNoteModel.load(path / "conditional_notes")
+
         log.info("Loaded model from %s (k=%d)", path, n)
         return cls(
             clusterer=clusterer,
@@ -355,6 +393,8 @@ class MusicModel:
             start_distribution=start_distribution,
             section_results=section_results,
             grammar=grammar,
+            harmonic_model=harmonic_model,
+            conditional_note_model=conditional_note_model,
         )
 
     # -- summary ---------------------------------------------------------------
@@ -394,6 +434,13 @@ class MusicModel:
                 f"  Template files: {len(self.grammar.files)}",
                 f"  FREE length range: {min(self.grammar.global_free_lengths)}"
                 f" – {max(self.grammar.global_free_lengths)} bars",
+            ])
+        if self.harmonic_model is not None:
+            lines.extend([
+                "",
+                "--- Learned Harmony ---",
+                f"  Roman types: {len(self.harmonic_model.roman_counts)}",
+                f"  Transitions: {sum(len(v) for v in self.harmonic_model.transition_counts.values())}",
             ])
         lines.append("=" * 65)
         return "\n".join(lines)
