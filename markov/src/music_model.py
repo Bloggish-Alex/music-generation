@@ -73,6 +73,25 @@ class MusicModel:
     def n_clusters(self) -> int:
         return self.transition_matrix.n_clusters
 
+    # -- measure sampling -------------------------------------------------------
+
+    def sample_measure(
+        self, cluster_label: int, seed: Optional[int] = None
+    ) -> Optional["MeasureInfo"]:
+        """Sample a stored MeasureInfo from the given cluster.
+
+        Returns None if no measures are stored for that cluster.
+        """
+        from measure_clustering import MeasureInfo
+        return self.clusterer.sample_measure(cluster_label, seed)
+
+    def get_cluster_measures(
+        self, cluster_label: int
+    ) -> List["MeasureInfo"]:
+        """Return all stored MeasureInfo objects for a cluster."""
+        from measure_clustering import MeasureInfo
+        return self.clusterer.get_cluster_measures(cluster_label)
+
     # -- factory ---------------------------------------------------------------
 
     @classmethod
@@ -113,11 +132,14 @@ class MusicModel:
         clusterer.fit(vectors, n_clusters=n_clusters, random_seed=seed)
         log.info("Clusterer fitted: k=%d, inertia=%.3f", n_clusters, clusterer.inertia)
 
-        # 2. Classify all files → file_labels
+        # 2. Classify all files → file_labels + measures
         log.info("Classifying files ...")
-        file_labels = classify_files(
-            music_dir, clusterer, extractor, file_patterns
+        result = classify_files(
+            music_dir, clusterer, extractor, file_patterns,
+            return_measures=True,
         )
+        file_labels, all_measures, all_labels_flat = result
+        clusterer.store_measures(all_measures, all_labels_flat)
 
         # 3. Build sub-models
         log.info("Building transition matrix ...")
@@ -321,7 +343,7 @@ def _build_parser() -> "argparse.ArgumentParser":
     )
     parser.add_argument(
         "--save-model",
-        required=True,
+        default="../../models/test",
         help="Path to save the trained model directory.",
     )
     return parser

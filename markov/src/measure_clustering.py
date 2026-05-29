@@ -27,7 +27,6 @@ import math
 import os
 import pickle
 import warnings
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -75,26 +74,6 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "syncopation_score",
     "entropy",
 )
-
-# music21 time-signature → quarterLength per bar
-_TS_BAR_LENGTH: Dict[str, float] = {
-    "4/4": 4.0, "3/4": 3.0, "2/4": 2.0, "1/4": 1.0,
-    "6/8": 3.0, "3/8": 1.5, "2/2": 4.0, "6/4": 6.0,
-    "9/8": 4.5, "12/8": 6.0, "5/4": 5.0, "7/8": 3.5,
-}
-
-
-def _bar_length_ql(ts_str: str) -> float:
-    """Return the quarterLength of one bar for a time-signature string."""
-    cached = _TS_BAR_LENGTH.get(ts_str)
-    if cached is not None:
-        return cached
-    parts = ts_str.split("/")
-    if len(parts) == 2:
-        num, den = int(parts[0]), int(parts[1])
-        return num * (4.0 / den)
-    return 4.0
-
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -180,76 +159,63 @@ class MeasureExtractor:
     def extract(self, file_path: Union[str, Path]) -> List[MeasureInfo]:
         """Parse a single music file into a list of MeasureInfo objects.
 
-        Supports .mid, .midi, .abc, .krn via music21's converter.
-        Chords are expanded: each pitch becomes a separate note entry sharing
-        the same onset and duration.
+        Uses music21's stream.Measure for robust bar detection — handles
+        pickup bars, time-signature changes, and incomplete measures.
+        Chords are expanded: each pitch becomes a separate note entry.
         """
+        from music21 import stream
+
         file_path = Path(file_path)
         score = converter.parse(str(file_path))
 
-        # Handle Opus (multi-tune ABC) by taking the first score
         if hasattr(score, "scores"):
             scores = score.scores
             if not scores:
                 return []
             score = scores[0]
 
-        # Determine primary time signature
-        ts_str = self._primary_time_signature(score)
+        if not score.parts:
+            return []
+        part = score.parts[0]
 
-        # Collect all notes/rests from all parts
-        all_notes: List[Dict[str, Any]] = []  # {offset, quarterLength, pitch, is_rest}
-        for part in score.parts:
-            for el in part.flatten().notesAndRests:
-                offset = float(el.offset)
-                ql = float(el.quarterLength)
+        # Use music21's own measure detection
+        measures = list(part.getElementsByClass(stream.Measure))
+        if not measures:
+            return []
+
+        result: List[MeasureInfo] = []
+        for bar_idx, measure in enumerate(measures):
+            bar_offset = float(measure.offset)
+            bar_length = float(measure.duration.quarterLength)
+            if bar_length <= 0:
+                bar_length = 4.0
+
+            # Time signature for this measure
+            ts_objs = list(measure.getElementsByClass(meter.TimeSignature))
+            ts_str = f"{ts_objs[0].numerator}/{ts_objs[0].denominator}" if ts_objs else "4/4"
+
+            notes_data: List[Dict[str, Any]] = []
+            for el in measure.flatten().notesAndRests:
+                onset_in_measure = float(el.offset) - bar_offset
                 if el.isRest:
-                    all_notes.append({
-                        "offset": offset, "quarterLength": ql,
-                        "pitch": -1, "is_rest": True,
-                    })
-                elif el.isNote:
+                    continue
+                if el.isNote:
                     midi = el.pitch.midi if el.pitch else 60
-                    all_notes.append({
-                        "offset": offset, "quarterLength": ql,
-                        "pitch": int(midi), "is_rest": False,
+                    notes_data.append({
+                        "pitch": int(midi),
+                        "quarterLength": float(el.quarterLength),
+                        "onset_in_measure": onset_in_measure,
                     })
                 elif el.isChord:
                     for p in el.pitches:
-                        all_notes.append({
-                            "offset": offset, "quarterLength": ql,
-                            "pitch": p.midi, "is_rest": False,
+                        notes_data.append({
+                            "pitch": p.midi,
+                            "quarterLength": float(el.quarterLength),
+                            "onset_in_measure": onset_in_measure,
                         })
 
-        # Group by measure
-        bar_length = _bar_length_ql(ts_str)
-        if bar_length <= 0:
-            bar_length = 4.0
-
-        measure_map: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        for n in all_notes:
-            bar_idx = int(n["offset"] / bar_length)
-            measure_map[bar_idx].append(n)
-
-        # Build MeasureInfo per bar
-        result: List[MeasureInfo] = []
-        for bar_idx in sorted(measure_map.keys()):
-            entries = measure_map[bar_idx]
-            bar_offset = bar_idx * bar_length
-            notes_data: List[Dict[str, Any]] = []
-
-            for e in entries:
-                onset_in_measure = e["offset"] - bar_offset
-                if e["is_rest"]:
-                    continue  # rests tracked via silence_ratio
-                notes_data.append({
-                    "pitch": e["pitch"],
-                    "quarterLength": e["quarterLength"],
-                    "onset_in_measure": onset_in_measure,
-                })
-
             if not notes_data:
-                continue  # skip empty measures
+                continue
 
             result.append(MeasureInfo(
                 notes=notes_data,
@@ -260,14 +226,6 @@ class MeasureExtractor:
             ))
 
         return result
-
-    @staticmethod
-    def _primary_time_signature(score) -> str:
-        """Extract the first time signature from a music21 score."""
-        for el in score.flatten():
-            if isinstance(el, meter.TimeSignature):
-                return f"{el.numerator}/{el.denominator}"
-        return "4/4"
 
     # -- vectorization -------------------------------------------------------
 
@@ -438,6 +396,7 @@ class MeasureClusterer:
         self._centroids_raw: Optional[np.ndarray] = None  # in original space
         self._inertia: float = 0.0
         self._labels: Optional[np.ndarray] = None
+        self._cluster_measures: Dict[int, List[MeasureInfo]] = {}
 
     # -- properties ----------------------------------------------------------
 
@@ -521,6 +480,48 @@ class MeasureClusterer:
         X_scaled = self._scaler.transform(X)
         return self._kmeans.predict(X_scaled)
 
+    # -- measure storage -----------------------------------------------------
+
+    def store_measures(
+        self,
+        measure_infos: List[MeasureInfo],
+        labels: Union[np.ndarray, List[int]],
+    ) -> None:
+        """Store MeasureInfo objects grouped by cluster label.
+
+        Args:
+            measure_infos: MeasureInfo objects from extraction.
+            labels: Cluster label for each measure (same length as *measure_infos*).
+        """
+        labels_arr = np.asarray(labels)
+        if len(measure_infos) != len(labels_arr):
+            raise ValueError(
+                f"Length mismatch: {len(measure_infos)} measures vs "
+                f"{len(labels_arr)} labels"
+            )
+        self._cluster_measures.clear()
+        for mi, lbl in zip(measure_infos, labels_arr):
+            c = int(lbl)
+            self._cluster_measures.setdefault(c, []).append(mi)
+
+    def get_cluster_measures(self, cluster_label: int) -> List[MeasureInfo]:
+        """Return all MeasureInfo objects assigned to *cluster_label*."""
+        self._require_fit()
+        return list(self._cluster_measures.get(cluster_label, []))
+
+    def sample_measure(
+        self, cluster_label: int, seed: Optional[int] = None
+    ) -> Optional[MeasureInfo]:
+        """Randomly sample one MeasureInfo from *cluster_label*.
+
+        Returns None if the cluster has no stored measures.
+        """
+        measures = self._cluster_measures.get(cluster_label, [])
+        if not measures:
+            return None
+        rng = np.random.RandomState(seed)
+        return measures[int(rng.randint(0, len(measures)))]
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -572,6 +573,7 @@ class MeasureClusterer:
             "centroids_raw": self._centroids_raw,
             "inertia": self._inertia,
             "labels": self._labels,
+            "cluster_measures": self._cluster_measures,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -588,6 +590,7 @@ class MeasureClusterer:
         obj._centroids_raw = state["centroids_raw"]
         obj._inertia = state.get("inertia", 0.0)
         obj._labels = state.get("labels")
+        obj._cluster_measures = state.get("cluster_measures", {})
         return obj
 
 
@@ -635,7 +638,11 @@ def classify_files(
     clusterer: MeasureClusterer,
     extractor: Optional[MeasureExtractor] = None,
     file_patterns: Optional[Union[str, Sequence[str]]] = None,
-) -> List[List[int]]:
+    return_measures: bool = False,
+) -> Union[
+    List[List[int]],
+    Tuple[List[List[int]], List[MeasureInfo], List[int]],
+]:
     """Extract measures from all music files, classify, return per-file labels.
 
     This is the shared extraction+classification step used by all three
@@ -647,9 +654,12 @@ def classify_files(
         clusterer: Fitted MeasureClusterer.
         extractor: Optional pre-created MeasureExtractor. Created if None.
         file_patterns: Glob patterns. Defaults to standard music formats.
+        return_measures: When True, also returns a flat list of all
+            MeasureInfo objects with their cluster labels set.
 
     Returns:
         List of per-file label sequences. Files with <2 measures are skipped.
+        If *return_measures* is True, returns ``(file_labels, all_measures)``.
     """
     if extractor is None:
         extractor = MeasureExtractor()
@@ -672,6 +682,8 @@ def classify_files(
         )
 
     file_labels: List[List[int]] = []
+    all_measures: List[MeasureInfo] = []
+    all_labels_flat: List[int] = []
     success = 0
     skipped = 0
     for fp in file_paths:
@@ -688,8 +700,12 @@ def classify_files(
             labels: List[int] = []
             for m in measures:
                 vec = extractor.vectorize(m)
-                labels.append(clusterer.predict(vec))
+                lbl = clusterer.predict(vec)
+                labels.append(lbl)
             file_labels.append(labels)
+            if return_measures:
+                all_measures.extend(measures)
+                all_labels_flat.extend(labels)
             success += 1
         except Exception as exc:
             log.warning("Skipping %s: %s", fp, exc)
@@ -698,6 +714,8 @@ def classify_files(
         "Classified %d files (%d skipped, %d total labels).",
         success, skipped, sum(len(l) for l in file_labels),
     )
+    if return_measures:
+        return file_labels, all_measures, all_labels_flat
     return file_labels
 
 
