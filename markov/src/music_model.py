@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from section_grammar import SectionGrammar
     from learned_harmony import LearnedHarmonicModel
     from conditional_note_model import ConditionalNoteModel
+    from candidate_reranker import CandidateReranker
+    from rhythm_candidate_prior import RhythmCandidatePrior
 
 from measure_clustering import (
     MeasureClusterer,
@@ -74,6 +76,8 @@ class MusicModel:
         grammar: Optional["SectionGrammar"] = None,
         harmonic_model: Optional["LearnedHarmonicModel"] = None,
         conditional_note_model: Optional["ConditionalNoteModel"] = None,
+        candidate_reranker: Optional["CandidateReranker"] = None,
+        rhythm_candidate_prior: Optional["RhythmCandidatePrior"] = None,
     ) -> None:
         self.clusterer = clusterer
         self.transition_matrix = transition_matrix
@@ -83,6 +87,8 @@ class MusicModel:
         self.grammar = grammar
         self.harmonic_model = harmonic_model
         self.conditional_note_model = conditional_note_model
+        self.candidate_reranker = candidate_reranker
+        self.rhythm_candidate_prior = rhythm_candidate_prior
 
     @property
     def n_clusters(self) -> int:
@@ -158,6 +164,22 @@ class MusicModel:
         log.info("Training conditional note model ...")
         from conditional_note_model import ConditionalNoteModel
         conditional_note_model = ConditionalNoteModel.fit(file_map, file_labels, harmonic_model)
+        log.info("Training candidate reranker ...")
+        from candidate_reranker import CandidateReranker
+        candidate_reranker = CandidateReranker.fit(
+            file_map,
+            file_labels,
+            harmonic_model,
+            negative_per_positive=3,
+            seed=seed,
+        )
+        log.info("Training rhythm candidate prior ...")
+        from rhythm_candidate_prior import RhythmCandidatePrior
+        rhythm_candidate_prior = RhythmCandidatePrior.fit(
+            file_map,
+            negative_per_positive=4,
+            seed=seed,
+        )
 
         # 4. Build sub-models
         log.info("Building transition matrix ...")
@@ -220,6 +242,8 @@ class MusicModel:
             grammar=grammar,
             harmonic_model=harmonic_model,
             conditional_note_model=conditional_note_model,
+            candidate_reranker=candidate_reranker,
+            rhythm_candidate_prior=rhythm_candidate_prior,
         )
 
     # -- persistence -----------------------------------------------------------
@@ -299,6 +323,14 @@ class MusicModel:
         # Conditional note model (optional)
         if self.conditional_note_model is not None:
             self.conditional_note_model.save(path / "conditional_notes")
+
+        # Candidate reranker (optional)
+        if self.candidate_reranker is not None and self.candidate_reranker.available:
+            self.candidate_reranker.save(path / "candidate_reranker")
+
+        # Rhythm candidate prior (optional)
+        if self.rhythm_candidate_prior is not None and self.rhythm_candidate_prior.available:
+            self.rhythm_candidate_prior.save(path / "rhythm_candidate_prior")
 
         log.info("Saved model to %s", path)
 
@@ -385,6 +417,22 @@ class MusicModel:
 
             conditional_note_model = ConditionalNoteModel.load(path / "conditional_notes")
 
+        # Candidate reranker (optional)
+        candidate_reranker: Optional["CandidateReranker"] = None
+        reranker_path = path / "candidate_reranker" / "candidate_reranker.pkl"
+        if reranker_path.exists():
+            from candidate_reranker import CandidateReranker
+
+            candidate_reranker = CandidateReranker.load(path / "candidate_reranker")
+
+        # Rhythm candidate prior (optional)
+        rhythm_candidate_prior: Optional["RhythmCandidatePrior"] = None
+        rhythm_prior_path = path / "rhythm_candidate_prior" / "rhythm_candidate_prior.pkl"
+        if rhythm_prior_path.exists():
+            from rhythm_candidate_prior import RhythmCandidatePrior
+
+            rhythm_candidate_prior = RhythmCandidatePrior.load(path / "rhythm_candidate_prior")
+
         log.info("Loaded model from %s (k=%d)", path, n)
         return cls(
             clusterer=clusterer,
@@ -395,6 +443,8 @@ class MusicModel:
             grammar=grammar,
             harmonic_model=harmonic_model,
             conditional_note_model=conditional_note_model,
+            candidate_reranker=candidate_reranker,
+            rhythm_candidate_prior=rhythm_candidate_prior,
         )
 
     # -- summary ---------------------------------------------------------------
@@ -441,6 +491,24 @@ class MusicModel:
                 "--- Learned Harmony ---",
                 f"  Roman types: {len(self.harmonic_model.roman_counts)}",
                 f"  Transitions: {sum(len(v) for v in self.harmonic_model.transition_counts.values())}",
+            ])
+        if self.candidate_reranker is not None:
+            summary = getattr(self.candidate_reranker, "training_summary", {})
+            lines.extend([
+                "",
+                "--- Candidate Reranker ---",
+                f"  Available: {self.candidate_reranker.available}",
+                f"  Features: {len(getattr(self.candidate_reranker, 'feature_names', []))}",
+                f"  Training: {summary}",
+            ])
+        if self.rhythm_candidate_prior is not None:
+            summary = getattr(self.rhythm_candidate_prior, "training_summary", {})
+            lines.extend([
+                "",
+                "--- Rhythm Candidate Prior ---",
+                f"  Available: {self.rhythm_candidate_prior.available}",
+                f"  Features: {len(getattr(self.rhythm_candidate_prior, 'feature_names', []))}",
+                f"  Training: {summary}",
             ])
         lines.append("=" * 65)
         return "\n".join(lines)

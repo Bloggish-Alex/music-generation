@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -21,6 +21,7 @@ from hierarchical_types import (
 )
 from harmonic_planner import HarmonicPlanner
 from narrative_planner import NarrativePlanner
+from rhythm_development import RhythmVariation
 
 _USABLE_DUR_VALUES: List[float] = [4.0, 2.0, 1.0, 0.5, 0.25, 3.0, 1.5, 0.75]
 
@@ -313,7 +314,7 @@ class HierarchicalPlanningMixin:
         label: str,
         local_bar: int,
         target_pitch: Optional[int],
-        affect: Optional[Dict[str, float]],
+        affect: Optional[Dict[str, Any]],
         structure_graph: Dict[int, StructureEdge],
         theme_skeletons: Dict[str, ThemeSkeleton],
         composition_plan: CompositionPlan,
@@ -323,6 +324,9 @@ class HierarchicalPlanningMixin:
         harmony = affect.get("harmony")
         if not isinstance(harmony, dict):
             harmony = None
+        dual_theme = affect.get("dual_theme")
+        if not isinstance(dual_theme, dict):
+            dual_theme = None
         edge = structure_graph.get(bar_index)
         relation = edge.relation if edge is not None else "CONTRAST"
         source_bar = edge.source_bar if edge is not None else None
@@ -336,6 +340,8 @@ class HierarchicalPlanningMixin:
         tonal_pc = int(affect.get("tonal_pc", composition_plan.global_tonic_pc))
         fallback_pitch = target_pitch if target_pitch is not None else self._nearest_pitch(tonal_pc, 64)
         role_register_shift = float(role_cfg.get("register_shift", 0.0))
+        if dual_theme is not None:
+            role_register_shift += float(dual_theme.get("register_shift", 0.0))
         if bar_skel is not None:
             register_target = float(
                 0.55 * float(affect.get("register_center", fallback_pitch))
@@ -357,6 +363,8 @@ class HierarchicalPlanningMixin:
             cadence_strength = 0.65 if local_bar >= 3 and local_bar % 4 == 3 else 0.25
             tension = float(affect.get("tension", 0.35))
 
+        if dual_theme is not None:
+            tension += float(dual_theme.get("tension_bias", 0.0))
         tension = float(np.clip(tension * float(role_cfg.get("tension_scale", 1.0)), 0.0, 1.0))
         cadence_strength = float(np.clip(
             cadence_strength + float(role_cfg.get("cadence_strength_add", 0.0)),
@@ -373,6 +381,21 @@ class HierarchicalPlanningMixin:
         similarity_target = role_cfg.get("similarity_target", [0.0, 1.0])
         if not isinstance(similarity_target, list) or len(similarity_target) != 2:
             similarity_target = [0.0, 1.0]
+        similarity_min = float(similarity_target[0])
+        similarity_max = float(similarity_target[1])
+        development_strength = float(role_cfg.get("strength_scale", 1.0))
+        target_attraction = float(role_cfg.get("target_attraction", 0.55))
+        if dual_theme is not None:
+            freedom = float(dual_theme.get("similarity_freedom", 0.0))
+            similarity_min = max(0.0, similarity_min - freedom)
+            similarity_max = min(1.0, similarity_max + 0.5 * freedom)
+            development_strength *= 1.0 + float(dual_theme.get("transform", 0.0))
+            target_attraction = float(np.clip(
+                target_attraction + float(dual_theme.get("target_attraction_delta", 0.0)),
+                0.25,
+                0.90,
+            ))
+            exact_copy_penalty += float(dual_theme.get("exact_copy_penalty_delta", 0.0))
         return BarGenerationTarget(
             relation=relation,
             source_bar=source_bar,
@@ -385,12 +408,13 @@ class HierarchicalPlanningMixin:
             cadence_strength=cadence_strength,
             tension=tension,
             exact_copy_penalty=exact_copy_penalty,
-            similarity_min=float(similarity_target[0]),
-            similarity_max=float(similarity_target[1]),
-            development_strength=float(role_cfg.get("strength_scale", 1.0)),
-            target_attraction=float(role_cfg.get("target_attraction", 0.55)),
+            similarity_min=similarity_min,
+            similarity_max=similarity_max,
+            development_strength=development_strength,
+            target_attraction=target_attraction,
             rhythm_change_scale=float(role_cfg.get("rhythm_change_scale", 1.0)),
             harmony=harmony,
+            dual_theme=dual_theme,
         )
 
     def _generate_scored_measure(
@@ -404,6 +428,9 @@ class HierarchicalPlanningMixin:
         affect: Optional[Dict[str, float]],
         bar_target: BarGenerationTarget,
         seed: int,
+        bar_index: Optional[int] = None,
+        rhythm_target: Optional[Any] = None,
+        recent_rhythm_cells: Sequence[Tuple[float, ...]] = (),
     ) -> List[NoteEvent]:
         """Generate several local textures and keep the best skeleton fit."""
         skeleton_cfg = self.config.get("skeleton", {})
@@ -442,10 +469,73 @@ class HierarchicalPlanningMixin:
             )
             rng = np.random.RandomState(_stable_hash(seed, "fit", k))
             fitted = self._fit_notes_to_bar_target(candidate, bar_target, rng)
+            if rhythm_target is not None:
+                fitted = RhythmVariation.apply(
+                    fitted,
+                    rhythm_target,
+                    rng,
+                    bar_length=float(time_signature[0]) * (4.0 / float(time_signature[1])),
+                )
             score = self._score_candidate(fitted, bar_target, cluster_label=cluster_label)
+            if rhythm_target is not None and hasattr(self, "rhythm_scorer"):
+                score += float(self.rhythm_scorer.score(
+                    fitted,
+                    rhythm_target,
+                    previous_cells=recent_rhythm_cells,
+                ).get("score", 0.0))
             if score > best_score:
                 best_score = score
                 best_notes = fitted
+        if best_notes is not None and bar_index is not None and hasattr(self, "_score_with_candidate_reranker"):
+            rhythm_diag = (
+                self.rhythm_scorer.score(
+                    best_notes,
+                    rhythm_target,
+                    previous_cells=recent_rhythm_cells,
+                )
+                if rhythm_target is not None and hasattr(self, "rhythm_scorer")
+                else {"active": 0.0, "score": 0.0}
+            )
+            reranker_score = self._score_with_candidate_reranker(
+                best_notes,
+                bar_target,
+                cluster_label,
+                score_components={"total_score": float(best_score), "base_score": float(best_score)},
+                proposal_kind="local_texture",
+            )
+            if hasattr(self, "_last_rhythm_scores"):
+                self._last_rhythm_scores[bar_index] = rhythm_diag
+            if hasattr(self, "_last_candidate_reranker_scores"):
+                self._last_candidate_reranker_scores[bar_index] = {
+                    "enabled": bool(self.config.get("candidate_reranker", {}).get("enabled", True))
+                    if isinstance(self.config.get("candidate_reranker", {}), dict) else True,
+                    "model_available": bool(
+                        getattr(self, "candidate_reranker", None) is not None
+                        and getattr(getattr(self, "candidate_reranker", None), "available", False)
+                    ),
+                    "probability": float(reranker_score.probability),
+                    "logit": float(reranker_score.logit),
+                    "raw_probability": float(reranker_score.raw_probability),
+                    "raw_logit": float(reranker_score.raw_logit),
+                    "calibration_adjustment": float(reranker_score.calibration_adjustment),
+                    "good_cadence_confidence": float(reranker_score.good_cadence_confidence),
+                    "weighted_score": float(reranker_score.weighted),
+                }
+            if hasattr(self, "_last_candidate_score_components"):
+                self._last_candidate_score_components[bar_index] = {
+                    "total_score": float(best_score + reranker_score.weighted),
+                    "base_score": float(best_score),
+                    "rhythm_score": float(rhythm_diag.get("score", 0.0)),
+                    "reranker_probability": float(reranker_score.probability),
+                    "reranker_logit": float(reranker_score.logit),
+                    "raw_reranker_probability": float(reranker_score.raw_probability),
+                    "raw_reranker_logit": float(reranker_score.raw_logit),
+                    "calibrated_reranker_probability": float(reranker_score.calibrated_probability),
+                    "calibrated_reranker_logit": float(reranker_score.calibrated_logit),
+                    "reranker_calibration_adjustment": float(reranker_score.calibration_adjustment),
+                    "reranker_good_cadence_confidence": float(reranker_score.good_cadence_confidence),
+                    "reranker_weighted_score": float(reranker_score.weighted),
+                }
         return best_notes if best_notes is not None else []
 
     def _fit_notes_to_bar_target(
@@ -792,6 +882,16 @@ class HierarchicalPlanningMixin:
                     cluster_label,
                     self.config,
                 )
+        reranker = getattr(self, "candidate_reranker", None)
+        if reranker is not None:
+            reranker_score = reranker.score_candidate(
+                notes,
+                target,
+                cluster_label,
+                self.config,
+                score_components={"base_score": float(score), "harmony_score": float(harmony_score)},
+            )
+            score += reranker_score.weighted
         if target.development_role == "CADENTIAL":
             score -= abs(pitches[-1] - target.target_pitch) * 0.18
         elif target.development_role in ("SEQUENCE_UP", "INTENSIFY"):

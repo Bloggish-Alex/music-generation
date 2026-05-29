@@ -39,7 +39,12 @@ from hierarchical_render import (
     write_midi,
 )
 from development_scorer import DevelopmentCandidateScorer
+from dual_theme_development import DualThemeDevelopment
+from dual_theme_proposal import DualThemeProposal
+from dual_theme_scorer import DualThemeCandidateScorer
+from early_repeat_scorer import EarlyRepeatCandidateScorer
 from harmonic_planner import HarmonicPlanner
+from candidate_reranker import CandidateReranker
 from hierarchical_planning import HierarchicalPlanningMixin
 from narrative_planner import NarrativePlanner
 from hierarchical_types import (
@@ -55,6 +60,14 @@ from hierarchical_types import (
 from hierarchical_sampler import ClusterNoteSampler
 from music_model import MusicModel
 from phrase_generator import PhraseGenerator
+from repeat_harmony_proposal import RepeatHarmonyProposal
+from rhythm_development import (
+    RhythmCandidateScorer,
+    RhythmMemory,
+    RhythmMotifModel,
+    RhythmPhrasePlanner,
+    RhythmVariation,
+)
 
 
 def _stable_hash(*args: object) -> int:
@@ -250,6 +263,15 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             self.config,
         )
         self.harmonic_planner = HarmonicPlanner(self.config)
+        self.dual_theme_development = DualThemeDevelopment(self.config)
+        self.dual_theme_proposal = DualThemeProposal(self.config)
+        self.dual_theme_scorer = DualThemeCandidateScorer(self.config)
+        self.early_repeat_scorer = EarlyRepeatCandidateScorer(self.config)
+        self.repeat_harmony_proposal = RepeatHarmonyProposal(self.config)
+        self.candidate_reranker = getattr(model, "candidate_reranker", None)
+        self.rhythm_phrase_planner = RhythmPhrasePlanner(self.config)
+        self.rhythm_candidate_prior = getattr(model, "rhythm_candidate_prior", None)
+        self.rhythm_scorer = RhythmCandidateScorer(self.config, self.rhythm_candidate_prior)
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
 
@@ -404,9 +426,16 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         all_notes: List[List[NoteEvent]] = []
         occurrence_count: Dict[str, int] = {}
         motif_memory: Dict[str, List[List[NoteEvent]]] = {}
+        rhythm_memory = RhythmMemory()
         theme_identities: Dict[str, ThemeIdentity] = {}
         theme_skeletons: Dict[str, ThemeSkeleton] = {}
+        recent_rhythm_cells: List[Tuple[float, ...]] = []
         return_variation_plans: Dict[int, List[str]] = {}
+        self._last_dual_theme_scores: Dict[int, Dict[str, Any]] = {}
+        self._last_repeat_harmony_scores: Dict[int, Dict[str, Any]] = {}
+        self._last_candidate_score_components: Dict[int, Dict[str, float]] = {}
+        self._last_candidate_reranker_scores: Dict[int, Dict[str, Any]] = {}
+        self._last_rhythm_scores: Dict[int, Dict[str, float]] = {}
         melodic_skeleton = self._build_melodic_skeleton(
             labels, measure_context, base_seed, composition_plan,
         )
@@ -428,6 +457,18 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             harmony = harmonic_plan.get(i)
             if harmony is not None:
                 affect["harmony"] = harmony.to_dict()
+            dual_theme = self.dual_theme_development.target_for_bar(
+                label=sl,
+                local_bar=bi,
+                section_len=section_len,
+                narrative_tension=float(affect.get("narrative_tension", affect.get("tension", 0.35))),
+                narrative_intensity=float(affect.get("narrative_intensity", affect.get("intensity", 0.35))),
+                theme_identities=theme_identities,
+                theme_skeletons=theme_skeletons,
+            )
+            if dual_theme is not None:
+                affect["dual_theme"] = dual_theme
+            composition_plan.measure_affects[i] = affect
             bar_target = self._build_bar_generation_target(
                 bar_index=i,
                 label=sl,
@@ -437,6 +478,15 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 structure_graph=structure_graph,
                 theme_skeletons=theme_skeletons,
                 composition_plan=composition_plan,
+            )
+            rhythm_target = self.rhythm_phrase_planner.plan(
+                label=sl,
+                local_bar=bi,
+                section_role=role,
+                phrase_role=phrase_role,
+                narrative_role=str(affect.get("narrative_role", "")),
+                tension=float(affect.get("narrative_tension", affect.get("tension", 0.35))),
+                source_cell=rhythm_memory.get(sl, bi),
             )
 
             # Seed from section identity (FREE/FLAT use per-measure seed)
@@ -460,12 +510,16 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                     affect=affect,
                     bar_target=bar_target,
                     seed=measure_seed,
+                    bar_index=i,
+                    rhythm_target=rhythm_target,
+                    recent_rhythm_cells=recent_rhythm_cells,
                 )
                 if role == "NEW":
                     motif_memory.setdefault(sl, [])
                     while len(motif_memory[sl]) <= bi:
                         motif_memory[sl].append([])
                     motif_memory[sl][bi] = self._clone_notes(notes)
+                    rhythm_memory.remember(sl, bi, notes)
                     self._update_theme_identity(
                         theme_identities, sl, motif_memory[sl], section_len,
                     )
@@ -518,6 +572,20 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                     if bar_target.cadence_strength > 0.5 or bar_target.harmony.get("cadence_role") == "CADENCE":
                         multiplier = float(harmony_cfg.get("cadence_return_candidate_count_multiplier", 2.2))
                     candidate_count = max(candidate_count, int(round(candidate_count * multiplier)))
+                    boost_cfg = harmony_cfg.get("weak_context_candidate_boost", {})
+                    if isinstance(boost_cfg, dict) and boost_cfg.get("enabled", True):
+                        boosted_roles = set(str(x) for x in boost_cfg.get(
+                            "narrative_roles",
+                            ["DEVELOPMENT", "CLIMAX", "RECAP"],
+                        ))
+                        narrative_role = str(affect.get("narrative_role", ""))
+                        if narrative_role in boosted_roles:
+                            boost = float(boost_cfg.get("multiplier", 1.6))
+                            max_candidates = int(boost_cfg.get("max_candidates", 24))
+                            candidate_count = min(
+                                max_candidates,
+                                max(candidate_count, int(round(candidate_count * boost))),
+                            )
                 if role == "REPEAT":
                     base_strength *= float(motif_cfg.get("repeat_strength_scale", 0.55))
                     occurrence_growth *= float(motif_cfg.get("repeat_growth_scale", 0.35))
@@ -535,14 +603,34 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 identity = theme_identities.get(sl)
                 skeleton = theme_skeletons.get(sl)
                 source_notes = self._clone_notes(notes)
+                partner_notes = self._partner_theme_notes(
+                    motif_memory,
+                    bar_target.dual_theme,
+                    bi,
+                )
                 previous_notes = all_notes[-1] if all_notes else None
                 best_notes: Optional[List[NoteEvent]] = None
+                best_dual_theme_diag: Optional[Dict[str, float]] = None
+                best_early_repeat_diag: Optional[Dict[str, float]] = None
+                best_rhythm_diag: Optional[Dict[str, float]] = None
+                best_score_components: Optional[Dict[str, float]] = None
+                best_candidate_index: Optional[int] = None
+                best_proposal_kind: Optional[str] = None
+                best_repeat_harmony_kind: Optional[str] = None
                 best_score = -1e9
                 strength = min(
                     max_strength,
                     (base_strength + occurrence_growth * k) * bar_target.development_strength,
                 )
-                for candidate_i in range(max(1, candidate_count)):
+                proposal_count = self.dual_theme_proposal.count(bar_target, partner_notes)
+                repeat_harmony_count = self.repeat_harmony_proposal.count(
+                    role,
+                    bar_target,
+                    partner_notes,
+                )
+                base_candidate_count = max(1, candidate_count)
+                total_candidate_count = base_candidate_count + proposal_count + repeat_harmony_count
+                for candidate_i in range(total_candidate_count):
                     variation_rng = np.random.RandomState(
                         _stable_hash(base_seed, sl, occurrence_id, bi, "motif-return", candidate_i)
                     )
@@ -560,6 +648,28 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                         target_attraction=bar_target.target_attraction,
                         rhythm_change_scale=bar_target.rhythm_change_scale,
                     )
+                    repeat_harmony_index = None
+                    if candidate_i >= base_candidate_count and candidate_i < base_candidate_count + proposal_count:
+                        proposal_index = candidate_i - base_candidate_count
+                        candidate_notes = self.dual_theme_proposal.propose(
+                            candidate_notes,
+                            source_notes=source_notes,
+                            partner_notes=partner_notes,
+                            target=bar_target,
+                            rng=variation_rng,
+                            proposal_index=proposal_index,
+                        )
+                    elif candidate_i >= base_candidate_count + proposal_count:
+                        proposal_index = None
+                        repeat_harmony_index = candidate_i - base_candidate_count - proposal_count
+                        candidate_notes = self.repeat_harmony_proposal.propose(
+                            candidate_notes,
+                            target=bar_target,
+                            rng=variation_rng,
+                            proposal_index=repeat_harmony_index,
+                        )
+                    else:
+                        proposal_index = None
                     if identity is not None and bar_target.development_role not in ("FRAGMENT", "INTENSIFY"):
                         candidate_notes = self._apply_theme_identity(
                             candidate_notes,
@@ -569,9 +679,21 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                             target_pitch=target_pitch,
                             rng=variation_rng,
                         )
+                    candidate_notes = RhythmVariation.apply(
+                        candidate_notes,
+                        rhythm_target,
+                        variation_rng,
+                        bar_length=float(time_signature[0]) * (4.0 / float(time_signature[1])),
+                    )
                     candidate_notes = self._fit_notes_to_bar_target(
                         candidate_notes, bar_target, variation_rng,
                     )
+                    rhythm_diag = self.rhythm_scorer.score(
+                        candidate_notes,
+                        rhythm_target,
+                        previous_cells=recent_rhythm_cells,
+                    )
+                    rhythm_score = float(rhythm_diag.get("score", 0.0))
                     development_score = self.development_scorer.score(
                         candidate_notes,
                         bar_target,
@@ -600,10 +722,84 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                                 self.config,
                             )
                         )
-                    score = development_score + harmony_return_weight * harmony_score + conditional_score
+                    dual_theme_diag = self.dual_theme_scorer.diagnostics(
+                        candidate_notes,
+                        source_notes=source_notes,
+                        partner_notes=partner_notes,
+                        target=bar_target,
+                    )
+                    raw_dual_theme_score = float(dual_theme_diag.get("score", 0.0))
+                    dual_theme_damping = self._dual_theme_harmony_damping(harmony_score)
+                    dual_theme_score = raw_dual_theme_score * dual_theme_damping
+                    early_repeat_diag = self.early_repeat_scorer.diagnostics(
+                        candidate_notes,
+                        role=role,
+                        target=bar_target,
+                        partner_notes=partner_notes,
+                        config=self.config,
+                    )
+                    early_repeat_score = float(early_repeat_diag.get("score", 0.0))
+                    base_score = (
+                        development_score
+                        + rhythm_score
+                        + harmony_return_weight * harmony_score
+                        + conditional_score
+                        + dual_theme_score
+                        + early_repeat_score
+                    )
+                    score_components = {
+                        "base_score": float(base_score),
+                        "development_score": float(development_score),
+                        "rhythm_score": float(rhythm_score),
+                        "harmony_score": float(harmony_score),
+                        "harmony_weight": float(harmony_return_weight),
+                        "weighted_harmony_score": float(harmony_return_weight * harmony_score),
+                        "conditional_score": float(conditional_score),
+                        "dual_theme_score": float(dual_theme_score),
+                        "raw_dual_theme_score": float(raw_dual_theme_score),
+                        "dual_theme_harmony_damping": float(dual_theme_damping),
+                        "early_repeat_score": float(early_repeat_score),
+                    }
+                    proposal_kind = (
+                        self.dual_theme_proposal.kind(proposal_index)
+                        if proposal_index is not None else None
+                    )
+                    repeat_harmony_kind = (
+                        self.repeat_harmony_proposal.kind(repeat_harmony_index)
+                        if repeat_harmony_index is not None else None
+                    )
+                    reranker_score = self._score_with_candidate_reranker(
+                        candidate_notes,
+                        bar_target,
+                        cluster_id,
+                        source_notes=source_notes,
+                        partner_notes=partner_notes,
+                        score_components=score_components,
+                        proposal_kind=proposal_kind or repeat_harmony_kind,
+                    )
+                    score = base_score + reranker_score.weighted
+                    score_components.update({
+                        "total_score": float(score),
+                        "reranker_probability": float(reranker_score.probability),
+                        "reranker_logit": float(reranker_score.logit),
+                        "raw_reranker_probability": float(reranker_score.raw_probability),
+                        "raw_reranker_logit": float(reranker_score.raw_logit),
+                        "calibrated_reranker_probability": float(reranker_score.calibrated_probability),
+                        "calibrated_reranker_logit": float(reranker_score.calibrated_logit),
+                        "reranker_calibration_adjustment": float(reranker_score.calibration_adjustment),
+                        "reranker_good_cadence_confidence": float(reranker_score.good_cadence_confidence),
+                        "reranker_weighted_score": float(reranker_score.weighted),
+                    })
                     if score > best_score:
                         best_score = score
                         best_notes = candidate_notes
+                        best_dual_theme_diag = dual_theme_diag
+                        best_early_repeat_diag = early_repeat_diag
+                        best_rhythm_diag = rhythm_diag
+                        best_score_components = score_components
+                        best_candidate_index = candidate_i
+                        best_proposal_kind = proposal_kind
+                        best_repeat_harmony_kind = repeat_harmony_kind
                 if best_notes is not None:
                     repaired_notes = self._repair_harmony_mismatch(best_notes, bar_target)
                     if repaired_notes is not best_notes:
@@ -635,19 +831,143 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                                     self.config,
                                 )
                             )
-                        repaired_score = (
+                        repaired_dual_theme_diag = self.dual_theme_scorer.diagnostics(
+                            repaired_notes,
+                            source_notes=source_notes,
+                            partner_notes=partner_notes,
+                            target=bar_target,
+                        )
+                        repaired_raw_dual = float(repaired_dual_theme_diag.get("score", 0.0))
+                        repaired_dual_damping = self._dual_theme_harmony_damping(repaired_harmony)
+                        repaired_dual = repaired_raw_dual * repaired_dual_damping
+                        repaired_early_repeat_diag = self.early_repeat_scorer.diagnostics(
+                            repaired_notes,
+                            role=role,
+                            target=bar_target,
+                            partner_notes=partner_notes,
+                            config=self.config,
+                        )
+                        repaired_rhythm_diag = self.rhythm_scorer.score(
+                            repaired_notes,
+                            rhythm_target,
+                            previous_cells=recent_rhythm_cells,
+                        )
+                        repaired_rhythm = float(repaired_rhythm_diag.get("score", 0.0))
+                        repaired_base_score = (
                             repaired_development
+                            + repaired_rhythm
                             + harmony_return_weight * repaired_harmony
                             + repaired_conditional
+                            + repaired_dual
+                            + float(repaired_early_repeat_diag.get("score", 0.0))
                         )
+                        repaired_components = {
+                            "base_score": float(repaired_base_score),
+                            "development_score": float(repaired_development),
+                            "rhythm_score": float(repaired_rhythm),
+                            "harmony_score": float(repaired_harmony),
+                            "harmony_weight": float(harmony_return_weight),
+                            "weighted_harmony_score": float(harmony_return_weight * repaired_harmony),
+                            "conditional_score": float(repaired_conditional),
+                            "dual_theme_score": float(repaired_dual),
+                            "raw_dual_theme_score": float(repaired_raw_dual),
+                            "dual_theme_harmony_damping": float(repaired_dual_damping),
+                            "early_repeat_score": float(repaired_early_repeat_diag.get("score", 0.0)),
+                        }
+                        repaired_reranker = self._score_with_candidate_reranker(
+                            repaired_notes,
+                            bar_target,
+                            cluster_id,
+                            source_notes=source_notes,
+                            partner_notes=partner_notes,
+                            score_components=repaired_components,
+                            proposal_kind="adaptive_repair",
+                        )
+                        repaired_score = repaired_base_score + repaired_reranker.weighted
+                        repaired_components.update({
+                            "total_score": float(repaired_score),
+                            "reranker_probability": float(repaired_reranker.probability),
+                            "reranker_logit": float(repaired_reranker.logit),
+                            "raw_reranker_probability": float(repaired_reranker.raw_probability),
+                            "raw_reranker_logit": float(repaired_reranker.raw_logit),
+                            "calibrated_reranker_probability": float(repaired_reranker.calibrated_probability),
+                            "calibrated_reranker_logit": float(repaired_reranker.calibrated_logit),
+                            "reranker_calibration_adjustment": float(repaired_reranker.calibration_adjustment),
+                            "reranker_good_cadence_confidence": float(repaired_reranker.good_cadence_confidence),
+                            "reranker_weighted_score": float(repaired_reranker.weighted),
+                        })
                         if repaired_score > best_score:
                             best_score = repaired_score
                             best_notes = repaired_notes
+                            best_dual_theme_diag = repaired_dual_theme_diag
+                            best_early_repeat_diag = repaired_early_repeat_diag
+                            best_rhythm_diag = repaired_rhythm_diag
+                            best_score_components = repaired_components
+                            best_candidate_index = None
+                            best_proposal_kind = None
+                            best_repeat_harmony_kind = None
+                    self._last_dual_theme_scores[i] = {
+                        "candidate_count": int(total_candidate_count),
+                        "proposal_count": int(proposal_count),
+                        "partner_available": bool(partner_notes),
+                        "selected_candidate_index": best_candidate_index,
+                        "selected_from_proposal": (
+                            best_candidate_index is not None
+                            and best_candidate_index >= base_candidate_count
+                            and best_candidate_index < base_candidate_count + proposal_count
+                        ),
+                        "selected_proposal_kind": best_proposal_kind,
+                        "selected_score": float(
+                            best_dual_theme_diag.get("score", 0.0)
+                            if best_dual_theme_diag is not None else 0.0
+                        ),
+                        "selected_components": best_dual_theme_diag or {"active": 0.0, "score": 0.0},
+                        "score_components": best_score_components,
+                    }
+                    self._last_repeat_harmony_scores[i] = {
+                        "candidate_count": int(total_candidate_count),
+                        "proposal_count": int(repeat_harmony_count),
+                        "selected_candidate_index": best_candidate_index,
+                        "selected_from_proposal": (
+                            best_candidate_index is not None
+                            and best_candidate_index >= base_candidate_count + proposal_count
+                        ),
+                        "selected_proposal_kind": best_repeat_harmony_kind,
+                        "selected_score": float(
+                            best_early_repeat_diag.get("score", 0.0)
+                            if best_early_repeat_diag is not None else 0.0
+                        ),
+                        "selected_components": (
+                            best_early_repeat_diag or {"active": 0.0, "score": 0.0}
+                        ),
+                        "score_components": best_score_components,
+                    }
+                    if best_score_components is not None:
+                        self._last_candidate_score_components[i] = best_score_components
+                        if best_rhythm_diag is not None:
+                            self._last_rhythm_scores[i] = best_rhythm_diag
+                        self._last_candidate_reranker_scores[i] = {
+                            "enabled": bool(self.config.get("candidate_reranker", {}).get("enabled", True))
+                            if isinstance(self.config.get("candidate_reranker", {}), dict) else True,
+                            "model_available": bool(
+                                self.candidate_reranker is not None
+                                and getattr(self.candidate_reranker, "available", False)
+                            ),
+                            "probability": best_score_components.get("reranker_probability"),
+                            "logit": best_score_components.get("reranker_logit"),
+                            "raw_probability": best_score_components.get("raw_reranker_probability"),
+                            "raw_logit": best_score_components.get("raw_reranker_logit"),
+                            "calibration_adjustment": best_score_components.get("reranker_calibration_adjustment"),
+                            "good_cadence_confidence": best_score_components.get("reranker_good_cadence_confidence"),
+                            "weighted_score": best_score_components.get("reranker_weighted_score"),
+                        }
                 notes = best_notes if best_notes is not None else notes
             if role not in ("FREE", "FLAT") and bi == 0:
                 occurrence_count[sl] = occurrence_count.get(sl, 0) + 1
 
             all_notes.append(notes)
+            recent_rhythm_cells.append(RhythmMotifModel.cell(notes))
+            recent_rhythm_cells = recent_rhythm_cells[-4:]
             previous_melody_pitch = self._last_melody_pitch(notes, previous_melody_pitch)
 
         # 3c. Add bass line (after transforms, so bass is unaffected)
@@ -705,6 +1025,69 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
 
         return labels
 
+    def _dual_theme_harmony_damping(self, harmony_score: float) -> float:
+        """Reduce dual-theme reward when a candidate is harmonically weak."""
+        cfg = self.config.get("dual_theme_development", {})
+        if not isinstance(cfg, dict):
+            return 1.0
+        scoring = cfg.get("candidate_scoring", {})
+        if not isinstance(scoring, dict) or not scoring.get("harmony_damping_enabled", True):
+            return 1.0
+        floor = float(scoring.get("harmony_damping_floor", 0.25))
+        start = float(scoring.get("harmony_damping_start", -0.10))
+        full = float(scoring.get("harmony_damping_full", 0.45))
+        if full <= start:
+            return 1.0
+        value = floor + (1.0 - floor) * ((float(harmony_score) - start) / (full - start))
+        return float(np.clip(value, floor, 1.0))
+
+    def _partner_theme_notes(
+        self,
+        motif_memory: Dict[str, List[List[NoteEvent]]],
+        dual_theme: Optional[Dict[str, Any]],
+        local_bar: int,
+    ) -> Optional[List[NoteEvent]]:
+        """Fetch the partner-theme bar used by dual-theme candidate scoring."""
+        if not isinstance(dual_theme, dict):
+            return None
+        partner_label = dual_theme.get("partner_label")
+        if not isinstance(partner_label, str):
+            return None
+        partner = motif_memory.get(partner_label)
+        if not partner:
+            return None
+        valid = [idx for idx, notes in enumerate(partner) if notes]
+        if not valid:
+            return None
+        idx = min(valid, key=lambda x: abs(x - local_bar))
+        return self._clone_notes(partner[idx])
+
+    def _score_with_candidate_reranker(
+        self,
+        notes: List[NoteEvent],
+        target: BarGenerationTarget,
+        cluster_id: int,
+        *,
+        source_notes: Optional[List[NoteEvent]] = None,
+        partner_notes: Optional[List[NoteEvent]] = None,
+        score_components: Optional[Dict[str, float]] = None,
+        proposal_kind: Optional[str] = None,
+    ):
+        """Return the learned reranker contribution for one candidate."""
+        reranker = getattr(self, "candidate_reranker", None)
+        if reranker is None:
+            reranker = CandidateReranker()
+        return reranker.score_candidate(
+            notes,
+            target,
+            cluster_id,
+            self.config,
+            source_notes=source_notes,
+            partner_notes=partner_notes,
+            score_components=score_components,
+            proposal_kind=proposal_kind,
+        )
+
     def _write_harmony_diagnostics(
         self,
         output_path: Path,
@@ -723,7 +1106,11 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         bars: List[Dict[str, Any]] = []
         chord_ratios: List[float] = []
         strong_ratios: List[float] = []
+        rhythm_scores: List[float] = []
+        rhythm_source_similarities: List[float] = []
+        rhythm_note_counts: List[float] = []
         narrative_counts: Dict[str, int] = {}
+        dual_theme_active = 0
         bass_root_or_fifth = 0
         bass_count = 0
         for i, notes in enumerate(all_notes):
@@ -745,6 +1132,39 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             narrative_role = affect.get("narrative_role")
             if isinstance(narrative_role, str):
                 narrative_counts[narrative_role] = narrative_counts.get(narrative_role, 0) + 1
+            dual_theme = affect.get("dual_theme")
+            if isinstance(dual_theme, dict):
+                dual_theme_active += 1
+            dual_theme_score = (
+                self._last_dual_theme_scores.get(i)
+                if hasattr(self, "_last_dual_theme_scores") else None
+            )
+            repeat_harmony_score = (
+                self._last_repeat_harmony_scores.get(i)
+                if hasattr(self, "_last_repeat_harmony_scores") else None
+            )
+            score_components = (
+                self._last_candidate_score_components.get(i)
+                if hasattr(self, "_last_candidate_score_components") else None
+            )
+            rhythm_score = (
+                self._last_rhythm_scores.get(i)
+                if hasattr(self, "_last_rhythm_scores") else None
+            )
+            if isinstance(rhythm_score, dict):
+                score = rhythm_score.get("score")
+                source_similarity = rhythm_score.get("source_similarity")
+                note_count = rhythm_score.get("note_count")
+                if isinstance(score, (int, float)):
+                    rhythm_scores.append(float(score))
+                if isinstance(source_similarity, (int, float)):
+                    rhythm_source_similarities.append(float(source_similarity))
+                if isinstance(note_count, (int, float)):
+                    rhythm_note_counts.append(float(note_count))
+            reranker_score = (
+                self._last_candidate_reranker_scores.get(i)
+                if hasattr(self, "_last_candidate_reranker_scores") else None
+            )
             bars.append({
                 "bar": i + 1,
                 "cluster": int(labels[i]) if i < len(labels) else None,
@@ -756,6 +1176,12 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 "narrative_role": narrative_role,
                 "narrative_tension": affect.get("narrative_tension"),
                 "narrative_intensity": affect.get("narrative_intensity"),
+                "dual_theme": dual_theme if isinstance(dual_theme, dict) else None,
+                "dual_theme_candidate": dual_theme_score,
+                "repeat_harmony_candidate": repeat_harmony_score,
+                "rhythm_candidate": rhythm_score,
+                "candidate_reranker": reranker_score,
+                "candidate_score_components": score_components,
                 "harmony": harmony_dict,
                 "diagnostics": diag,
             })
@@ -766,6 +1192,17 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             else True
         )
         conditional_model = getattr(self.model, "conditional_note_model", None)
+        reranker_cfg = self.config.get("candidate_reranker", {})
+        reranker_enabled = (
+            reranker_cfg.get("enabled", True)
+            if isinstance(reranker_cfg, dict)
+            else True
+        )
+        candidate_reranker = getattr(self.model, "candidate_reranker", None)
+        rhythm_candidate_prior = getattr(self.model, "rhythm_candidate_prior", None)
+        dual_cfg = self.config.get("dual_theme_development", {})
+        dual_scoring_cfg = dual_cfg.get("candidate_scoring", {}) if isinstance(dual_cfg, dict) else {}
+        rhythm_cfg = self.config.get("rhythm_development", {})
         summary = {
             "requested_mode": requested_mode,
             "actual_mode": actual_mode,
@@ -777,8 +1214,47 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             "conditional_note_model_version": (
                 getattr(conditional_model, "version", None)
             ),
+            "candidate_reranker_active": (
+                candidate_reranker is not None
+                and bool(getattr(candidate_reranker, "available", False))
+                and bool(reranker_enabled)
+            ),
+            "candidate_reranker_training": (
+                getattr(candidate_reranker, "training_summary", None)
+                if candidate_reranker is not None else None
+            ),
+            "dual_theme_candidate_scoring_active": (
+                isinstance(dual_cfg, dict)
+                and bool(dual_cfg.get("enabled", True))
+                and isinstance(dual_scoring_cfg, dict)
+                and bool(dual_scoring_cfg.get("enabled", True))
+            ),
+            "rhythm_development_active": (
+                isinstance(rhythm_cfg, dict)
+                and bool(rhythm_cfg.get("enabled", True))
+            ),
+            "rhythm_candidate_prior_active": (
+                rhythm_candidate_prior is not None
+                and bool(getattr(rhythm_candidate_prior, "available", False))
+                and isinstance(rhythm_cfg, dict)
+                and bool(rhythm_cfg.get("learned_prior_enabled", True))
+                and float(rhythm_cfg.get("learned_prior_weight", 0.0)) != 0.0
+            ),
+            "rhythm_candidate_prior_training": (
+                getattr(rhythm_candidate_prior, "training_summary", None)
+                if rhythm_candidate_prior is not None else None
+            ),
             "bar_count": len(all_notes),
             "narrative_role_counts": narrative_counts,
+            "dual_theme_active_bars": dual_theme_active,
+            "mean_rhythm_score": float(np.mean(rhythm_scores)) if rhythm_scores else None,
+            "mean_rhythm_source_similarity": (
+                float(np.mean(rhythm_source_similarities))
+                if rhythm_source_similarities else None
+            ),
+            "mean_rhythm_note_count": (
+                float(np.mean(rhythm_note_counts)) if rhythm_note_counts else None
+            ),
             "mean_chord_tone_ratio": float(np.mean(chord_ratios)) if chord_ratios else None,
             "mean_strong_beat_chord_tone_ratio": float(np.mean(strong_ratios)) if strong_ratios else None,
             "bass_root_or_fifth_ratio": (

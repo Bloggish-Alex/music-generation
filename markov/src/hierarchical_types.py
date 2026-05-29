@@ -112,3 +112,4 @@ class BarGenerationTarget:
     target_attraction: float = 0.55
     rhythm_change_scale: float = 1.0
     harmony: Optional[Dict[str, Any]] = None
+    dual_theme: Optional[Dict[str, Any]] = None

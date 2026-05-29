@@ -18,6 +18,57 @@ rhythm:
   min_duration: 0.25      # shortest allowed note (quarterLength)
   max_rest_prob: 0.6      # cap on rest probability per note
 
+rhythm_development:
+  # Phrase-level rhythm layer.
+  # This connects NarrativePlanner/theme memory to the rhythmic surface so the
+  # piece does not fall into repeated equal-duration runs followed by the same
+  # long pause/closure. It stores first-statement rhythm cells, creates
+  # role-aware variants, and scores candidates. It never edits pitch content.
+  enabled: true
+
+  # Repeat identity range. Repeated theme bars should remain rhythmically
+  # recognizable but not literal. Raise min/max for stricter motif identity;
+  # lower them if repeats still sound mechanically copied.
+  repeat_identity: [0.70, 0.90]
+
+  # Development identity range. Lower values allow more density/syncopation
+  # change in DEVELOPMENT/CLIMAX. Raise if rhythmic identity disappears.
+  development_identity: [0.45, 0.78]
+
+  # Cadence identity range. Cadences may lengthen or simplify, but should not
+  # always use the exact same long-note/rest shape.
+  cadence_identity: [0.35, 0.75]
+
+  # Density/syncopation controls. Increase development_density_lift if
+  # development/climax still sound rhythmically flat. Lower cadence_density_scale
+  # or raise cadence_lengthen if cadences do not breathe. Raise syncopation_shift
+  # cautiously; too much makes the line feel unstable.
+  development_density_lift: 0.18
+  cadence_density_scale: 0.78
+  cadence_lengthen: 0.45
+  syncopation_shift: 0.12
+  avoid_exact_repeat: true
+
+  # Scoring weights. consecutive_repeat_weight penalizes the same duration
+  # pattern appearing in adjacent bars. identity_weight keeps repeats related
+  # to the source rhythm. copy_weight discourages exact replay when development
+  # is expected. phrase_contour_weight rewards role-appropriate density or
+  # cadence lengthening.
+  identity_weight: 1.00
+  copy_weight: 1.10
+  consecutive_repeat_weight: 0.75
+  phrase_contour_weight: 0.45
+
+  # Learned rhythm prior. This is trained from corpus rhythm cells against
+  # rhythm-only perturbations, then used as a soft candidate-selection signal.
+  # Increase learned_prior_weight if generated rhythm still sounds like a
+  # repeated template. Lower it if rhythm becomes too conservative or rejects
+  # useful generated variation. Keep this modest: it should guide selection,
+  # not override phrase/narrative intent.
+  learned_prior_enabled: true
+  learned_prior_weight: 0.25
+  learned_prior_logit_clip: 2.0
+
 velocity:
   peak_mean: 100
   peak_std: 8
@@ -52,6 +103,16 @@ harmony:
   # more variants to choose from before applying the harmony-aware score.
   return_candidate_count_multiplier: 1.6
   cadence_return_candidate_count_multiplier: 2.2
+
+  # Extra candidate budget for high-risk returned/repeated material. This does
+  # not change scoring or repair notes; it only gives the existing scorers more
+  # options in narrative regions where theme identity, dual-theme development,
+  # and harmony often conflict.
+  weak_context_candidate_boost:
+    enabled: true
+    multiplier: 1.6
+    max_candidates: 24
+    narrative_roles: [DEVELOPMENT, CLIMAX, RECAP]
 
   # Default phrase-level harmonic rhythm. The planner maps local phrase
   # position onto this progression, then forces penultimate bars toward V and
@@ -346,6 +407,49 @@ conditional_note_model:
     strong_beat_chord_tone: 0.65
     non_chord_resolution: 0.55
 
+candidate_reranker:
+  # Learned candidate naturalness/style prior.
+  #
+  # Training creates positive examples from real corpus bars and negative
+  # examples from perturbed versions of those bars. During generation, the
+  # reranker scores each candidate and adds a soft logit reward/penalty to the
+  # existing candidate score. It never edits notes and should be treated as a
+  # data-informed selection prior, not a repair rule.
+  #
+  # enabled: false returns to the pre-reranker path.
+  # weight: strength of the learned prior. Keep conservative for v1/v2 because
+  #   the reranker learns from synthetic negatives. Raise slowly if selected
+  #   candidates still sound locally unnatural despite good diagnostics. Lower
+  #   if the model becomes too conservative or rejects expressive outliers.
+  # logit_clip: caps the learned model's influence so it cannot dominate
+  #   harmony/theme/development scorers on a single confident prediction.
+  # diagnostics: write reranker_score and selected/alternative stats into
+  #   <output>.harmony.json so reports can compare old and new selection.
+  enabled: true
+  weight: 0.35
+  logit_clip: 2.5
+  diagnostics: true
+  calibration:
+    # Role-conditioned calibration maps raw reranker probability to a usable
+    # generation score. This prevents synthetic-negative training from giving
+    # severe penalties to diagnostically strong cadence closures. It does not
+    # edit notes or force a cadence; it only limits how much the learned prior
+    # may distrust an otherwise well-resolved cadence.
+    enabled: true
+
+    # When cadence diagnostics are strong, reranker logit will not be allowed
+    # below this floor. Lower values let the reranker remain more skeptical;
+    # higher values protect cadence closure more strongly.
+    cadence_min_logit_when_good: -0.20
+
+    # Smooth centers used to estimate whether a cadence is diagnostically good.
+    # Raise harmony_score/chord_tone_ratio to make protection stricter. Lower
+    # resolution/unresolved costs to require cleaner non-chord handling.
+    good_cadence_harmony_score: 2.0
+    good_cadence_chord_tone_ratio: 0.80
+    good_cadence_resolution_cost: 0.12
+    good_cadence_unresolved_cost: 0.12
+
 narrative:
   # Piece-level dramatic form planner. This layer does not edit notes; it
   # assigns each bar a macro role so repeated themes can carry different
@@ -370,6 +474,161 @@ narrative:
     min_secondary_ratio: 0.16
     max_replaced_ratio: 0.18
     secondary_regions: [CONTRAST, DEVELOPMENT, CLIMAX]
+
+dual_theme_development:
+  # Continuous A/B-theme relationship layer.
+  # It compares learned theme identities and skeletons, then softly biases
+  # register, tension, similarity freedom, and motif-development strength.
+  # It does not force a role such as conflict/resolution and it never edits
+  # notes directly; it only changes candidate targets before scoring.
+  enabled: true
+
+  # Raise influence when returned themes still feel unrelated after the second
+  # theme has appeared. Lower it if A and B identities blur into each other.
+  influence: 0.42
+
+  # The layer activates only after at least two theme identities have enough
+  # learned material. Raise this to be more conservative; lower it if short
+  # themes should start interacting earlier.
+  min_partner_confidence: 0.32
+
+  # Couplings convert measured A/B differences into target shifts.
+  # register_coupling: higher makes later returns borrow more of the partner
+  # register area; lower keeps each theme in its original register world.
+  # tension_coupling: higher makes themes borrow more of each other's tension
+  # profile; lower keeps tension controlled by the global narrative planner.
+  register_coupling: 0.30
+  tension_coupling: 0.34
+
+  # similarity_freedom widens the allowed contour/rhythm similarity band when
+  # two themes are contrasting. Raise if returns are too literal; lower if theme
+  # identity is becoming hard to recognize.
+  similarity_freedom: 0.22
+
+  # Positive values let affinity pull targets tighter; contrast makes targets
+  # freer. Lower this if candidate selection becomes too sensitive.
+  target_attraction_scale: 0.10
+
+  candidate_scoring:
+    # V1.5 scorer. This remains non-destructive: it only scores return-motif
+    # candidates against both the source theme bar and the partner-theme bar.
+    # Disable it if you want the older v1 behavior where dual-theme only
+    # changes bar targets indirectly.
+    enabled: true
+
+    # Overall strength of partner-aware candidate selection. Raise if A/B still
+    # sound unrelated after both themes have appeared; lower if returns become
+    # too blended or lose their original identity.
+    weight: 1.65
+
+    # partner_echo_weight rewards candidates that carry contour/rhythm/register
+    # traces of the partner theme in proportion to the measured blend.
+    partner_echo_weight: 0.42
+
+    # source_retention_weight keeps the current theme recognizable while it is
+    # being transformed by the partner. Raise this if identity gets weak.
+    source_retention_weight: 0.34
+
+    # blended_anchor_weight rewards candidates whose mean register sits between
+    # the source and partner bars according to the learned relation.
+    blended_anchor_weight: 0.24
+
+    # exact_copy_weight penalizes literal copies of either source or partner.
+    # Raise if repeats still sound pasted; lower if motifs become too unstable.
+    exact_copy_weight: 0.22
+
+    # Partner/source targets shape how much of the other theme should be heard
+    # in a developed candidate. These are continuous scoring targets, not
+    # rules. Raise partner_target_* if A/B still feel unrelated; lower them if
+    # the current theme identity disappears. Raise source_target_base for more
+    # recognizable returns; raise source_target_transform_relief to allow more
+    # departure during development/climax.
+    partner_target_base: 0.26
+    partner_target_blend: 0.72
+    partner_target_transform: 0.42
+    partner_target_contrast: 0.20
+    source_target_base: 0.72
+    source_target_transform_relief: 0.34
+
+    # Target widths control how tolerant the scorer is when the selected
+    # candidate is more/less source-like or partner-like than the desired
+    # continuous target. Narrower widths make the relationship target sharper;
+    # wider widths allow more accidental variation.
+    partner_target_width: 0.26
+    source_target_width: 0.26
+
+    # Damp dual-theme reward when the same candidate has weak harmony fit.
+    # This keeps theme relationship scoring from selecting bars that develop
+    # well motivically but obscure the current harmony. It only changes
+    # candidate ranking.
+    harmony_damping_enabled: true
+    harmony_damping_floor: 0.25
+    harmony_damping_start: -0.10
+    harmony_damping_full: 0.45
+
+  proposal:
+    # V1.1 proposal layer. It adds a few partner-aware candidates to the normal
+    # return-motif candidate pool, then lets the existing scorers choose. It
+    # does not force the final bar and can be disabled independently.
+    enabled: true
+
+    # Number of extra partner-aware candidates per return/repeat bar when a
+    # partner theme is available. Raise if selected candidates still miss the
+    # desired_partner target; lower if generation is slow or themes over-blend.
+    extra_candidates: 5
+
+    # These strengths control how strongly proposals borrow partner material
+    # before scoring. They are proposal diversity controls, not final rules.
+    # Raise contour_strength if A/B melodic shapes still feel unrelated.
+    # Raise rhythm_strength if thematic rhythm identity is not transferring.
+    # register_strength is only used inside mixed proposals. Standalone
+    # register proposals are intentionally not part of the default cycle,
+    # because they can sound like local anchor movement rather than theme
+    # development.
+    contour_strength: 0.62
+    rhythm_strength: 0.28
+    register_strength: 0.34
+    max_pitch_shift: 7
+
+    # harmony_guarded proposals combine contour/rhythm partner influence with
+    # a light harmony projection on strong or unresolved structural notes.
+    # Raise strength if dual-theme returns still lose harmonic clarity; lower
+    # it if the melody becomes too chord-tone heavy.
+    harmony_guard_strength: 0.62
+    harmony_guard_max_adjust: 4
+
+early_repeat_adaptation:
+  # Harmony-aware proposal layer for early repeated motifs before a partner
+  # theme exists. It only adds candidates; final selection still comes from the
+  # normal development, harmony, and conditional scorers.
+  enabled: true
+
+  # Extra candidates per early REPEAT bar with harmony but without dual-theme
+  # context. Raise if early repeats show poor harmony diagnostics; lower if
+  # repeats lose too much identity.
+  extra_candidates: 5
+
+  # anchor_strength moves structurally strong notes toward current chord tones.
+  # weak_strength lightly adjusts unresolved non-chord tones. transpose_radius
+  # allows a small contour-preserving transposition candidate.
+  anchor_strength: 0.72
+  weak_strength: 0.38
+  transpose_radius: 3
+  max_adjust: 5
+
+  scoring:
+    # Soft penalty used only for early REPEAT candidate selection. It does not
+    # edit notes; it prevents candidates with very low chord-tone support or
+    # unresolved non-chord tones from winning just because they preserve motif
+    # identity.
+    enabled: true
+    weight: 1.15
+    chord_tone_target: 0.42
+    non_chord_resolution_target: 0.72
+    unresolved_target: 0.55
+    chord_tone_weight: 1.25
+    resolution_weight: 1.35
+    unresolved_weight: 0.85
 
 monophonic:
   max_overlap: 0.15       # beats. 0=strict, 0.15=legato, higher=loose
