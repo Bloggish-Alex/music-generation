@@ -24,13 +24,13 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
-from music_model import MusicModel
+from music_model import TsModel
 
 log = logging.getLogger("phrase_generator")
 
 
 class PhraseGenerator:
-    """Generate measure label sequences from a trained MusicModel.
+    """Generate measure label sequences from a trained time-signature sub-model.
 
     Algorithm::
 
@@ -41,12 +41,12 @@ class PhraseGenerator:
         5. Repeat from step 2 until target length reached
     """
 
-    def __init__(self, model: MusicModel) -> None:
-        self._model = model
+    def __init__(self, ts_model: TsModel) -> None:
+        self._ts_model = ts_model
 
     @property
-    def model(self) -> MusicModel:
-        return self._model
+    def ts_model(self) -> TsModel:
+        return self._ts_model
 
     def generate(
         self, num_measures: int, seed: Optional[int] = None
@@ -66,7 +66,7 @@ class PhraseGenerator:
         if seed is None:
             seed = np.random.randint(0, 2**31 - 1)
 
-        model = self._model
+        model = self._ts_model
 
         labels: List[int] = []
         n = seed
@@ -260,7 +260,7 @@ def _build_parser() -> "argparse.ArgumentParser":
     add_verbose_arg(parser)
     parser.add_argument(
         "--model",
-        default="./models/mozart",
+        default="../../models/test",
         required=False,
         help="Path to a trained MusicModel directory.",
     )
@@ -292,6 +292,11 @@ def _build_parser() -> "argparse.ArgumentParser":
         action="store_true",
         help="Print generated labels to stdout.",
     )
+    parser.add_argument(
+        "--time-signature",
+        default="4/4",
+        help="Time signature to generate for (default: 4/4).",
+    )
     return parser
 
 
@@ -306,10 +311,11 @@ def main() -> None:
 
     log.info("Loading model from %s ...", args.model)
     model = MusicModel.load(args.model)
+    ts_model = model.model_for(args.time_signature)
     print()
     print(model.summary())
 
-    gen = PhraseGenerator(model)
+    gen = PhraseGenerator(ts_model)
 
     if args.phrase_lengths:
         lengths = [int(x.strip()) for x in args.phrase_lengths.split(",") if x.strip()]

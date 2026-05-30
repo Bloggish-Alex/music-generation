@@ -64,16 +64,26 @@ _DURATION_BIN_EDGES: np.ndarray = np.array(
 
 SHORT_NOTE_THRESHOLD: float = 0.5  # quarterLength < 0.5 = "short" (shorter than eighth)
 
-FEATURE_NAMES: Tuple[str, ...] = (
-    "note_density",
-    "mean_duration",
-    "duration_variance",
-    "short_note_ratio",
-    "silence_ratio",
-    "offbeat_ratio",
-    "syncopation_score",
-    "entropy",
-)
+# Canonical shape exemplars (8-point, normalised [0, 1]) for curve comparison
+_SHAPE_EXEMPLARS: Dict[str, np.ndarray] = {
+    "rising":  np.linspace(0.0, 1.0, 8),
+    "falling": np.linspace(1.0, 0.0, 8),
+    "arch":    np.sin(np.pi * np.linspace(0.0, 1.0, 8)),
+    "valley":  1.0 - np.sin(np.pi * np.linspace(0.0, 1.0, 8)),
+    "flat":    np.full(8, 0.5),
+}
+_SHAPE_NAMES: Tuple[str, ...] = ("rising", "falling", "arch", "valley", "flat")
+
+# -- Key transposition constants ------------------------------------------------
+
+_MAJOR_SCALE: Tuple[int, ...] = (0, 2, 4, 5, 7, 9, 11)
+_MINOR_SCALE: Tuple[int, ...] = (0, 2, 3, 5, 7, 8, 10)
+
+_ROOT_TO_PC: Dict[str, int] = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+    "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
+}
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -92,11 +102,12 @@ class MeasureInfo:
     time_signature: str = "4/4"
     file_path: str = ""
     measure_index: int = 0
+    total_measures: int = 0     # number of measures in the source file
 
 
 @dataclass
 class MeasureVector:
-    """8-dimensional feature vector for one measure."""
+    """19-dimensional feature vector for one measure."""
 
     note_density: float = 0.0
     mean_duration: float = 0.0
@@ -106,13 +117,35 @@ class MeasureVector:
     offbeat_ratio: float = 0.0
     syncopation_score: float = 0.0
     entropy: float = 0.0
+    relative_position: float = 0.0
+
+    # Pitch shape distances to 5 canonical exemplars (0 = identical, 1 = opposite)
+    pitch_shape_rising: float = 0.0
+    pitch_shape_falling: float = 0.0
+    pitch_shape_arch: float = 0.0     # rise then fall
+    pitch_shape_valley: float = 0.0   # fall then rise
+    pitch_shape_flat: float = 0.0     # all same
+
+    # Duration shape distances to 5 canonical exemplars
+    dur_shape_rising: float = 0.0
+    dur_shape_falling: float = 0.0
+    dur_shape_arch: float = 0.0
+    dur_shape_valley: float = 0.0
+    dur_shape_flat: float = 0.0
+
+    measure_length: float = 0.0  # measure.beats / 16, normalised bar length
 
     file_path: str = ""
     measure_index: int = 0
+    time_signature: str = "4/4"
     cluster_label: int = -1
 
     def as_array(self) -> np.ndarray:
-        """Return the 8 features as a numpy array (float64)."""
+        """Return the 20 features as a numpy array (float64).
+
+        Order: 10 rhythm features then 10 contour features (matches
+        the concatenation order in MeasureExtractor.vectorize).
+        """
         return np.array([
             self.note_density,
             self.mean_duration,
@@ -122,26 +155,247 @@ class MeasureVector:
             self.offbeat_ratio,
             self.syncopation_score,
             self.entropy,
+            self.relative_position,
+            self.measure_length,
+            self.pitch_shape_rising,
+            self.pitch_shape_falling,
+            self.pitch_shape_arch,
+            self.pitch_shape_valley,
+            self.pitch_shape_flat,
+            self.dur_shape_rising,
+            self.dur_shape_falling,
+            self.dur_shape_arch,
+            self.dur_shape_valley,
+            self.dur_shape_flat,
         ], dtype=np.float64)
 
     @classmethod
     def from_array(cls, arr: np.ndarray, file_path: str = "",
-                   measure_index: int = 0, cluster_label: int = -1) -> "MeasureVector":
+                   measure_index: int = 0, time_signature: str = "4/4",
+                   cluster_label: int = -1) -> "MeasureVector":
         """Construct from a numpy array (for centroid reconstruction)."""
+        n = len(arr)
+
+        def _f(i: int) -> float:
+            return float(arr[i]) if i < n else 0.0
+
         return cls(
-            note_density=float(arr[0]),
-            mean_duration=float(arr[1]),
-            duration_variance=float(arr[2]),
-            short_note_ratio=float(arr[3]),
-            silence_ratio=float(arr[4]),
-            offbeat_ratio=float(arr[5]),
-            syncopation_score=float(arr[6]),
-            entropy=float(arr[7]),
+            note_density=_f(0),
+            mean_duration=_f(1),
+            duration_variance=_f(2),
+            short_note_ratio=_f(3),
+            silence_ratio=_f(4),
+            offbeat_ratio=_f(5),
+            syncopation_score=_f(6),
+            entropy=_f(7),
+            relative_position=_f(8),
+            measure_length=_f(9),
+            pitch_shape_rising=_f(10),
+            pitch_shape_falling=_f(11),
+            pitch_shape_arch=_f(12),
+            pitch_shape_valley=_f(13),
+            pitch_shape_flat=_f(14),
+            dur_shape_rising=_f(15),
+            dur_shape_falling=_f(16),
+            dur_shape_arch=_f(17),
+            dur_shape_valley=_f(18),
+            dur_shape_flat=_f(19),
             file_path=file_path,
             measure_index=measure_index,
+            time_signature=time_signature,
             cluster_label=cluster_label,
         )
 
+
+# ---------------------------------------------------------------------------
+# Feature extractors
+# ---------------------------------------------------------------------------
+
+
+class RhythmFeatureExtractor:
+    """Extract rhythmic / structural features from a single measure.
+
+    Features (10): note_density, mean_duration, duration_variance,
+    short_note_ratio, silence_ratio, offbeat_ratio, syncopation_score,
+    entropy, relative_position, measure_length.
+    """
+
+    FEATURE_NAMES: Tuple[str, ...] = (
+        "note_density",
+        "mean_duration",
+        "duration_variance",
+        "short_note_ratio",
+        "silence_ratio",
+        "offbeat_ratio",
+        "syncopation_score",
+        "entropy",
+        "relative_position",
+        "measure_length",
+    )
+
+    def __init__(self) -> None:
+        self._dur_bins = _DURATION_BIN_EDGES
+
+    def features(self, measure: MeasureInfo) -> Dict[str, float]:
+        """Return a dict keyed by feature name for *measure*."""
+        notes = measure.notes
+        n = len(notes)
+
+        denom = max(1, measure.total_measures - 1)
+        rel_pos = measure.measure_index / denom
+
+        if n == 0:
+            return {
+                "note_density": 0.0,
+                "mean_duration": 0.0,
+                "duration_variance": 0.0,
+                "short_note_ratio": 0.0,
+                "silence_ratio": 0.0,
+                "offbeat_ratio": 0.0,
+                "syncopation_score": 0.0,
+                "entropy": 0.0,
+                "relative_position": rel_pos,
+                "measure_length": measure.beats / 16.0,
+            }
+
+        durations = np.array([nd["quarterLength"] for nd in notes], dtype=np.float64)
+        onsets = np.array([nd["onset_in_measure"] for nd in notes], dtype=np.float64)
+
+        density = n / measure.beats if measure.beats > 0 else 0.0
+        mean_dur = float(np.mean(durations))
+        dur_var = float(np.var(durations))
+        short_ratio = float(np.sum(durations < SHORT_NOTE_THRESHOLD) / n)
+        total_sounding = float(np.sum(durations))
+        silence = 1.0 - (total_sounding / measure.beats) if measure.beats > 0 else 0.0
+        silence = max(0.0, min(1.0, silence))
+        offbeat = float(np.sum(onsets % 1.0 > 1e-9) / n)
+        sync_count = self._count_syncopations(notes)
+        ent = self._rhythmic_entropy(durations)
+
+        return {
+            "note_density": density,
+            "mean_duration": mean_dur,
+            "duration_variance": dur_var,
+            "short_note_ratio": short_ratio,
+            "silence_ratio": silence,
+            "offbeat_ratio": offbeat,
+            "syncopation_score": sync_count / n,
+            "entropy": ent,
+            "relative_position": rel_pos,
+            "measure_length": measure.beats * 10,
+        }
+
+    def vector(self, feats: Dict[str, float]) -> np.ndarray:
+        """Return the feature values in canonical order as a numpy array."""
+        return np.array([feats[n] for n in self.FEATURE_NAMES], dtype=np.float64)
+
+    @staticmethod
+    def _is_onbeat(onset: float) -> bool:
+        return abs(onset % 1.0) < 1e-9
+
+    @staticmethod
+    def _count_syncopations(notes: List[Dict[str, Any]]) -> int:
+        sorted_notes = sorted(notes, key=lambda nd: nd["onset_in_measure"])
+        count = 0
+        prev_onbeat_dur = 0.0
+        for nd in sorted_notes:
+            onset = nd["onset_in_measure"]
+            dur = nd["quarterLength"]
+            if RhythmFeatureExtractor._is_onbeat(onset):
+                prev_onbeat_dur = dur
+            elif dur > prev_onbeat_dur and prev_onbeat_dur > 0:
+                count += 1
+        return count
+
+    def _rhythmic_entropy(self, durations: np.ndarray) -> float:
+        hist, _ = np.histogram(durations, bins=self._dur_bins)
+        hist = hist.astype(np.float64)
+        total = hist.sum()
+        if total <= 0:
+            return 0.0
+        probs = hist / total
+        probs = probs[probs > 0]
+        return float(-np.sum(probs * np.log2(probs)))
+
+
+class ContourFeatureExtractor:
+    """Extract contour / shape features from a single measure.
+
+    Features (10): distances from the measure's pitch and duration curves
+    to 5 canonical shape exemplars (rising, falling, arch, valley, flat).
+    Lower = more similar to that shape (0 = identical, 1 = opposite).
+    """
+
+    FEATURE_NAMES: Tuple[str, ...] = (
+        "pitch_shape_rising",
+        "pitch_shape_falling",
+        "pitch_shape_arch",
+        "pitch_shape_valley",
+        "pitch_shape_flat",
+        "dur_shape_rising",
+        "dur_shape_falling",
+        "dur_shape_arch",
+        "dur_shape_valley",
+        "dur_shape_flat",
+    )
+
+    def features(self, measure: MeasureInfo) -> Dict[str, float]:
+        """Return a dict keyed by feature name for *measure*."""
+        notes = sorted(measure.notes, key=lambda nd: nd["onset_in_measure"])
+        pitches = np.array([nd["pitch"] for nd in notes], dtype=np.float64)
+        durs = np.array([nd["quarterLength"] for nd in notes], dtype=np.float64)
+
+        p = self._shape_distances(pitches)
+        d = self._shape_distances(durs)
+
+        return {
+            "pitch_shape_rising":  p[0],
+            "pitch_shape_falling": p[1],
+            "pitch_shape_arch":    p[2],
+            "pitch_shape_valley":  p[3],
+            "pitch_shape_flat":    p[4],
+            "dur_shape_rising":    d[0],
+            "dur_shape_falling":   d[1],
+            "dur_shape_arch":      d[2],
+            "dur_shape_valley":    d[3],
+            "dur_shape_flat":      d[4],
+        }
+
+    def vector(self, feats: Dict[str, float]) -> np.ndarray:
+        """Return the feature values in canonical order as a numpy array."""
+        return np.array([feats[n] for n in self.FEATURE_NAMES], dtype=np.float64)
+
+    @staticmethod
+    def _shape_distances(values: np.ndarray) -> np.ndarray:
+        """Resample *values* to 8 points, normalise, return (1−r)/2 to each exemplar."""
+        result = np.full(5, 0.5, dtype=np.float64)
+        n = len(values)
+        if n < 2:
+            return result
+
+        indices = np.linspace(0, n - 1, 8)
+        lo = np.clip(np.floor(indices).astype(int), 0, n - 1)
+        hi = np.clip(np.ceil(indices).astype(int), 0, n - 1)
+        frac = indices - lo
+        curve = values[lo] * (1.0 - frac) + values[hi] * frac
+
+        c_min, c_max = curve.min(), curve.max()
+        span = c_max - c_min
+        curve = (curve - c_min) / span if span > 1e-9 else np.zeros(8)
+
+        with np.errstate(invalid="ignore"):
+            for i, name in enumerate(_SHAPE_NAMES):
+                exemplar = _SHAPE_EXEMPLARS[name]
+                r = np.corrcoef(curve, exemplar)[0, 1]
+                result[i] = (1.0 - (0.0 if np.isnan(r) else r)) / 2.0
+
+        return result
+
+
+# Combined feature names (order matches MeasureVector.as_array)
+FEATURE_NAMES: Tuple[str, ...] = (
+    RhythmFeatureExtractor.FEATURE_NAMES + ContourFeatureExtractor.FEATURE_NAMES
+)
 
 # ---------------------------------------------------------------------------
 # Measure extractor
@@ -149,10 +403,18 @@ class MeasureVector:
 
 
 class MeasureExtractor:
-    """Parse music files and extract per-measure feature vectors."""
+    """Parse music files and extract per-measure feature vectors.
 
-    def __init__(self) -> None:
-        self._dur_bins = _DURATION_BIN_EDGES
+    Args:
+        transpose_to_common_key: When True (default), detect each file's key
+            and transpose all pitches to C major so that measures from
+            different source keys are harmonically compatible.
+    """
+
+    def __init__(self, transpose_to_common_key: bool = True) -> None:
+        self._rhythm = RhythmFeatureExtractor()
+        self._contour = ContourFeatureExtractor()
+        self.transpose_to_common_key = transpose_to_common_key
 
     # -- file-level parsing --------------------------------------------------
 
@@ -225,97 +487,120 @@ class MeasureExtractor:
                 measure_index=bar_idx,
             ))
 
+        # Stamp total measure count on each MeasureInfo
+        total = len(result)
+        for mi in result:
+            mi.total_measures = total
+
+        # Detect key via music21 and transpose to C major
+        if self.transpose_to_common_key and result:
+            try:
+                key_obj = score.analyze("key")
+                tonic_pc = key_obj.tonic.midi % 12
+                mode = key_obj.mode  # "major" or "minor"
+            except Exception:
+                tonic_pc, mode = 0, "major"  # fallback
+
+            if tonic_pc != 0 or mode != "major":
+                for mi in result:
+                    for nd in mi.notes:
+                        nd["pitch"] = self._transpose_pitch(
+                            nd["pitch"], tonic_pc, mode, 0, "major",
+                        )
+
         return result
+
+    # -- key transposition ---------------------------------------------------
+
+    @staticmethod
+    def parse_key(key_str: str) -> Tuple[int, str]:
+        """Parse a key string like ``"C"``, ``"G"``, ``"Am"`` into (tonic_pc, mode)."""
+        text = key_str.strip()
+        if not text:
+            return 0, "major"
+        mode = "minor" if text.endswith("m") else "major"
+        root = text[:-1] if mode == "minor" else text
+        tonic_pc = _ROOT_TO_PC.get(root)
+        if tonic_pc is None:
+            raise ValueError(f"Unrecognised key: {key_str!r}")
+        return tonic_pc, mode
+
+    @staticmethod
+    def transpose_notes(
+        notes: List[Any],
+        from_tonic: int,
+        from_mode: str,
+        to_tonic: int,
+        to_mode: str,
+    ) -> List[Dict[str, Any]]:
+        """Transpose a list of NoteEvent-like objects between keys.
+
+        Returns new dicts ``{pitch, duration_ql, velocity, beat_offset}``.
+        Notes with pitch < 0 (rests) pass through unchanged.
+        """
+        result: List[Dict[str, Any]] = []
+        for n in notes:
+            pitch = getattr(n, "pitch", n[0] if isinstance(n, tuple) else -1)
+            if pitch >= 0:
+                pitch = MeasureExtractor._transpose_pitch(
+                    pitch, from_tonic, from_mode, to_tonic, to_mode,
+                )
+            result.append({
+                "pitch": pitch,
+                "duration_ql": getattr(n, "duration_ql", 0.0),
+                "velocity": getattr(n, "velocity", 80),
+                "beat_offset": getattr(n, "beat_offset", 0.0),
+            })
+        return result
+
+    @staticmethod
+    def _transpose_pitch(
+        pitch: int,
+        from_tonic: int,
+        from_mode: str,
+        to_tonic: int,
+        to_mode: str,
+    ) -> int:
+        """Transpose a MIDI pitch between keys via scale-degree space.
+
+        Converts *pitch* to a key-relative (degree, accidental, octave) in
+        the source key, then maps it back to MIDI pitch in the target key.
+        """
+        from_scale = _MAJOR_SCALE if from_mode == "major" else _MINOR_SCALE
+        to_scale = _MAJOR_SCALE if to_mode == "major" else _MINOR_SCALE
+
+        pc = pitch % 12
+        octave = pitch // 12
+        rel_pc = (pc - from_tonic) % 12
+
+        # Find nearest diatonic degree in source key
+        best_deg, best_acc, best_dist = 1, 0, 99
+        for deg, base in enumerate(from_scale, start=1):
+            acc = (rel_pc - base + 6) % 12 - 6  # signed delta [-6, 6]
+            dist = abs(acc)
+            if dist < best_dist or (dist == best_dist and abs(acc) < abs(best_acc)):
+                best_deg, best_acc, best_dist = deg, acc, dist
+
+        # Map to target key: same degree, same accidental, same octave
+        base_pc = to_scale[(best_deg - 1) % 7]
+        new_pitch = octave * 12 + to_tonic + base_pc + best_acc
+        return max(0, min(127, int(new_pitch)))
 
     # -- vectorization -------------------------------------------------------
 
     def vectorize(self, measure: MeasureInfo) -> MeasureVector:
-        """Compute the 8-dimensional feature vector for a single measure."""
-        notes = measure.notes
-        n = len(notes)
-        if n == 0:
-            return MeasureVector(
-                file_path=measure.file_path,
-                measure_index=measure.measure_index,
-            )
-
-        durations = np.array([nd["quarterLength"] for nd in notes], dtype=np.float64)
-        onsets = np.array([nd["onset_in_measure"] for nd in notes], dtype=np.float64)
-
-        # 1. note_density — onsets per beat
-        density = n / measure.beats if measure.beats > 0 else 0.0
-
-        # 2. mean_duration
-        mean_dur = float(np.mean(durations))
-
-        # 3. duration_variance
-        dur_var = float(np.var(durations))
-
-        # 4. short_note_ratio
-        short_ratio = float(np.sum(durations < SHORT_NOTE_THRESHOLD) / n)
-
-        # 5. silence_ratio
-        total_sounding = float(np.sum(durations))
-        silence = 1.0 - (total_sounding / measure.beats) if measure.beats > 0 else 0.0
-        silence = max(0.0, min(1.0, silence))
-
-        # 6. offbeat_ratio — onset not on quarter-beat boundary
-        offbeat = float(np.sum(onsets % 1.0 > 1e-9) / n)
-
-        # 7. syncopation_score — offbeat note where duration exceeds previous on-beat note
-        sync_count = self._count_syncopations(notes)
-
-        # 8. rhythmic entropy
-        ent = self._rhythmic_entropy(durations)
-
-        return MeasureVector(
-            note_density=density,
-            mean_duration=mean_dur,
-            duration_variance=dur_var,
-            short_note_ratio=short_ratio,
-            silence_ratio=silence,
-            offbeat_ratio=offbeat,
-            syncopation_score=sync_count / n,
-            entropy=ent,
+        """Compute the full feature vector for a single measure."""
+        arr = np.concatenate([
+            self._rhythm.vector(self._rhythm.features(measure)),
+            # self._contour.vector(self._contour.features(measure)),
+            []
+        ])
+        return MeasureVector.from_array(
+            arr,
             file_path=measure.file_path,
             measure_index=measure.measure_index,
+            time_signature=measure.time_signature,
         )
-
-    @staticmethod
-    def _is_onbeat(onset: float) -> bool:
-        """Return True if *onset* falls on a quarter-beat boundary."""
-        return abs(onset % 1.0) < 1e-9
-
-    def _count_syncopations(self, notes: List[Dict[str, Any]]) -> int:
-        """Count syncopations: offbeat notes longer than the preceding on-beat note.
-
-        Walk through notes sorted by onset.  Track the most recent on-beat
-        noteʼs duration.  When we encounter an offbeat note whose duration
-        exceeds that value, count it as syncopated.
-        """
-        sorted_notes = sorted(notes, key=lambda nd: nd["onset_in_measure"])
-        count = 0
-        prev_onbeat_dur = 0.0
-        for nd in sorted_notes:
-            onset = nd["onset_in_measure"]
-            dur = nd["quarterLength"]
-            if self._is_onbeat(onset):
-                prev_onbeat_dur = dur
-            else:
-                if dur > prev_onbeat_dur and prev_onbeat_dur > 0:
-                    count += 1
-        return count
-
-    def _rhythmic_entropy(self, durations: np.ndarray) -> float:
-        """Shannon entropy of the duration distribution (binned)."""
-        hist, _ = np.histogram(durations, bins=self._dur_bins)
-        hist = hist.astype(np.float64)
-        total = hist.sum()
-        if total <= 0:
-            return 0.0
-        probs = hist / total
-        probs = probs[probs > 0]
-        return float(-np.sum(probs * np.log2(probs)))
 
     # -- batch extraction ----------------------------------------------------
 
@@ -397,12 +682,13 @@ class MeasureClusterer:
         self._inertia: float = 0.0
         self._labels: Optional[np.ndarray] = None
         self._cluster_measures: Dict[int, List[MeasureInfo]] = {}
+        self._feature_weights: Optional[np.ndarray] = None
 
     # -- properties ----------------------------------------------------------
 
     @property
     def centroids(self) -> Optional[np.ndarray]:
-        """Cluster centroids in the original (unscaled) feature space (n_clusters × 8)."""
+        """Cluster centroids in the original (unscaled) feature space."""
         return self._centroids_raw
 
     @property
@@ -422,6 +708,7 @@ class MeasureClusterer:
         vectors: List[MeasureVector],
         n_clusters: int = 8,
         random_seed: int = 42,
+        feature_weights: Optional[Sequence[float]] = None,
     ) -> "MeasureClusterer":
         """Normalize vectors with StandardScaler, fit KMeans, and store model.
 
@@ -429,6 +716,9 @@ class MeasureClusterer:
             vectors: Training data.
             n_clusters: Number of KMeans clusters.
             random_seed: Reproducibility seed.
+            feature_weights: Per-feature multiplier applied after scaling
+                (default 1.0 for all).  Use < 1.0 to dampen a feature
+                (e.g. 0.15 for ``relative_position``), > 1.0 to amplify.
 
         Returns:
             self (for chaining).
@@ -439,19 +729,32 @@ class MeasureClusterer:
         X = np.stack([v.as_array() for v in vectors], axis=0)
         log.info("Feature matrix shape: %s", X.shape)
 
+        n_feat = X.shape[1]
+        if feature_weights is None:
+            weights = np.ones(n_feat, dtype=np.float64)
+        else:
+            weights = np.asarray(feature_weights, dtype=np.float64)
+            if len(weights) != n_feat:
+                raise ValueError(
+                    f"feature_weights length {len(weights)} != {n_feat} features"
+                )
+        self._feature_weights = weights
+
         self._scaler = StandardScaler()
         X_scaled = self._scaler.fit_transform(X)
+        X_weighted = X_scaled * weights
 
         self._kmeans = KMeans(
             n_clusters=n_clusters,
             random_state=random_seed,
-            n_init="auto",
+            n_init=10
         )
-        self._labels = self._kmeans.fit_predict(X_scaled)
+        self._labels = self._kmeans.fit_predict(X_weighted)
         self._inertia = float(self._kmeans.inertia_)
 
-        # Store centroids in original (unscaled) space
-        centroids_scaled = self._kmeans.cluster_centers_
+        # Recover centroids in original (unscaled, unweighted) space
+        centroids_weighted = self._kmeans.cluster_centers_
+        centroids_scaled = centroids_weighted / weights
         self._centroids_raw = self._scaler.inverse_transform(centroids_scaled)
 
         # Tag vectors with their labels
@@ -459,8 +762,9 @@ class MeasureClusterer:
             v.cluster_label = int(lbl)
 
         log.info(
-            "KMeans fit: n_clusters=%d, inertia=%.3f, samples=%d",
+            "KMeans fit: n_clusters=%d, inertia=%.3f, samples=%d, weights=%s",
             n_clusters, self._inertia, len(vectors),
+            ", ".join(f"{w:.2f}" for w in weights),
         )
         return self
 
@@ -471,6 +775,9 @@ class MeasureClusterer:
         self._require_fit()
         X = vector.as_array().reshape(1, -1)
         X_scaled = self._scaler.transform(X)
+        weights = getattr(self, "_feature_weights", None)
+        if weights is not None:
+            X_scaled = X_scaled * weights
         return int(self._kmeans.predict(X_scaled)[0])
 
     def predict_many(self, vectors: List[MeasureVector]) -> np.ndarray:
@@ -478,6 +785,9 @@ class MeasureClusterer:
         self._require_fit()
         X = np.stack([v.as_array() for v in vectors], axis=0)
         X_scaled = self._scaler.transform(X)
+        weights = getattr(self, "_feature_weights", None)
+        if weights is not None:
+            X_scaled = X_scaled * weights
         return self._kmeans.predict(X_scaled)
 
     # -- measure storage -----------------------------------------------------
@@ -522,6 +832,45 @@ class MeasureClusterer:
         rng = np.random.RandomState(seed)
         return measures[int(rng.randint(0, len(measures)))]
 
+    def print_sample_measures(self, seed: int = 42) -> None:
+        """Print sample measures from a randomly chosen cluster.
+
+        Picks a cluster with > 3 stored measures, prints 5 random measures'
+        notes as ``(pitch, quarterLength, onset_in_measure)`` tuples.
+        """
+        eligible = [
+            (c, measures) for c, measures in self._cluster_measures.items()
+            if len(measures) > 3
+        ]
+        if not eligible:
+            print("\nNo stored measures to display (train with updated MusicModel).")
+            return
+
+        rng = np.random.RandomState(seed)
+        c, measures = eligible[rng.randint(0, len(eligible))]
+        n_show = min(5, len(measures))
+        indices = rng.choice(len(measures), n_show, replace=False)
+
+        extractor = MeasureExtractor()
+
+        print(f"\n{'=' * 72}")
+        print(f"SAMPLE MEASURES — Cluster {c} ({len(measures)} stored)")
+        print(f"{'=' * 72}")
+
+        for i, idx in enumerate(indices):
+            mi = measures[int(idx)]
+            vec = extractor.vectorize(mi)
+            source = Path(mi.file_path).name if mi.file_path else "?"
+            vec_str = ", ".join(f"{v:.2f}" for v in vec.as_array())
+            print(f"\n  Measure {i + 1}  [file={source}, bar={mi.measure_index}, "
+                  f"ts={mi.time_signature}, beats={mi.beats:.1f}], "
+                  f"vector: [{vec_str}]")
+            for nd in mi.notes:
+                print(f"    (pitch={nd['pitch']:>4}, dur={nd['quarterLength']:.2f}, "
+                      f"onset={nd.get('onset_in_measure', 0):.2f})")
+
+        print()
+
     # -- stats ---------------------------------------------------------------
 
     def cluster_stats(self, vectors: List[MeasureVector]) -> List[Dict[str, Any]]:
@@ -545,9 +894,10 @@ class MeasureClusterer:
                 self._centroids_raw[c],
                 cluster_label=c,
             )
-            std_arr = np.std(cluster_x, axis=0) if len(cluster_x) > 0 else np.zeros(8)
+            n_feat = self._centroids_raw.shape[1]
+            std_arr = np.std(cluster_x, axis=0) if len(cluster_x) > 0 else np.zeros(n_feat)
             feature_means = {
-                FEATURE_NAMES[i]: float(self._centroids_raw[c, i]) for i in range(8)
+                FEATURE_NAMES[i]: float(self._centroids_raw[c, i]) for i in range(n_feat)
             }
             stats.append({
                 "cluster": c,
@@ -574,6 +924,7 @@ class MeasureClusterer:
             "inertia": self._inertia,
             "labels": self._labels,
             "cluster_measures": self._cluster_measures,
+            "feature_weights": getattr(self, "_feature_weights", None),
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -591,6 +942,7 @@ class MeasureClusterer:
         obj._inertia = state.get("inertia", 0.0)
         obj._labels = state.get("labels")
         obj._cluster_measures = state.get("cluster_measures", {})
+        obj._feature_weights = state.get("feature_weights")
         return obj
 
 
@@ -645,9 +997,8 @@ def classify_files(
 ]:
     """Extract measures from all music files, classify, return per-file labels.
 
-    This is the shared extraction+classification step used by all three
-    builders.  File boundaries are preserved — each inner list corresponds
-    to one file's ordered cluster labels.
+    File boundaries are preserved — each inner list corresponds to one file's
+    ordered cluster labels.
 
     Args:
         music_dir: Root directory containing music files.
@@ -741,11 +1092,155 @@ class ClusterVisualizer:
         import matplotlib
         matplotlib.use("Agg")
 
-        self._plot_pairplot(f"{save_prefix}_pairplot.png")
+        self._plot_summary(f"{save_prefix}_summary.png")
+        self._plot_silhouette(f"{save_prefix}_silhouette.png")
         self._plot_radar(f"{save_prefix}_radar.png")
         self._plot_sizes(f"{save_prefix}_sizes.png")
-        self._plot_tsne(f"{save_prefix}_tsne.png")
         log.info("Saved cluster plots with prefix '%s'", save_prefix)
+
+    # -- summary figure -------------------------------------------------------
+
+    def _plot_summary(self, save_path: str) -> None:
+        """Combined 2×2 summary: t-SNE, sizes, feature heatmap, silhouette."""
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+
+        # --- Top-left: t-SNE ---
+        ax_tsne = axes[0, 0]
+        if len(self._X) >= 2:
+            X_sub = self._X
+            labels_sub = self._labels
+            if len(X_sub) > 3000:
+                rng = np.random.RandomState(42)
+                idx = rng.choice(len(X_sub), 3000, replace=False)
+                X_sub = X_sub[idx]
+                labels_sub = labels_sub[idx]
+            from sklearn.manifold import TSNE
+            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(X_sub) - 1))
+            X_2d = tsne.fit_transform(X_sub)
+            sc = ax_tsne.scatter(
+                X_2d[:, 0], X_2d[:, 1], c=labels_sub,
+                cmap="tab10", alpha=0.4, s=8,
+            )
+            ax_tsne.set_title("t-SNE Projection", fontsize=12)
+            ax_tsne.legend(*sc.legend_elements(), title="Cluster", fontsize=7)
+        else:
+            ax_tsne.text(0.5, 0.5, "Not enough data", ha="center", va="center")
+            ax_tsne.set_title("t-SNE Projection")
+
+        # --- Top-right: cluster sizes ---
+        ax_sizes = axes[0, 1]
+        unique, counts = np.unique(self._labels, return_counts=True)
+        colors = plt.get_cmap("tab10")(unique)
+        bars = ax_sizes.bar(unique, counts, color=colors)
+        ax_sizes.set_xlabel("Cluster")
+        ax_sizes.set_ylabel("Measures")
+        ax_sizes.set_title("Cluster Sizes", fontsize=12)
+        for bar, count in zip(bars, counts):
+            ax_sizes.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                          str(count), ha="center", fontsize=9)
+
+        # --- Bottom-left: feature heatmap (clusters × features) ---
+        ax_heat = axes[1, 0]
+        if self._centroids is not None and self._centroids.shape[0] > 0:
+            n_feat = self._centroids.shape[1]
+            # Z-score across clusters per feature for contrast
+            c_mean = self._centroids.mean(axis=0)
+            c_std = self._centroids.std(axis=0)
+            c_std[c_std == 0] = 1.0
+            c_norm = (self._centroids - c_mean) / c_std
+            im = ax_heat.imshow(c_norm.T, aspect="auto", cmap="RdBu_r",
+                                interpolation="nearest")
+            ax_heat.set_xticks(range(self._centroids.shape[0]))
+            ax_heat.set_xticklabels([f"C{i}" for i in range(self._centroids.shape[0])])
+            ax_heat.set_xlabel("Cluster")
+            ax_heat.set_yticks(range(min(n_feat, len(FEATURE_NAMES))))
+            ax_heat.set_yticklabels(
+                [FEATURE_NAMES[i] for i in range(min(n_feat, len(FEATURE_NAMES)))],
+                fontsize=7,
+            )
+            ax_heat.set_title("Cluster Centroids (z-score by feature)", fontsize=12)
+            plt.colorbar(im, ax=ax_heat, shrink=0.8)
+        else:
+            ax_heat.text(0.5, 0.5, "No centroids", ha="center", va="center")
+
+        # --- Bottom-right: silhouette ---
+        ax_sil = axes[1, 1]
+        try:
+            from sklearn.metrics import silhouette_samples
+            if len(self._X) >= 2 and len(unique) >= 2:
+                sil_vals = silhouette_samples(self._X, self._labels)
+                y_pos = 0
+                for c in sorted(unique):
+                    cluster_sil = sil_vals[self._labels == c]
+                    cluster_sil.sort()
+                    ax_sil.fill_betweenx(
+                        np.arange(y_pos, y_pos + len(cluster_sil)),
+                        0, cluster_sil,
+                        alpha=0.6, color=colors[c], label=f"C{c}"
+                    )
+                    y_pos += len(cluster_sil)
+                ax_sil.axvline(x=sil_vals.mean(), color="red", linestyle="--", linewidth=1)
+                ax_sil.set_xlabel("Silhouette score")
+                ax_sil.set_title("Silhouette by Cluster", fontsize=12)
+                ax_sil.legend(fontsize=7, loc="lower left")
+            else:
+                ax_sil.text(0.5, 0.5, "Need >= 2 samples and clusters",
+                            ha="center", va="center")
+        except ImportError:
+            ax_sil.text(0.5, 0.5, "scikit-learn not available",
+                        ha="center", va="center")
+
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Saved summary plot to %s", save_path)
+
+    # -- silhouette plot ------------------------------------------------------
+
+    def _plot_silhouette(self, save_path: str) -> None:
+        """Silhouette scores per cluster (bar chart)."""
+        import matplotlib.pyplot as plt
+
+        unique = np.unique(self._labels)
+        if len(unique) < 2:
+            log.info("Silhouette: need >= 2 clusters, skipping.")
+            return
+        if len(self._X) < 2:
+            return
+
+        try:
+            from sklearn.metrics import silhouette_samples, silhouette_score
+        except ImportError:
+            log.info("scikit-learn silhouette not available.")
+            return
+
+        sil_vals = silhouette_samples(self._X, self._labels)
+        overall = silhouette_score(self._X, self._labels)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        colors = plt.get_cmap("tab10")(unique)
+
+        cluster_means = []
+        for c in sorted(unique):
+            cluster_sil = sil_vals[self._labels == c]
+            cluster_means.append(cluster_sil.mean())
+        bars = ax.bar(unique, cluster_means, color=colors)
+        ax.axhline(y=overall, color="red", linestyle="--", linewidth=1.5,
+                   label=f"Overall ({overall:.3f})")
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Mean Silhouette Score")
+        ax.set_title(f"Silhouette Scores by Cluster (overall={overall:.3f})")
+        ax.legend(fontsize=9)
+        for bar, val in zip(bars, cluster_means):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
+                    f"{val:.3f}", ha="center", fontsize=9)
+
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Saved silhouette plot to %s", save_path)
 
     # -- pairplot ------------------------------------------------------------
 
@@ -1041,6 +1536,7 @@ def main() -> None:
                 fm = {FEATURE_NAMES[i]: float(centroids[c, i]) for i in range(centroids.shape[1])}
                 stats.append({"cluster": c, "size": -1, "feature_means": fm})
         _interpret_clusters(centroids, stats)
+        clusterer.print_sample_measures()
 
     print("Done.")
 

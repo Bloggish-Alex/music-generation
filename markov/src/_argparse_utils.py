@@ -8,7 +8,7 @@ def add_music_source_args(parser: "argparse.ArgumentParser") -> None:
     """Add --music-dir and --file-patterns to *parser*."""
     parser.add_argument(
         "--music-dir",
-        default="../../datasets/corelli",
+        default="../../datasets/test",
         help="Directory containing music files (recursive).",
     )
     parser.add_argument(
@@ -47,7 +47,7 @@ def add_model_io_args(parser: "argparse.ArgumentParser") -> None:
     )
     parser.add_argument(
         "--save-model",
-        default=None,
+        default="../../models/corelli",
         help="Save the fitted clusterer to a .pkl file.",
     )
 
