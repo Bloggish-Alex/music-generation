@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -39,7 +40,19 @@ from hierarchical_render import (
     write_midi,
 )
 from development_scorer import DevelopmentCandidateScorer
+from dual_theme_development import DualThemeDevelopment
+from dual_theme_proposal import DualThemeProposal
+from dual_theme_scorer import DualThemeCandidateScorer
+from early_repeat_scorer import EarlyRepeatCandidateScorer
 from harmonic_planner import HarmonicPlanner
+from candidate_reranker import CandidateReranker
+from generation_trace import GenerationTraceRecorder
+from hierarchical_note_pipeline import (
+    DEFAULT_NOTE_GENERATION_MODULES,
+    DEFAULT_NOTE_GENERATION_STOP_AFTER,
+    HierarchicalNotePipelineMixin,
+    NOTE_GENERATION_MODULES,
+)
 from hierarchical_planning import HierarchicalPlanningMixin
 from narrative_planner import NarrativePlanner
 from hierarchical_types import (
@@ -49,12 +62,15 @@ from hierarchical_types import (
     NoteEvent,
     SectionAffect,
     StructureEdge,
-    ThemeIdentity,
-    ThemeSkeleton,
 )
 from hierarchical_sampler import ClusterNoteSampler
 from music_model import MusicModel
 from phrase_generator import PhraseGenerator
+from repeat_harmony_proposal import RepeatHarmonyProposal
+from rhythm_development import (
+    RhythmCandidateScorer,
+    RhythmPhrasePlanner,
+)
 
 
 def _stable_hash(*args: object) -> int:
@@ -133,7 +149,6 @@ SWING_MIN, SWING_MAX = 0.02, 0.12 # beat_offset jitter range (quarterLength)
 
 MAX_ENTROPY = 3.5                 # normalizer for centroid entropy (theoretical max)
 MIN_VARIATION_STRENGTH = 0.02     # strength below this → skip transforms
-VARIATION_PROGRESSION_DENOM = 3   # k/(k+N) curve steepness
 
 # ---- section structure / grid ----
 
@@ -153,6 +168,56 @@ TICKS_PER_BEAT = 480
 
 # Duration categories used by return-motif variation.
 _USABLE_DUR_VALUES: List[float] = [4.0, 2.0, 1.0, 0.5, 0.25, 3.0, 1.5, 0.75]
+
+MIDI_GENERATION_MODULES: Tuple[Tuple[str, str], ...] = (
+    ("timeline", "_run_timeline_module"),
+    ("planning_context", "_run_planning_context_module"),
+    ("harmony", "_run_harmony_module"),
+    ("notes", "_run_note_generation_module"),
+    ("bass", "_run_bass_module"),
+    ("render_normalize", "_run_render_normalize_module"),
+    ("write_midi", "_run_write_midi_module"),
+    ("harmony_diagnostics", "_run_harmony_diagnostics_module"),
+    ("structure_plot", "_run_structure_plot_module"),
+)
+DEFAULT_MIDI_GENERATION_MODULES: Tuple[str, ...] = tuple(
+    name for name, _method_name in MIDI_GENERATION_MODULES
+)
+
+# Set to a module name to run that module and skip every later module by default.
+# This is an ordered pipeline switch only; it does not infer dependencies.
+DEFAULT_MIDI_GENERATION_STOP_AFTER: Optional[str] = 'notes'
+
+
+@dataclass
+class MidiGenerationRun:
+    """Mutable state passed through the ordered MIDI generation modules."""
+
+    output_path: Path
+    target_measures: int
+    start_states: Optional[List[int]]
+    template_file: Optional[Union[int, str]]
+    variation_strength: float
+    time_signature: Tuple[int, int]
+    tempo: int
+    seed: Optional[int]
+    enable_variation: bool
+    note_modules: Optional[List[str]] = None
+    note_stop_after_module: Optional[str] = None
+    labels: List[int] = field(default_factory=list)
+    event_log: List[Dict[str, Any]] = field(default_factory=list)
+    measure_context: List[Tuple[str, int, str, int, int]] = field(default_factory=list)
+    breathing: List[bool] = field(default_factory=list)
+    base_seed: int = 0
+    structure_graph: List[StructureEdge] = field(default_factory=list)
+    composition_plan: Optional[CompositionPlan] = None
+    harmonic_plan: Dict[int, Any] = field(default_factory=dict)
+    harmony_mode: str = "auto"
+    actual_harmony_mode: str = "disabled"
+    learned_harmony: Any = None
+    all_notes: List[List[NoteEvent]] = field(default_factory=list)
+    trace: GenerationTraceRecorder = field(default_factory=GenerationTraceRecorder)
+
 
 def _deep_update(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge ``overrides`` into ``base``."""
@@ -205,7 +270,7 @@ def _load_style_config(path: str | Path | None, profile: str | None = None) -> D
     return config
 
 
-class HierarchicalGenerator(HierarchicalPlanningMixin):
+class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningMixin):
     """Three-tier music generator.
 
     Combines SectionGrammar (macro form), PhraseGenerator (FREE block
@@ -250,6 +315,15 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             self.config,
         )
         self.harmonic_planner = HarmonicPlanner(self.config)
+        self.dual_theme_development = DualThemeDevelopment(self.config)
+        self.dual_theme_proposal = DualThemeProposal(self.config)
+        self.dual_theme_scorer = DualThemeCandidateScorer(self.config)
+        self.early_repeat_scorer = EarlyRepeatCandidateScorer(self.config)
+        self.repeat_harmony_proposal = RepeatHarmonyProposal(self.config)
+        self.candidate_reranker = getattr(model, "candidate_reranker", None)
+        self.rhythm_phrase_planner = RhythmPhrasePlanner(self.config)
+        self.rhythm_candidate_prior = getattr(model, "rhythm_candidate_prior", None)
+        self.rhythm_scorer = RhythmCandidateScorer(self.config, self.rhythm_candidate_prior)
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
 
@@ -342,16 +416,106 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         tempo: int = 120,
         seed: Optional[int] = None,
         enable_variation: bool = True,
+        modules: Optional[List[str]] = None,
+        stop_after_module: Optional[str] = None,
+        note_modules: Optional[List[str]] = None,
+        note_stop_after_module: Optional[str] = None,
     ) -> List[int]:
         """Generate a full MIDI file.
 
         Args:
             enable_variation: If True (default), apply controlled transforms
-                to non-NEW section occurrences.  Set to False for
-                exact repeats only.
+                to non-NEW section occurrences. Set to False for exact repeats only.
+            modules: Optional ordered module list. Defaults to
+                ``DEFAULT_MIDI_GENERATION_MODULES``; edit that tuple to add/remove
+                a stage globally, or pass a test-specific list here.
+            stop_after_module: If set, run through this module and skip all later
+                modules. This does not infer dependencies; the caller controls
+                the ordered module list. For a global test default, edit
+                ``DEFAULT_MIDI_GENERATION_STOP_AFTER``.
+            note_modules: Optional ordered stage list used inside the ``notes``
+                module. Defaults to ``DEFAULT_NOTE_GENERATION_MODULES``.
+            note_stop_after_module: If set, run note generation through this
+                stage and skip later note stages. This does not infer dependencies.
 
         Returns the cluster label timeline used.
         """
+        run = MidiGenerationRun(
+            output_path=Path(output_path),
+            target_measures=target_measures,
+            start_states=start_states,
+            template_file=template_file,
+            variation_strength=variation_strength,
+            time_signature=time_signature,
+            tempo=tempo,
+            seed=seed,
+            enable_variation=enable_variation,
+            note_modules=note_modules,
+            note_stop_after_module=note_stop_after_module,
+        )
+        cfg = self.config.get("generation_trace", {})
+        if isinstance(cfg, dict) and not cfg.get("enabled", True):
+            run.trace.enabled = False
+        effective_stop = (
+            stop_after_module
+            if stop_after_module is not None
+            else DEFAULT_MIDI_GENERATION_STOP_AFTER
+        )
+        selected_modules = self._resolve_midi_generation_modules(modules, effective_stop)
+        self._last_midi_generation_modules = selected_modules
+        for module_name in selected_modules:
+            self._midi_generation_module(module_name)(run)
+            run.trace.record_module(run, module_name)
+        run.trace.write(run, self)
+        return run.labels
+
+    def _resolve_midi_generation_modules(
+        self,
+        modules: Optional[List[str]],
+        stop_after_module: Optional[str],
+    ) -> List[str]:
+        selected = list(modules or DEFAULT_MIDI_GENERATION_MODULES)
+        known = set(self._midi_generation_modules())
+        unknown = [name for name in selected if name not in known]
+        if unknown:
+            raise KeyError(f"Unknown MIDI generation module(s): {', '.join(unknown)}")
+        if stop_after_module is not None:
+            if stop_after_module not in selected:
+                raise KeyError(f"stop_after_module '{stop_after_module}' is not in the active module list")
+            selected = selected[:selected.index(stop_after_module) + 1]
+        return selected
+
+    def _midi_generation_modules(self) -> Dict[str, Any]:
+        return {
+            name: getattr(self, method_name)
+            for name, method_name in MIDI_GENERATION_MODULES
+        }
+
+    def _midi_generation_module(self, name: str):
+        return self._midi_generation_modules()[name]
+
+    def _resolve_note_generation_modules(
+        self,
+        modules: Optional[List[str]],
+        stop_after_module: Optional[str],
+    ) -> List[str]:
+        selected = list(modules or DEFAULT_NOTE_GENERATION_MODULES)
+        known = set(NOTE_GENERATION_MODULES)
+        unknown = [name for name in selected if name not in known]
+        if unknown:
+            raise KeyError(f"Unknown note generation module(s): {', '.join(unknown)}")
+        if stop_after_module is not None:
+            if stop_after_module not in selected:
+                raise KeyError(f"note_stop_after_module '{stop_after_module}' is not in the active note module list")
+            selected = selected[:selected.index(stop_after_module) + 1]
+        return selected
+
+    def _run_timeline_module(self, run: "MidiGenerationRun") -> None:
+        target_measures = run.target_measures
+        start_states = run.start_states
+        template_file = run.template_file
+        variation_strength = run.variation_strength
+        seed = run.seed
         # 1. Timeline
         labels, event_log = self.generate_timeline(
             target_measures=target_measures,
@@ -361,6 +525,13 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             seed=seed,
         )
 
+        run.labels = labels
+        run.event_log = event_log
+
+    def _run_planning_context_module(self, run: "MidiGenerationRun") -> None:
+        labels = run.labels
+        event_log = run.event_log
+        seed = run.seed
         # 2. Build measure-level context and breathing points
         measure_context = self._build_measure_context(event_log)
         breathing = self._compute_breathing(measure_context)
@@ -371,6 +542,16 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             labels, measure_context, base_seed=base_seed,
         )
         self._last_composition_plan = composition_plan
+        run.measure_context = measure_context
+        run.breathing = breathing
+        run.base_seed = base_seed
+        run.structure_graph = structure_graph
+        run.composition_plan = composition_plan
+
+    def _run_harmony_module(self, run: "MidiGenerationRun") -> None:
+        measure_context = run.measure_context
+        composition_plan = run.composition_plan
+        base_seed = run.base_seed
         harmonic_cfg = self.config.get("harmony", {})
         harmony_mode = str(harmonic_cfg.get("mode", "auto")).lower() if isinstance(harmonic_cfg, dict) else "auto"
         learned_harmony = getattr(self.model, "harmonic_model", None)
@@ -400,256 +581,17 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             )
             actual_harmony_mode = "rule" if self.harmonic_planner.enabled else "disabled"
 
-        # 3. Per-measure note generation
-        all_notes: List[List[NoteEvent]] = []
-        occurrence_count: Dict[str, int] = {}
-        motif_memory: Dict[str, List[List[NoteEvent]]] = {}
-        theme_identities: Dict[str, ThemeIdentity] = {}
-        theme_skeletons: Dict[str, ThemeSkeleton] = {}
-        return_variation_plans: Dict[int, List[str]] = {}
-        melodic_skeleton = self._build_melodic_skeleton(
-            labels, measure_context, base_seed, composition_plan,
-        )
-        previous_melody_pitch: Optional[int] = None
+        run.harmonic_plan = harmonic_plan
+        run.harmony_mode = harmony_mode
+        run.actual_harmony_mode = actual_harmony_mode
+        run.learned_harmony = learned_harmony
 
-        _select = _apply = None
-        if enable_variation:
-            from note_transform import select_transforms, apply_variation
-            _select = select_transforms
-            _apply = apply_variation
-
-        for i, cluster_id in enumerate(labels):
-            sl, bi, role, occurrence_id, section_len = measure_context[i]
-            is_end = breathing[i]
-
-            phrase_role = self._phrase_role(bi, section_len, role)
-            target_pitch = melodic_skeleton.get(i)
-            affect = dict(composition_plan.measure_affects.get(i) or {})
-            harmony = harmonic_plan.get(i)
-            if harmony is not None:
-                affect["harmony"] = harmony.to_dict()
-            bar_target = self._build_bar_generation_target(
-                bar_index=i,
-                label=sl,
-                local_bar=bi,
-                target_pitch=target_pitch,
-                affect=affect,
-                structure_graph=structure_graph,
-                theme_skeletons=theme_skeletons,
-                composition_plan=composition_plan,
-            )
-
-            # Seed from section identity (FREE/FLAT use per-measure seed)
-            if role in ("FREE", "FLAT"):
-                measure_seed = _stable_hash(base_seed, "FREE", i)
-            else:
-                measure_seed = _stable_hash(base_seed, sl, bi)
-
-            reused_motif = False
-            if role not in ("FREE", "FLAT", "NEW") and sl in motif_memory and bi < len(motif_memory[sl]):
-                notes = self._clone_notes(motif_memory[sl][bi])
-                reused_motif = True
-            else:
-                notes = self._generate_scored_measure(
-                    cluster_label=cluster_id,
-                    time_signature=time_signature,
-                    is_section_end=is_end,
-                    phrase_role=phrase_role,
-                    target_pitch=target_pitch,
-                    previous_pitch=previous_melody_pitch,
-                    affect=affect,
-                    bar_target=bar_target,
-                    seed=measure_seed,
-                )
-                if role == "NEW":
-                    motif_memory.setdefault(sl, [])
-                    while len(motif_memory[sl]) <= bi:
-                        motif_memory[sl].append([])
-                    motif_memory[sl][bi] = self._clone_notes(notes)
-                    self._update_theme_identity(
-                        theme_identities, sl, motif_memory[sl], section_len,
-                    )
-                    self._update_theme_skeleton(
-                        theme_skeletons, sl, motif_memory[sl],
-                        section_len, composition_plan.global_tonic_pc,
-                    )
-
-            # Controlled variation: non-NEW sections get transforms.
-            # Strength s is data-driven: average cluster entropy scaled
-            # by an information-theoretic progression k/(k+1).
-            if (_select is not None and _apply is not None
-                    and role not in ("FREE", "FLAT", "NEW", "REPEAT")):
-                if bi == 0:
-                    k = occurrence_count.get(sl, 0)
-                    if k > 0:
-                        sec_labels = labels[i:i + section_len]
-                        variation_rng = np.random.RandomState(
-                            _stable_hash(base_seed, sl, occurrence_id, "variation")
-                        )
-                        s = (self._section_entropy(sec_labels) / self._max_entropy
-                             ) * (k / (k + VARIATION_PROGRESSION_DENOM))
-                        self._current_variation_profile = _select(
-                            self.model.clusterer.centroids,
-                            sec_labels, s, rng=variation_rng,
-                        ) if s > 0.02 else None
-                    else:
-                        self._current_variation_profile = None
-                if self._current_variation_profile:
-                    variation_rng = np.random.RandomState(
-                        _stable_hash(base_seed, sl, occurrence_id, bi, "variation")
-                    )
-                    notes = _apply(notes, self._current_variation_profile, rng=variation_rng)
-            if reused_motif and enable_variation and role in ("RETURN", "VARIANT", "REPEAT"):
-                k = occurrence_count.get(sl, 1)
-                motif_cfg = self.config.get("motif_return", {})
-                base_strength = float(motif_cfg.get("base_strength", 0.10))
-                occurrence_growth = float(motif_cfg.get("occurrence_growth", 0.06))
-                max_strength = float(motif_cfg.get("max_strength", 0.38))
-                scorer_cfg = self.config.get("development_scorer", {})
-                candidate_count = int(scorer_cfg.get("candidate_count", 5))
-                scorer_weights = scorer_cfg.get("weights", {}) if isinstance(scorer_cfg, dict) else {}
-                harmony_return_weight = float(
-                    scorer_weights.get("harmony", 1.15)
-                    if isinstance(scorer_weights, dict) else 1.15
-                )
-                harmony_cfg = self.config.get("harmony", {})
-                if isinstance(harmony_cfg, dict) and harmony_cfg.get("enabled", False) and bar_target.harmony:
-                    multiplier = float(harmony_cfg.get("return_candidate_count_multiplier", 1.6))
-                    if bar_target.cadence_strength > 0.5 or bar_target.harmony.get("cadence_role") == "CADENCE":
-                        multiplier = float(harmony_cfg.get("cadence_return_candidate_count_multiplier", 2.2))
-                    candidate_count = max(candidate_count, int(round(candidate_count * multiplier)))
-                if role == "REPEAT":
-                    base_strength *= float(motif_cfg.get("repeat_strength_scale", 0.55))
-                    occurrence_growth *= float(motif_cfg.get("repeat_growth_scale", 0.35))
-                plan = return_variation_plans.setdefault(
-                    occurrence_id,
-                    self._build_return_variation_plan(
-                        section_len,
-                        role,
-                        np.random.RandomState(
-                            _stable_hash(base_seed, sl, occurrence_id, "return-plan")
-                        ),
-                    ),
-                )
-                variation_mode = plan[min(bi, len(plan) - 1)] if plan else "CONTOUR"
-                identity = theme_identities.get(sl)
-                skeleton = theme_skeletons.get(sl)
-                source_notes = self._clone_notes(notes)
-                previous_notes = all_notes[-1] if all_notes else None
-                best_notes: Optional[List[NoteEvent]] = None
-                best_score = -1e9
-                strength = min(
-                    max_strength,
-                    (base_strength + occurrence_growth * k) * bar_target.development_strength,
-                )
-                for candidate_i in range(max(1, candidate_count)):
-                    variation_rng = np.random.RandomState(
-                        _stable_hash(base_seed, sl, occurrence_id, bi, "motif-return", candidate_i)
-                    )
-                    candidate_strength = strength * float(
-                        variation_rng.uniform(0.85, 1.15)
-                    )
-                    candidate_notes = self._vary_return_motif(
-                        source_notes,
-                        strength=candidate_strength,
-                        rng=variation_rng,
-                        target_pitch=target_pitch,
-                        variation_mode=variation_mode,
-                        phrase_role=phrase_role,
-                        development_role=bar_target.development_role,
-                        target_attraction=bar_target.target_attraction,
-                        rhythm_change_scale=bar_target.rhythm_change_scale,
-                    )
-                    if identity is not None and bar_target.development_role not in ("FRAGMENT", "INTENSIFY"):
-                        candidate_notes = self._apply_theme_identity(
-                            candidate_notes,
-                            identity=identity,
-                            bar_index=bi,
-                            section_len=section_len,
-                            target_pitch=target_pitch,
-                            rng=variation_rng,
-                        )
-                    candidate_notes = self._fit_notes_to_bar_target(
-                        candidate_notes, bar_target, variation_rng,
-                    )
-                    development_score = self.development_scorer.score(
-                        candidate_notes,
-                        bar_target,
-                        cluster_id,
-                        source_notes=source_notes,
-                        previous_notes=previous_notes,
-                    ).total
-                    harmony_score = HarmonicPlanner.score_melody(
-                        candidate_notes,
-                        bar_target.harmony,
-                        self.config,
-                    )
-                    conditional_score = 0.0
-                    conditional_model = getattr(self.model, "conditional_note_model", None)
-                    conditional_cfg = self.config.get("conditional_note_model", {})
-                    if (
-                        conditional_model is not None
-                        and isinstance(conditional_cfg, dict)
-                        and conditional_cfg.get("enabled", True)
-                    ):
-                        conditional_score = float(conditional_cfg.get("return_score_weight", 0.85)) * (
-                            conditional_model.score_candidate(
-                                candidate_notes,
-                                bar_target,
-                                cluster_id,
-                                self.config,
-                            )
-                        )
-                    score = development_score + harmony_return_weight * harmony_score + conditional_score
-                    if score > best_score:
-                        best_score = score
-                        best_notes = candidate_notes
-                if best_notes is not None:
-                    repaired_notes = self._repair_harmony_mismatch(best_notes, bar_target)
-                    if repaired_notes is not best_notes:
-                        repaired_development = self.development_scorer.score(
-                            repaired_notes,
-                            bar_target,
-                            cluster_id,
-                            source_notes=source_notes,
-                            previous_notes=previous_notes,
-                        ).total
-                        repaired_harmony = HarmonicPlanner.score_melody(
-                            repaired_notes,
-                            bar_target.harmony,
-                            self.config,
-                        )
-                        repaired_conditional = 0.0
-                        conditional_model = getattr(self.model, "conditional_note_model", None)
-                        conditional_cfg = self.config.get("conditional_note_model", {})
-                        if (
-                            conditional_model is not None
-                            and isinstance(conditional_cfg, dict)
-                            and conditional_cfg.get("enabled", True)
-                        ):
-                            repaired_conditional = float(conditional_cfg.get("return_score_weight", 0.85)) * (
-                                conditional_model.score_candidate(
-                                    repaired_notes,
-                                    bar_target,
-                                    cluster_id,
-                                    self.config,
-                                )
-                            )
-                        repaired_score = (
-                            repaired_development
-                            + harmony_return_weight * repaired_harmony
-                            + repaired_conditional
-                        )
-                        if repaired_score > best_score:
-                            best_score = repaired_score
-                            best_notes = repaired_notes
-                notes = best_notes if best_notes is not None else notes
-            if role not in ("FREE", "FLAT") and bi == 0:
-                occurrence_count[sl] = occurrence_count.get(sl, 0) + 1
-
-            all_notes.append(notes)
-            previous_melody_pitch = self._last_melody_pitch(notes, previous_melody_pitch)
-
+    def _run_bass_module(self, run: "MidiGenerationRun") -> None:
+        labels = run.labels
+        all_notes = run.all_notes
+        harmonic_plan = run.harmonic_plan
+        base_seed = run.base_seed
+        time_signature = run.time_signature
         # 3c. Add bass line (after transforms, so bass is unaffected)
         harmony_bass_enabled = bool(self.config.get("harmony", {}).get("enabled", False)) \
             and bool(self.config.get("harmony", {}).get("bass", {}).get("enabled", True))
@@ -674,6 +616,9 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                     np.random.RandomState(_stable_hash(base_seed, "bass", mi)),
                 )
 
+    def _run_render_normalize_module(self, run: "MidiGenerationRun") -> None:
+        all_notes = run.all_notes
+        time_signature = run.time_signature
         # 3d. Rendering: clamp overlaps on every measure (melody only — bass is
         # added after transforms so it never participates in clamping).
         clamp_overlaps(all_notes, self.config)
@@ -681,12 +626,28 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         ensure_final_bar_end(all_notes, time_signature)
         clamp_measure_bounds(all_notes, time_signature)
 
+    def _run_write_midi_module(self, run: "MidiGenerationRun") -> None:
+        all_notes = run.all_notes
+        output_path = run.output_path
+        tempo = run.tempo
+        time_signature = run.time_signature
         # 4. Write MIDI via mido (silence = absence of note events)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_midi(all_notes, output_path, tempo, time_signature)
         log.info("Wrote MIDI to %s (%d measures).", output_path, len(all_notes))
 
+        run.output_path = output_path
+
+    def _run_harmony_diagnostics_module(self, run: "MidiGenerationRun") -> None:
+        output_path = run.output_path
+        labels = run.labels
+        measure_context = run.measure_context
+        all_notes = run.all_notes
+        harmonic_plan = run.harmonic_plan
+        harmony_mode = run.harmony_mode
+        actual_harmony_mode = run.actual_harmony_mode
+        learned_harmony = run.learned_harmony
         self._write_harmony_diagnostics(
             output_path=output_path,
             labels=labels,
@@ -698,12 +659,77 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             has_learned_model=learned_harmony is not None,
         )
 
+    def _run_structure_plot_module(self, run: "MidiGenerationRun") -> None:
+        output_path = run.output_path
+        labels = run.labels
+        event_log = run.event_log
         # 5. Save structure visualization
         from structure_plotter import StructurePlotter
         plot_path = output_path.with_suffix('.png')
         StructurePlotter.plot(labels, event_log, self.model.n_clusters, plot_path)
 
-        return labels
+    def _dual_theme_harmony_damping(self, harmony_score: float) -> float:
+        """Reduce dual-theme reward when a candidate is harmonically weak."""
+        cfg = self.config.get("dual_theme_development", {})
+        if not isinstance(cfg, dict):
+            return 1.0
+        scoring = cfg.get("candidate_scoring", {})
+        if not isinstance(scoring, dict) or not scoring.get("harmony_damping_enabled", True):
+            return 1.0
+        floor = float(scoring.get("harmony_damping_floor", 0.25))
+        start = float(scoring.get("harmony_damping_start", -0.10))
+        full = float(scoring.get("harmony_damping_full", 0.45))
+        if full <= start:
+            return 1.0
+        value = floor + (1.0 - floor) * ((float(harmony_score) - start) / (full - start))
+        return float(np.clip(value, floor, 1.0))
+
+    def _partner_theme_notes(
+        self,
+        motif_memory: Dict[str, List[List[NoteEvent]]],
+        dual_theme: Optional[Dict[str, Any]],
+        local_bar: int,
+    ) -> Optional[List[NoteEvent]]:
+        """Fetch the partner-theme bar used by dual-theme candidate scoring."""
+        if not isinstance(dual_theme, dict):
+            return None
+        partner_label = dual_theme.get("partner_label")
+        if not isinstance(partner_label, str):
+            return None
+        partner = motif_memory.get(partner_label)
+        if not partner:
+            return None
+        valid = [idx for idx, notes in enumerate(partner) if notes]
+        if not valid:
+            return None
+        idx = min(valid, key=lambda x: abs(x - local_bar))
+        return self._clone_notes(partner[idx])
+
+    def _score_with_candidate_reranker(
+        self,
+        notes: List[NoteEvent],
+        target: BarGenerationTarget,
+        cluster_id: int,
+        *,
+        source_notes: Optional[List[NoteEvent]] = None,
+        partner_notes: Optional[List[NoteEvent]] = None,
+        score_components: Optional[Dict[str, float]] = None,
+        proposal_kind: Optional[str] = None,
+    ):
+        """Return the learned reranker contribution for one candidate."""
+        reranker = getattr(self, "candidate_reranker", None)
+        if reranker is None:
+            reranker = CandidateReranker()
+        return reranker.score_candidate(
+            notes,
+            target,
+            cluster_id,
+            self.config,
+            source_notes=source_notes,
+            partner_notes=partner_notes,
+            score_components=score_components,
+            proposal_kind=proposal_kind,
+        )
 
     def _write_harmony_diagnostics(
         self,
@@ -723,7 +749,11 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
         bars: List[Dict[str, Any]] = []
         chord_ratios: List[float] = []
         strong_ratios: List[float] = []
+        rhythm_scores: List[float] = []
+        rhythm_source_similarities: List[float] = []
+        rhythm_note_counts: List[float] = []
         narrative_counts: Dict[str, int] = {}
+        dual_theme_active = 0
         bass_root_or_fifth = 0
         bass_count = 0
         for i, notes in enumerate(all_notes):
@@ -745,6 +775,39 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             narrative_role = affect.get("narrative_role")
             if isinstance(narrative_role, str):
                 narrative_counts[narrative_role] = narrative_counts.get(narrative_role, 0) + 1
+            dual_theme = affect.get("dual_theme")
+            if isinstance(dual_theme, dict):
+                dual_theme_active += 1
+            dual_theme_score = (
+                self._last_dual_theme_scores.get(i)
+                if hasattr(self, "_last_dual_theme_scores") else None
+            )
+            repeat_harmony_score = (
+                self._last_repeat_harmony_scores.get(i)
+                if hasattr(self, "_last_repeat_harmony_scores") else None
+            )
+            score_components = (
+                self._last_candidate_score_components.get(i)
+                if hasattr(self, "_last_candidate_score_components") else None
+            )
+            rhythm_score = (
+                self._last_rhythm_scores.get(i)
+                if hasattr(self, "_last_rhythm_scores") else None
+            )
+            if isinstance(rhythm_score, dict):
+                score = rhythm_score.get("score")
+                source_similarity = rhythm_score.get("source_similarity")
+                note_count = rhythm_score.get("note_count")
+                if isinstance(score, (int, float)):
+                    rhythm_scores.append(float(score))
+                if isinstance(source_similarity, (int, float)):
+                    rhythm_source_similarities.append(float(source_similarity))
+                if isinstance(note_count, (int, float)):
+                    rhythm_note_counts.append(float(note_count))
+            reranker_score = (
+                self._last_candidate_reranker_scores.get(i)
+                if hasattr(self, "_last_candidate_reranker_scores") else None
+            )
             bars.append({
                 "bar": i + 1,
                 "cluster": int(labels[i]) if i < len(labels) else None,
@@ -756,6 +819,12 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
                 "narrative_role": narrative_role,
                 "narrative_tension": affect.get("narrative_tension"),
                 "narrative_intensity": affect.get("narrative_intensity"),
+                "dual_theme": dual_theme if isinstance(dual_theme, dict) else None,
+                "dual_theme_candidate": dual_theme_score,
+                "repeat_harmony_candidate": repeat_harmony_score,
+                "rhythm_candidate": rhythm_score,
+                "candidate_reranker": reranker_score,
+                "candidate_score_components": score_components,
                 "harmony": harmony_dict,
                 "diagnostics": diag,
             })
@@ -766,6 +835,17 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             else True
         )
         conditional_model = getattr(self.model, "conditional_note_model", None)
+        reranker_cfg = self.config.get("candidate_reranker", {})
+        reranker_enabled = (
+            reranker_cfg.get("enabled", True)
+            if isinstance(reranker_cfg, dict)
+            else True
+        )
+        candidate_reranker = getattr(self.model, "candidate_reranker", None)
+        rhythm_candidate_prior = getattr(self.model, "rhythm_candidate_prior", None)
+        dual_cfg = self.config.get("dual_theme_development", {})
+        dual_scoring_cfg = dual_cfg.get("candidate_scoring", {}) if isinstance(dual_cfg, dict) else {}
+        rhythm_cfg = self.config.get("rhythm_development", {})
         summary = {
             "requested_mode": requested_mode,
             "actual_mode": actual_mode,
@@ -777,8 +857,47 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
             "conditional_note_model_version": (
                 getattr(conditional_model, "version", None)
             ),
+            "candidate_reranker_active": (
+                candidate_reranker is not None
+                and bool(getattr(candidate_reranker, "available", False))
+                and bool(reranker_enabled)
+            ),
+            "candidate_reranker_training": (
+                getattr(candidate_reranker, "training_summary", None)
+                if candidate_reranker is not None else None
+            ),
+            "dual_theme_candidate_scoring_active": (
+                isinstance(dual_cfg, dict)
+                and bool(dual_cfg.get("enabled", True))
+                and isinstance(dual_scoring_cfg, dict)
+                and bool(dual_scoring_cfg.get("enabled", True))
+            ),
+            "rhythm_development_active": (
+                isinstance(rhythm_cfg, dict)
+                and bool(rhythm_cfg.get("enabled", True))
+            ),
+            "rhythm_candidate_prior_active": (
+                rhythm_candidate_prior is not None
+                and bool(getattr(rhythm_candidate_prior, "available", False))
+                and isinstance(rhythm_cfg, dict)
+                and bool(rhythm_cfg.get("learned_prior_enabled", True))
+                and float(rhythm_cfg.get("learned_prior_weight", 0.0)) != 0.0
+            ),
+            "rhythm_candidate_prior_training": (
+                getattr(rhythm_candidate_prior, "training_summary", None)
+                if rhythm_candidate_prior is not None else None
+            ),
             "bar_count": len(all_notes),
             "narrative_role_counts": narrative_counts,
+            "dual_theme_active_bars": dual_theme_active,
+            "mean_rhythm_score": float(np.mean(rhythm_scores)) if rhythm_scores else None,
+            "mean_rhythm_source_similarity": (
+                float(np.mean(rhythm_source_similarities))
+                if rhythm_source_similarities else None
+            ),
+            "mean_rhythm_note_count": (
+                float(np.mean(rhythm_note_counts)) if rhythm_note_counts else None
+            ),
             "mean_chord_tone_ratio": float(np.mean(chord_ratios)) if chord_ratios else None,
             "mean_strong_beat_chord_tone_ratio": float(np.mean(strong_ratios)) if strong_ratios else None,
             "bass_root_or_fifth_ratio": (
@@ -1198,140 +1317,14 @@ class HierarchicalGenerator(HierarchicalPlanningMixin):
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI compatibility
 # ---------------------------------------------------------------------------
 
 
-def _build_parser() -> "argparse.ArgumentParser":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Hierarchical Generator — three-tier music generation.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--model-dir",
-        default="./models/corelli",
-        help="Path to trained MusicModel directory.",
-    )
-    parser.add_argument(
-        "--output", "-o",
-        default="generated/hierarchical_output.mid",
-        help="Output MIDI path.",
-    )
-    parser.add_argument(
-        "--target-measures", "-n",
-        type=int,
-        default=120,
-        help="Target number of measures.",
-    )
-    parser.add_argument(
-        "--start-states",
-        default=None,
-        help="Comma-separated cluster labels for the first N bars "
-        "(e.g. '2,2,2,0,0').",
-    )
-    parser.add_argument(
-        "--template", "-t",
-        default=None,
-        help="Section template: file index or name stem.",
-    )
-    parser.add_argument(
-        "--variation", "-v",
-        type=float,
-        default=0.3,
-        help="Variation strength for RETURN sections (0–1).",
-    )
-    parser.add_argument(
-        "--time-signature",
-        default="4/4",
-        help="Time signature (e.g. '4/4', '3/4').",
-    )
-    parser.add_argument(
-        "--tempo",
-        type=int,
-        default=120,
-        help="Tempo in BPM.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed.",
-    )
-    parser.add_argument(
-        "--no-variation",
-        action="store_true",
-        help="Disable controlled variation transforms (exact repeats only).",
-    )
-    parser.add_argument(
-        "--no-bass",
-        action="store_true",
-        help="Disable bass line generation.",
-    )
-    parser.add_argument(
-        "--config",
-        default=None,
-        help="Optional YAML overrides applied after defaults/profile.",
-    )
-    parser.add_argument(
-        "--profile",
-        default=None,
-        help="Composer profile name from ../config/profiles/<name>.yaml.",
-    )
-    return parser
-
-
 def main() -> None:
-    args = _build_parser().parse_args()
+    from hierarchical_cli import main as cli_main
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    log.info("Loading model from %s ...", args.model_dir)
-    model = MusicModel.load(args.model_dir)
-    print()
-    print(model.summary())
-
-    ts_parts = args.time_signature.split("/")
-    time_sig = (int(ts_parts[0]), int(ts_parts[1]))
-
-    start_states = None
-    if args.start_states:
-        start_states = [
-            int(x.strip()) for x in args.start_states.split(",") if x.strip()
-        ]
-
-    gen = HierarchicalGenerator(
-        model,
-        config_path=args.config,
-        composer_profile=args.profile,
-    )
-
-    log.info(
-        "Generating %d measures (template=%s, variation=%.2f) ...",
-        args.target_measures, args.template or "random", args.variation,
-    )
-    if args.no_bass:
-        gen.note_sampler._bass_enabled = False
-
-    labels = gen.generate_midi(
-        output_path=args.output,
-        target_measures=args.target_measures,
-        start_states=start_states,
-        template_file=args.template,
-        variation_strength=args.variation,
-        time_signature=time_sig,
-        tempo=args.tempo,
-        seed=args.seed,
-        enable_variation=not args.no_variation,
-    )
-
-    print(f"\nGenerated {len(labels)} measures -> {args.output}")
-    print("Done.")
+    cli_main()
 
 
 if __name__ == "__main__":
