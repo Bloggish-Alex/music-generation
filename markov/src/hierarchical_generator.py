@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-Hierarchical Generator — three-tier music generation from a trained MusicModel.
+Hierarchical Generator â€” three-tier music generation from a trained MusicModel.
 
-Tier 1 (Section):  SectionGrammar → section label sequence + FREE placeholders
+Tier 1 (Section):  SectionGrammar â†’ section label sequence + FREE placeholders
 Tier 2 (State):    Prototypes fill SECTION blocks; PhraseGenerator fills FREE blocks
 Tier 3 (Note):     ClusterNoteSampler generates pitches, durations, velocities
                    per measure from cluster centroids + pitch-class histograms
@@ -54,7 +54,6 @@ from hierarchical_note_pipeline import (
     NOTE_GENERATION_MODULES,
 )
 from hierarchical_planning import HierarchicalPlanningMixin
-from narrative_planner import NarrativePlanner
 from hierarchical_types import (
     BarGenerationTarget,
     BarSkeleton,
@@ -64,6 +63,7 @@ from hierarchical_types import (
     StructureEdge,
 )
 from hierarchical_sampler import ClusterNoteSampler
+from hierarchical_timeline_pipeline import TimelineGenerationPipeline
 from music_model import MusicModel
 from phrase_generator import PhraseGenerator
 from repeat_harmony_proposal import RepeatHarmonyProposal
@@ -74,7 +74,7 @@ from rhythm_development import (
 
 
 def _stable_hash(*args: object) -> int:
-    """Deterministic hash — same result across Python processes."""
+    """Deterministic hash â€” same result across Python processes."""
     h = hashlib.md5()
     for a in args:
         h.update(str(a).encode())
@@ -110,26 +110,26 @@ CADENCE_GAP = 0.5          # beats of silence at section boundaries (4/4 eighth-
 # ---- melody / pitch walk ----
 
 # Step-size distribution: now derived per-cluster from training data.
-# See clusterer.step_histograms — computed during MusicModel.fit().
+# See clusterer.step_histograms â€” computed during MusicModel.fit().
 STEP_UPWARD_BIAS = 0.55          # probability of ascending vs descending
-REGISTER_WINDOW = 10             # semi-octave range per measure (±10 from centre)
-REGISTER_LO = 28                 # MIDI E2 — absolute floor
-REGISTER_HI = 96                 # MIDI C7 — absolute ceiling
-REGISTER_CENTRE_LO = 40          # MIDI E2 — centre pitch minimum
-REGISTER_CENTRE_HI = 84          # MIDI C6 — centre pitch maximum
+REGISTER_WINDOW = 10             # semi-octave range per measure (Â±10 from centre)
+REGISTER_LO = 28                 # MIDI E2 â€” absolute floor
+REGISTER_HI = 96                 # MIDI C7 â€” absolute ceiling
+REGISTER_CENTRE_LO = 40          # MIDI E2 â€” centre pitch minimum
+REGISTER_CENTRE_HI = 84          # MIDI C6 â€” centre pitch maximum
 OCTAVE_WEIGHTS = [3, 3, 4, 4, 4, 5]  # weight toward middle register (octave 4)
 PC_REJECT_THRESHOLD = 4.0        # if histogram[pc] * this < random, reduce leap
 PC_REJECT_SCALE = 0.5            # how much to reduce rejected leap
 
 # ---- rhythm / note generation ----
 
-NOTE_DENSITY_SCALE = 2.0          # density → raw note count multiplier
-ENTROPY_JITTER_SCALE = 1.5        # entropy → standard deviation of note count
+NOTE_DENSITY_SCALE = 2.0          # density â†’ raw note count multiplier
+ENTROPY_JITTER_SCALE = 1.5        # entropy â†’ standard deviation of note count
 MIN_NOTES_PER_MEASURE = 2
 MAX_NOTES_PER_MEASURE = 24        # ~6 notes/beat in 4/4
-MIN_DURATION = 0.25               # sixteenth note — shortest allowed
+MIN_DURATION = 0.25               # sixteenth note â€” shortest allowed
 MIN_REMAINING = 0.03              # stop generating when less than this remains
-DURATION_COUNT_WEIGHTS = [2, 2, 3, 3, 4]  # 2–4 preferred durations per measure
+DURATION_COUNT_WEIGHTS = [2, 2, 3, 3, 4]  # 2â€“4 preferred durations per measure
 REST_PROBABILITY_SCALE = 0.5      # multiplier on silence_ratio for actual rests
 MAX_REST_PROB = 0.6               # cap on rest probability per note
 
@@ -142,13 +142,13 @@ VELOCITY_JITTER = 5               # Gaussian std added to velocity arc
 
 # ---- offbeat / swing ----
 
-OFFBEAT_SCALE = 0.3               # offbeat_ratio → probability of swing placement
+OFFBEAT_SCALE = 0.3               # offbeat_ratio â†’ probability of swing placement
 SWING_MIN, SWING_MAX = 0.02, 0.12 # beat_offset jitter range (quarterLength)
 
 # ---- variation / transforms ----
 
 MAX_ENTROPY = 3.5                 # normalizer for centroid entropy (theoretical max)
-MIN_VARIATION_STRENGTH = 0.02     # strength below this → skip transforms
+MIN_VARIATION_STRENGTH = 0.02     # strength below this â†’ skip transforms
 
 # ---- section structure / grid ----
 
@@ -186,7 +186,7 @@ DEFAULT_MIDI_GENERATION_MODULES: Tuple[str, ...] = tuple(
 
 # Set to a module name to run that module and skip every later module by default.
 # This is an ordered pipeline switch only; it does not infer dependencies.
-DEFAULT_MIDI_GENERATION_STOP_AFTER: Optional[str] = 'notes'
+DEFAULT_MIDI_GENERATION_STOP_AFTER: Optional[str] = None
 
 
 @dataclass
@@ -202,6 +202,7 @@ class MidiGenerationRun:
     tempo: int
     seed: Optional[int]
     enable_variation: bool
+    timeline_mode: str = "section"
     note_modules: Optional[List[str]] = None
     note_stop_after_module: Optional[str] = None
     labels: List[int] = field(default_factory=list)
@@ -293,12 +294,12 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         self.model = model
         self.phrase_gen = PhraseGenerator(model)
 
-        # Load style config first — needed by sampler
+        # Load style config first â€” needed by sampler
         self.config = _load_style_config(config_path, composer_profile)
 
         centroids = model.clusterer.centroids
         if centroids is None:
-            raise ValueError("Model clusterer has no centroids — is it trained?")
+            raise ValueError("Model clusterer has no centroids â€” is it trained?")
 
         pitch_hists = getattr(model.clusterer, "pitch_histograms", None)
         step_hists = getattr(model.clusterer, "step_histograms", None)
@@ -324,6 +325,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         self.rhythm_phrase_planner = RhythmPhrasePlanner(self.config)
         self.rhythm_candidate_prior = getattr(model, "rhythm_candidate_prior", None)
         self.rhythm_scorer = RhythmCandidateScorer(self.config, self.rhythm_candidate_prior)
+        self.timeline_pipeline = TimelineGenerationPipeline(self)
         self._current_variation_profile: Optional[List] = None
         self._max_entropy = float(centroids[:, 7].max()) if centroids is not None else 3.5
 
@@ -342,6 +344,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         template_file: Optional[Union[int, str]] = None,
         variation_strength: float = 0.3,
         seed: Optional[int] = None,
+        timeline_mode: str = "section",
     ) -> Tuple[List[int], List[Dict[str, Any]]]:
         """Generate a full cluster-label timeline.
 
@@ -351,50 +354,24 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
             template_file: Index or filename stem for section template.
             variation_strength: RETURN/VARIANT deviation from prototype.
             seed: Random seed.
+            timeline_mode: Structure source. ``section`` keeps the existing
+                SectionGrammar path, ``matrix`` uses the learned phrase
+                transition/persistence model directly, and ``hybrid`` uses
+                SectionGrammar for boundaries/roles with matrix-generated
+                cluster content inside each section.
 
         Returns:
             labels: Full cluster label sequence.
             event_log: Description of each segment (SECTION, FREE, USER_START).
         """
-        rng = np.random.RandomState(seed)
-        labels: List[int] = []
-        event_log: List[Dict[str, Any]] = []
-
-        # Phase 1: User-specified start bars
-        if start_states:
-            labels.extend(start_states)
-            event_log.append({
-                "kind": "USER_START",
-                "length": len(start_states),
-                "labels": list(start_states),
-            })
-
-        remaining = target_measures - len(labels)
-        if remaining <= 0:
-            return labels[:target_measures], event_log
-
-        # Phase 2: Section grammar + PhraseGenerator
-        if self.grammar is not None and self.grammar.files:
-            labels, event_log = self._generate_with_grammar(
-                target_measures, labels, event_log,
-                template_file, variation_strength, rng,
-            )
-        else:
-            log.info("No section grammar — using flat phrase generation.")
-            extra = self.phrase_gen.generate(
-                remaining, seed=int(rng.randint(0, 2 ** 31 - 1)),
-            )
-            labels.extend(extra)
-            event_log.append({
-                "kind": "FLAT",
-                "length": len(extra),
-                "labels": extra,
-            })
-
-        if len(labels) > target_measures:
-            labels = labels[:target_measures]
-            event_log = self._trim_events_to_length(event_log, target_measures)
-
+        labels, event_log = self.timeline_pipeline.generate(
+            target_measures=target_measures,
+            start_states=start_states,
+            template_file=template_file,
+            variation_strength=variation_strength,
+            seed=seed,
+            timeline_mode=timeline_mode,
+        )
         log.info(
             "Timeline: %d measures, %d events.",
             len(labels), len(event_log),
@@ -416,6 +393,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         tempo: int = 120,
         seed: Optional[int] = None,
         enable_variation: bool = True,
+        timeline_mode: str = "section",
         modules: Optional[List[str]] = None,
         stop_after_module: Optional[str] = None,
         note_modules: Optional[List[str]] = None,
@@ -426,6 +404,11 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         Args:
             enable_variation: If True (default), apply controlled transforms
                 to non-NEW section occurrences. Set to False for exact repeats only.
+            timeline_mode: ``section`` keeps the existing behavior. ``matrix``
+                generates the full label timeline directly from the learned
+                transition/persistence model. ``hybrid`` keeps section
+                boundaries/roles but fills each section with matrix-generated
+                labels. Defaults to ``section`` for backwards compatibility.
             modules: Optional ordered module list. Defaults to
                 ``DEFAULT_MIDI_GENERATION_MODULES``; edit that tuple to add/remove
                 a stage globally, or pass a test-specific list here.
@@ -450,6 +433,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
             tempo=tempo,
             seed=seed,
             enable_variation=enable_variation,
+            timeline_mode=timeline_mode,
             note_modules=note_modules,
             note_stop_after_module=note_stop_after_module,
         )
@@ -516,6 +500,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         template_file = run.template_file
         variation_strength = run.variation_strength
         seed = run.seed
+        timeline_mode = run.timeline_mode
         # 1. Timeline
         labels, event_log = self.generate_timeline(
             target_measures=target_measures,
@@ -523,6 +508,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
             template_file=template_file,
             variation_strength=variation_strength,
             seed=seed,
+            timeline_mode=timeline_mode,
         )
 
         run.labels = labels
@@ -619,7 +605,7 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
     def _run_render_normalize_module(self, run: "MidiGenerationRun") -> None:
         all_notes = run.all_notes
         time_signature = run.time_signature
-        # 3d. Rendering: clamp overlaps on every measure (melody only — bass is
+        # 3d. Rendering: clamp overlaps on every measure (melody only â€” bass is
         # added after transforms so it never participates in clamping).
         clamp_overlaps(all_notes, self.config)
         clamp_measure_bounds(all_notes, time_signature)
@@ -931,6 +917,11 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
                 for bar_in_sec in range(length):
                     ctx.append((event["label"], bar_in_sec, event["role"], occurrence_id, length))
                 occurrence_id += 1
+            elif event["kind"] == "TIMELINE_RUN":
+                label = str(event.get("label", f"T{occurrence_id}"))
+                for bar_in_run in range(length):
+                    ctx.append((label, bar_in_run, "NEW", occurrence_id, length))
+                occurrence_id += 1
             elif event["kind"] == "FREE":
                 for _ in range(length):
                     ctx.append(("FREE", 0, "FREE", occurrence_id, length))
@@ -974,347 +965,6 @@ class HierarchicalGenerator(HierarchicalNotePipelineMixin, HierarchicalPlanningM
         return breathing
 
     # ------------------------------------------------------------------
-    # Structure visualization
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Internal: grammar-aware timeline
-    # ------------------------------------------------------------------
-
-    def _generate_with_grammar(
-        self,
-        target_measures: int,
-        labels: List[int],
-        event_log: List[Dict[str, Any]],
-        template_file: Optional[Union[int, str]],
-        variation_strength: float,
-        rng: np.random.RandomState,
-    ) -> Tuple[List[int], List[Dict[str, Any]]]:
-        grammar = self.grammar
-
-        fs = self._select_template(grammar, template_file, rng)
-
-        label_seen: set[str] = set()
-        cycle = 0
-        section_labels = fs.label_sequence
-        n_gaps = len(section_labels) - 1
-
-        while len(labels) < target_measures:
-            free_lengths = grammar._sample_free_lengths(n_gaps, rng)
-
-            for i, sec_label in enumerate(section_labels):
-                if len(labels) >= target_measures:
-                    break
-
-                role, vary = self._assign_role(
-                    sec_label, i, cycle, section_labels,
-                    label_seen, variation_strength,
-                )
-
-                content = grammar.generate_section_content(
-                    sec_label, fs, vary=vary,
-                    variation_strength=variation_strength,
-                    seed=None if rng is None else int(rng.randint(0, 2 ** 31 - 1)),
-                )
-
-                labels.extend(content)
-                event_log.append({
-                    "kind": "SECTION",
-                    "label": sec_label,
-                    "role": role,
-                    "cycle": cycle,
-                    "length": len(content),
-                    "labels": content,
-                })
-
-                if i < len(section_labels) - 1 and len(labels) < target_measures:
-                    free_len = free_lengths[i] if i < len(free_lengths) else 4
-                    free_labels = self.phrase_gen.generate(
-                        free_len,
-                        seed=None if rng is None else int(rng.randint(0, 2 ** 31 - 1)),
-                    )
-                    labels.extend(free_labels)
-                    event_log.append({
-                        "kind": "FREE",
-                        "length": free_len,
-                        "labels": free_labels,
-                    })
-
-                    # Snap to next 4-bar grid, max 3 bars padding
-                    _GRID = 4
-                    remainder = len(labels) % _GRID
-                    if 0 < remainder <= 3:
-                        pad = _GRID - remainder
-                        pad_labels = self.phrase_gen.generate(
-                            pad,
-                            seed=None if rng is None else int(rng.randint(0, 2 ** 31 - 1)),
-                        )
-                        labels.extend(pad_labels)
-                        event_log.append({
-                            "kind": "FREE",
-                            "length": pad,
-                            "labels": pad_labels,
-                            "grid_pad": True,
-                        })
-
-                label_seen.add(sec_label)
-
-            cycle += 1
-
-        self._end_with_return(labels, event_log, fs, variation_strength, rng)
-        labels, event_log = self._rebalance_narrative_timeline(
-            labels,
-            event_log,
-            fs,
-            target_measures,
-            variation_strength,
-            rng,
-        )
-        return labels, event_log
-
-    def _rebalance_narrative_timeline(
-        self,
-        labels: List[int],
-        event_log: List[Dict[str, Any]],
-        fs: Any,
-        target_measures: int,
-        variation_strength: float,
-        rng: np.random.RandomState,
-    ) -> Tuple[List[int], List[Dict[str, Any]]]:
-        """Increase contrast-theme presence in narrative contrast regions.
-
-        V1 only labelled the existing timeline.  V2 gently rebalances the
-        timeline by replacing selected FREE connective blocks with secondary
-        section material, preserving total length and the original grammar
-        skeleton.
-        """
-        narrative_cfg = self.config.get("narrative", {})
-        if not isinstance(narrative_cfg, dict) or not narrative_cfg.get("enabled", True):
-            return labels, event_log
-        rebalance_cfg = narrative_cfg.get("timeline_rebalance", {})
-        if not isinstance(rebalance_cfg, dict) or not rebalance_cfg.get("enabled", True):
-            return labels, event_log
-
-        primary = fs.label_sequence[0] if fs.label_sequence else "A"
-        secondary_labels = [
-            label for label in fs.label_sequence
-            if label != primary and label in fs.prototypes
-        ]
-        if not secondary_labels:
-            return labels, event_log
-        secondary = secondary_labels[0]
-
-        total_len = sum(int(ev.get("length", 0)) for ev in event_log)
-        if total_len <= 0:
-            return labels, event_log
-        current_secondary = sum(
-            int(ev.get("length", 0))
-            for ev in event_log
-            if ev.get("kind") == "SECTION" and ev.get("label") == secondary
-        )
-        min_ratio = float(rebalance_cfg.get("min_secondary_ratio", 0.16))
-        target_secondary = int(round(total_len * min_ratio))
-        needed = max(0, target_secondary - current_secondary)
-        if needed <= 0:
-            return labels[:target_measures], event_log
-
-        allowed_regions = set(rebalance_cfg.get("secondary_regions", ["CONTRAST", "DEVELOPMENT", "CLIMAX"]))
-        max_replaced = int(round(total_len * float(rebalance_cfg.get("max_replaced_ratio", 0.18))))
-        replaced = 0
-        starts = self._event_starts(event_log)
-        candidates: List[Tuple[float, int]] = []
-        for idx, ev in enumerate(event_log):
-            if ev.get("kind") != "FREE" or ev.get("grid_pad"):
-                continue
-            start = starts[idx]
-            length = int(ev.get("length", 0))
-            if length <= 0:
-                continue
-            pos = (start + 0.5 * length) / max(1, total_len - 1)
-            macro = NarrativePlanner._macro_role(
-                pos,
-                float(narrative_cfg.get("contrast_position", 0.24)),
-                float(narrative_cfg.get("development_position", 0.42)),
-                float(narrative_cfg.get("climax_position", 0.72)),
-                float(narrative_cfg.get("recap_position", 0.84)),
-                float(narrative_cfg.get("coda_position", 0.94)),
-            )
-            if macro in allowed_regions:
-                # Prefer longer blocks near the contrast/development center.
-                priority = abs(pos - 0.50) - 0.01 * length + rng.random() * 0.001
-                candidates.append((priority, idx))
-
-        for _, idx in sorted(candidates):
-            if needed <= 0 or replaced >= max_replaced:
-                break
-            ev = event_log[idx]
-            length = int(ev.get("length", 0))
-            secondary_seen_before = any(
-                prior.get("kind") == "SECTION" and prior.get("label") == secondary
-                for prior in event_log[:idx]
-            )
-            content = self.grammar.generate_section_content(
-                secondary,
-                fs,
-                vary=secondary_seen_before,
-                variation_strength=variation_strength,
-                seed=int(rng.randint(0, 2 ** 31 - 1)),
-            )
-            if not content:
-                continue
-            fitted: List[int] = []
-            while len(fitted) < length:
-                fitted.extend(content)
-            fitted = fitted[:length]
-            event_log[idx] = {
-                "kind": "SECTION",
-                "label": secondary,
-                "role": "RETURN" if secondary_seen_before else "NEW",
-                "cycle": ev.get("cycle", 0),
-                "length": length,
-                "labels": fitted,
-                "narrative_rebalanced": True,
-                "replaced_kind": "FREE",
-            }
-            needed -= length
-            replaced += length
-
-        event_log = self._trim_events_to_length(event_log, target_measures)
-        return self._labels_from_events(event_log)[:target_measures], event_log
-
-    @staticmethod
-    def _trim_events_to_length(
-        event_log: List[Dict[str, Any]],
-        target_measures: int,
-    ) -> List[Dict[str, Any]]:
-        trimmed: List[Dict[str, Any]] = []
-        used = 0
-        for ev in event_log:
-            if used >= target_measures:
-                break
-            length = int(ev.get("length", 0))
-            keep = min(length, target_measures - used)
-            if keep <= 0:
-                break
-            new_ev = dict(ev)
-            if keep < length:
-                new_ev["length"] = keep
-                new_ev["labels"] = list(ev.get("labels", []))[:keep]
-                new_ev["truncated"] = True
-            trimmed.append(new_ev)
-            used += keep
-        return trimmed
-
-    @staticmethod
-    def _event_starts(event_log: List[Dict[str, Any]]) -> List[int]:
-        starts: List[int] = []
-        pos = 0
-        for ev in event_log:
-            starts.append(pos)
-            pos += int(ev.get("length", 0))
-        return starts
-
-    @staticmethod
-    def _labels_from_events(event_log: List[Dict[str, Any]]) -> List[int]:
-        labels: List[int] = []
-        for ev in event_log:
-            labels.extend(int(x) for x in ev.get("labels", []))
-        return labels
-
-    @staticmethod
-    def _select_template(
-        grammar: Any,
-        template_file: Optional[Union[int, str]],
-        rng: np.random.RandomState,
-    ) -> Any:
-        """Pick a template file, preferring multi-family and grid-aligned."""
-        if template_file is not None:
-            if isinstance(template_file, int):
-                return grammar.files[template_file % len(grammar.files)]
-            match = next(
-                (f for f in grammar.files
-                 if f.filename == template_file
-                 or f.filename.endswith(template_file)
-                 or Path(f.filename).stem == template_file),
-                None,
-            )
-            if match is None:
-                raise KeyError(f"No file matching '{template_file}'")
-            return match
-
-        multi = [f for f in grammar.files if f.n_families >= 2]
-        by_grid = {0: [], 1: [], 2: []}
-        candidates = multi if multi and rng.random() < 0.7 else grammar.files
-        for f in candidates:
-            lengths = [len(seq) for seq in f.prototypes.values()]
-            aligned = sum(1 for L in lengths if L % 4 == 0)
-            if aligned == len(lengths) and lengths:
-                by_grid[0].append(f)
-            elif aligned >= len(lengths) // 2:
-                by_grid[1].append(f)
-            else:
-                by_grid[2].append(f)
-        pool = (by_grid[0] * 7 + by_grid[1] * 2 + by_grid[2]) or grammar.files
-        return pool[rng.randint(0, len(pool))]
-
-    @staticmethod
-    def _assign_role(
-        sec_label: str,
-        i: int,
-        cycle: int,
-        section_labels: List[str],
-        label_seen: set[str],
-        variation_strength: float,
-    ) -> Tuple[str, bool]:
-        """Determine the structural role of a section occurrence."""
-        if cycle == 0 and i == 0:
-            return "NEW", False
-        if (i > 0 and sec_label == section_labels[i - 1]) \
-                or (i == 0 and sec_label == section_labels[-1]):
-            return "REPEAT", False
-        if sec_label in label_seen:
-            return "RETURN", variation_strength > 0
-        return "NEW", False
-
-    def _end_with_return(
-        self,
-        labels: List[int],
-        event_log: List[Dict[str, Any]],
-        fs: Any,
-        variation_strength: float,
-        rng: np.random.RandomState,
-    ) -> None:
-        """Replace trailing FREE blocks with a RETURN of the primary theme."""
-        if not event_log or event_log[-1]["kind"] != "FREE":
-            return
-
-        grammar = self.grammar
-        primary_label = fs.label_sequence[0]
-
-        # Count and remove trailing FREE
-        free_len = 0
-        while event_log and event_log[-1]["kind"] == "FREE":
-            free_len += event_log[-1]["length"]
-            event_log.pop()
-        del labels[-free_len:]
-
-        # Fill with RETURN of the primary section
-        content: List[int] = []
-        while len(content) < free_len:
-            content.extend(grammar.generate_section_content(
-                primary_label, fs, vary=True,
-                variation_strength=variation_strength,
-                seed=None if rng is None else int(rng.randint(0, 2 ** 31 - 1)),
-            ))
-        labels.extend(content[:free_len])
-        event_log.append({
-            "kind": "SECTION",
-            "label": primary_label,
-            "role": "RETURN",
-            "length": free_len,
-            "labels": content[:free_len],
-        })
-
 
 # ---------------------------------------------------------------------------
 # CLI compatibility
@@ -1329,3 +979,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

@@ -17,7 +17,7 @@ def _build_parser() -> "argparse.ArgumentParser":
     )
     parser.add_argument(
         "--model-dir",
-        default="./models/corelli",
+        default="./models/test",
         help="Path to trained MusicModel directory.",
     )
     parser.add_argument(
@@ -28,7 +28,7 @@ def _build_parser() -> "argparse.ArgumentParser":
     parser.add_argument(
         "--target-measures", "-n",
         type=int,
-        default=120,
+        default=30,
         help="Target number of measures.",
     )
     parser.add_argument(
@@ -85,6 +85,12 @@ def _build_parser() -> "argparse.ArgumentParser":
         default=None,
         help="Composer profile name from ../config/profiles/<name>.yaml.",
     )
+    parser.add_argument(
+        "--timeline-mode",
+        choices=["section", "matrix", "matrix_mined", "hybrid"],
+        default="section",
+        help="Timeline source. Defaults to existing section behavior.",
+    )
     return parser
 
 
@@ -134,6 +140,7 @@ def main() -> None:
         tempo=args.tempo,
         seed=args.seed,
         enable_variation=not args.no_variation,
+        timeline_mode=args.timeline_mode,
     )
 
     executed_modules = getattr(gen, "_last_midi_generation_modules", [])

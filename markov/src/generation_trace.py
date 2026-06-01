@@ -90,6 +90,7 @@ class GenerationTraceRecorder:
                 "tempo": run.tempo,
                 "seed": run.seed,
                 "enable_variation": run.enable_variation,
+                "timeline_mode": getattr(run, "timeline_mode", "section"),
             },
             "executed_modules": getattr(generator, "_last_midi_generation_modules", []),
             "executed_note_modules": getattr(generator, "_last_note_generation_modules", []),
