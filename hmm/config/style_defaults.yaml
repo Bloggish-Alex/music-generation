@@ -1,0 +1,89 @@
+# HMM music generation experiment defaults.
+#
+# These parameters affect generated structure or audible output, so keep them
+# in config or expose them through CLI instead of hard-coding in stage classes.
+
+grid_tokenizer:
+  steps_per_bar: 16
+  bar_length_ql: 4.0
+  rest_token: -1
+  sustain_token: 0
+  polyphonic_strategy: melody_top
+  # Quantize parsed symbolic music before note extraction. This prevents small
+  # human-performance MIDI timing drift, such as 0.99 quarter notes, from
+  # creating unstable edit-distance tokens.
+  quantize_input: true
+  quantize_divisors: [4, 3]
+  quantize_offsets: true
+  quantize_durations: true
+  quantize_policy: nearest
+  min_overlap_fraction: 0.05
+
+distance_matrix:
+  # If gamma is null, the builder estimates sigma from the median non-zero
+  # edit distance and uses gamma_scale / (2 * sigma^2).
+  gamma: null
+  gamma_scale: 1.0
+  # Normalize edit distance to [0, 1] by dividing by max sequence length.
+  # This makes agglomerative distance_threshold a percentage-like tolerance:
+  # 0.25 means roughly 25% of the bar grid may differ.
+  normalize_distance: true
+  token_offset: 2
+
+bar_clustering:
+  backend: global_agglomerative  # global_agglomerative, agglomerative, or spectral
+
+spectral_clustering:
+  n_clusters: 8
+  assign_labels: kmeans
+  random_seed: 42
+
+agglomerative_clustering:
+  distance_threshold: 0.25
+  linkage: average
+  criterion: distance
+  min_clusters_warn: 3
+  max_clusters_warn_fraction: 0.6
+
+global_agglomerative_clustering:
+  # First cluster bars within each song, then align each song-cluster medoid
+  # through a shared global codebook. This keeps local song structure intact
+  # while giving all songs the same bar-label vocabulary for HMM training.
+  song_distance_threshold: 0.25
+  codebook_size: 1024
+  song_linkage: average
+  codebook_linkage: average
+  criterion: distance
+  min_clusters_warn: 3
+  max_clusters_warn_fraction: 0.6
+
+section_hmm:
+  backend: numpy  # numpy or hmmlearn
+  n_sections: 4
+  max_iter: 80
+  tol: 0.0001
+  self_transition_bias: 3.0
+  emission_smoothing: 0.2
+  transition_smoothing: 0.5
+  random_seed: 42
+
+hmmlearn_section_hmm:
+  algorithm: viterbi
+  implementation: log
+
+hmm_generation:
+  # Temperatures above 1.0 flatten over-confident HMM distributions during
+  # generation without changing the trained matrices saved in the model.
+  transition_temperature: 1.2
+  emission_temperature: 1.6
+  # null disables the cap. A modest label cap prevents one emitted bar type
+  # from dominating the rendered MIDI when an HMM state has a sharp emission.
+  max_same_label_run: 4
+  max_same_state_run: null
+  avoid_exact_bar_repeat: true
+
+midi_render:
+  tempo: 120
+  time_signature: 4/4
+  velocity: 72
+  channel: 0
