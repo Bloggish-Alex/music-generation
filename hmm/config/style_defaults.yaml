@@ -57,6 +57,10 @@ kmeans_clustering:
   random_seed: 42
 
 observation_vocab:
+  strategy: positioned_composite  # composite or positioned_composite
+  position_strategy: period_role  # exact_mod or period_role
+  position_modulo: 8
+  position_source: bar_index
   key_format: structured
 
 bar_density:
@@ -140,18 +144,22 @@ forms:
         length: 8
         pitch_offset: 0
         cadence: perfect #
+        source: Expo_Primary
       - name: Recap_Transition
         length: 8
         pitch_offset: 5
         cadence: half #
+        source: Expo_Transition
       - name: Recap_Secondary
         length: 8
         pitch_offset: 0
         cadence: perfect #
+        source: Expo_Secondary
       - name: Recap_Coda
         length: 8
         pitch_offset: 0
         cadence: perfect #
+        source: Expo_Codetta
   ternary: # ABA
     sections:
       - name: Theme_A

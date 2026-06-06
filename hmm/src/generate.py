@@ -100,10 +100,15 @@ class FormDrivenGenerator:
         output_bar_index: int,
         rng: np.random.Generator,
     ) -> SampledBar:
-        observation_id, emission_prob = model.sample_from_state(state_id, rng)
+        observation_id, emission_prob, sampling_policy = self._sample_observation(
+            model,
+            state_id,
+            local_index,
+            rng,
+        )
         selected_bar = self._sample_bar(observation_id, rng)
         composite = self.bundle.observation_vocab.composite_for(observation_id)
-        return SampledBar(
+        event = SampledBar(
             output_bar_index=output_bar_index,
             section=section.name,
             section_local_index=local_index,
@@ -118,6 +123,88 @@ class FormDrivenGenerator:
             absolute_tokens=list(selected_bar.absolute_tokens),
             relative_tokens=list(selected_bar.relative_tokens),
         )
+        self.diagnostics.append_event("observation_position_sampling", {
+            "output_bar_index": int(output_bar_index),
+            "section": section.name,
+            "section_local_index": int(local_index),
+            "state_id": int(state_id),
+            "observation_id": int(observation_id),
+            "composite_key": composite,
+            **sampling_policy,
+        })
+        return event
+
+    def _sample_observation(
+        self,
+        model: Any,
+        state_id: int,
+        local_index: int,
+        rng: np.random.Generator,
+    ) -> tuple[int, float, Dict[str, Any]]:
+        vocab_config = ConfigView(self.config).section("observation_vocab")
+        strategy = str(vocab_config.get("strategy", "composite"))
+        if strategy != "positioned_composite":
+            observation_id, emission_prob = model.sample_from_state(state_id, rng)
+            return int(observation_id), float(emission_prob), {
+                "strategy": strategy,
+                "used_position_conditioning": False,
+            }
+        modulo = max(1, int(vocab_config.get("position_modulo", 8)))
+        target_position = int(local_index) % modulo
+        position_strategy = str(vocab_config.get("position_strategy", "period_role"))
+        target_context = self._position_context(target_position, position_strategy, modulo)
+        probs = np.asarray(model.emissionprob[int(state_id)], dtype=np.float64)
+        allowed = self._observations_for_position_context(target_context, position_strategy)
+        if allowed:
+            masked = np.zeros_like(probs)
+            masked[allowed] = probs[allowed]
+            total = float(masked.sum())
+            if total > 0:
+                conditioned = masked / total
+                observation_id = int(rng.choice(len(conditioned), p=conditioned))
+                return observation_id, float(probs[observation_id]), {
+                    "strategy": strategy,
+                    "used_position_conditioning": True,
+                    "target_phrase_position": int(target_position),
+                    "target_position_context": target_context,
+                    "position_strategy": position_strategy,
+                    "position_modulo": int(modulo),
+                    "allowed_observation_count": int(len(allowed)),
+                    "fallback": None,
+                }
+        observation_id, emission_prob = model.sample_from_state(state_id, rng)
+        return int(observation_id), float(emission_prob), {
+            "strategy": strategy,
+            "used_position_conditioning": False,
+            "target_phrase_position": int(target_position),
+            "target_position_context": target_context,
+            "position_strategy": position_strategy,
+            "position_modulo": int(modulo),
+            "allowed_observation_count": int(len(allowed)),
+            "fallback": "no_positive_position_emission",
+        }
+
+    def _observations_for_position_context(self, context: str, position_strategy: str) -> List[int]:
+        result: List[int] = []
+        for observation_id, composite in self.bundle.observation_vocab.observation_to_composite.items():
+            parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
+            if str(parts.get("position_strategy", position_strategy)) != str(position_strategy):
+                continue
+            if str(parts.get("position_context")) == str(context):
+                result.append(int(observation_id))
+        return result
+
+    def _position_context(self, phrase_position: int, position_strategy: str, modulo: int) -> str:
+        position = int(phrase_position) % max(1, int(modulo))
+        if position_strategy == "exact_mod":
+            return str(position)
+        if position_strategy == "period_role":
+            if position in {0, 1}:
+                return "begin"
+            if position in {2, 3, 4, 5}:
+                return "middle"
+            return "end"
+        raise ValueError("observation_vocab.position_strategy must be 'exact_mod' or 'period_role'.")
 
     def _source_reuse_event(
         self,
@@ -227,6 +314,7 @@ class FormDrivenGenerator:
         return event
 
     def _anchor_resample_bar(self, source_event: SampledBar, rng: np.random.Generator) -> tuple[BarRecord, str]:
+        target_context = self._event_position_context(source_event)
         same_observation = self._candidate_bars(
             lambda bar: int(bar.observation_id) == int(source_event.observation_id)
         )
@@ -240,6 +328,7 @@ class FormDrivenGenerator:
                 and bar.kmeans_id is not None
                 and source_event.kmeans_id is not None
                 and int(bar.kmeans_id) == int(source_event.kmeans_id)
+                and self._bar_position_context(bar) == target_context
             )
         )
         selected = self._choose_non_identical(same_edit_kmeans, source_event, rng)
@@ -247,7 +336,10 @@ class FormDrivenGenerator:
             return selected, "same_edit_distance_and_kmeans"
 
         same_edit = self._candidate_bars(
-            lambda bar: int(bar.edit_distance_id) == int(source_event.edit_distance_id)
+            lambda bar: (
+                int(bar.edit_distance_id) == int(source_event.edit_distance_id)
+                and self._bar_position_context(bar) == target_context
+            )
         )
         selected = self._choose_non_identical(same_edit, source_event, rng)
         if selected is not None:
@@ -285,6 +377,29 @@ class FormDrivenGenerator:
         ]
         pool = non_identical or list(candidates)
         return pool[int(rng.integers(0, len(pool)))]
+
+    def _event_position_context(self, event: SampledBar) -> Optional[str]:
+        composite = self.bundle.observation_vocab.observation_to_composite.get(int(event.observation_id))
+        if composite is None:
+            return None
+        parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
+        value = parts.get("position_context")
+        return str(value) if value is not None else None
+
+    def _bar_position_context(self, bar: BarRecord) -> Optional[str]:
+        if bar.observation_id is not None:
+            composite = self.bundle.observation_vocab.observation_to_composite.get(int(bar.observation_id))
+            if composite is not None:
+                parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
+                value = parts.get("position_context")
+                if value is not None:
+                    return str(value)
+        vocab_config = ConfigView(self.config).section("observation_vocab")
+        if str(vocab_config.get("strategy", "composite")) != "positioned_composite":
+            return None
+        modulo = max(1, int(vocab_config.get("position_modulo", 8)))
+        position_strategy = str(vocab_config.get("position_strategy", "period_role"))
+        return self._position_context(int(bar.bar_index) % modulo, position_strategy, modulo)
 
     def _source_reuse_mode(self) -> str:
         mode = str(ConfigView(self.config).section("hmm_generation").get("source_reuse_mode", "sampled_path"))
