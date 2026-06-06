@@ -49,6 +49,15 @@ class KMeansFeatureConfig:
 
 
 @dataclass(frozen=True)
+class ObservationVocabConfig:
+    strategy: str = "composite"
+    position_strategy: str = "period_role"
+    position_modulo: int = 8
+    position_source: str = "bar_index"
+    key_format: str = "structured"
+
+
+@dataclass(frozen=True)
 class SongClusterResult:
     labels: List[int]
     diagnostics: Dict[str, Any]
@@ -834,33 +843,111 @@ class KMeansFeatureClusterer:
 class ObservationVocabBuilder:
     """Create contiguous HMM observation IDs from structured composite keys."""
 
+    def __init__(self, config: ObservationVocabConfig | None = None) -> None:
+        self.config = config or ObservationVocabConfig()
+
+    @classmethod
+    def from_style_config(cls, config: Dict[str, Any]) -> "ObservationVocabBuilder":
+        section = ConfigView(config).section("observation_vocab")
+        return cls(ObservationVocabConfig(
+            strategy=str(section.get("strategy", "composite")),
+            position_strategy=str(section.get("position_strategy", "period_role")),
+            position_modulo=int(section.get("position_modulo", 8)),
+            position_source=str(section.get("position_source", "bar_index")),
+            key_format=str(section.get("key_format", "structured")),
+        ))
+
     def assign(self, songs: Sequence[SongRecord]) -> ObservationVocab:
         bars = [bar for song in songs for bar in song.bars]
         for bar in bars:
-            bar.composite_key = self._composite_key(bar)
+            bar.composite_key = self._observation_key(bar)
         unique_keys = sorted({str(bar.composite_key) for bar in bars})
         composite_to_observation = {key: index for index, key in enumerate(unique_keys)}
         observation_to_composite = {index: key for key, index in composite_to_observation.items()}
         composite_parts = {}
         for bar in bars:
-            composite_parts[str(bar.composite_key)] = bar.composite_parts()
+            composite_parts[str(bar.composite_key)] = self._observation_parts(bar)
             bar.observation_id = composite_to_observation[str(bar.composite_key)]
         return ObservationVocab(composite_to_observation, observation_to_composite, composite_parts)
 
     def diagnostics(self, songs: Sequence[SongRecord], vocab: ObservationVocab) -> Dict[str, Any]:
         counts = Counter(bar.observation_id for song in songs for bar in song.bars)
+        role_counts = Counter(
+            self._position_context(bar)
+            for song in songs
+            for bar in song.bars
+        )
+        composite_counts = Counter(
+            self._composite_key(bar)
+            for song in songs
+            for bar in song.bars
+        )
         return {
+            "config": asdict(self.config),
             "observation_count": len(vocab.composite_to_observation),
+            "base_composite_count": len(composite_counts),
+            "observation_expansion_ratio": round(
+                float(len(vocab.composite_to_observation)) / max(1, len(composite_counts)),
+                6,
+            ),
             "observation_counts": {str(k): int(v) for k, v in counts.items()},
             "rare_observation_count": sum(1 for value in counts.values() if value == 1),
+            "position_context_counts": {str(k): int(v) for k, v in sorted(role_counts.items())},
             "vocab": vocab.to_dict(),
         }
+
+    def _observation_key(self, bar: BarRecord) -> str:
+        composite = self._composite_key(bar)
+        if self.config.strategy == "composite":
+            return composite
+        if self.config.strategy == "positioned_composite":
+            return f"{self._position_key_prefix(bar)}_{composite}"
+        raise ValueError("observation_vocab.strategy must be 'composite' or 'positioned_composite'.")
+
+    def _observation_parts(self, bar: BarRecord) -> Dict[str, Any]:
+        parts = bar.composite_parts()
+        if self.config.strategy == "positioned_composite":
+            parts = dict(parts)
+            parts["phrase_position"] = self._phrase_position(bar)
+            parts["period_role"] = self._period_role(self._phrase_position(bar))
+            parts["position_context"] = self._position_context(bar)
+            parts["position_strategy"] = self.config.position_strategy
+            parts["position_modulo"] = int(self.config.position_modulo)
+        return parts
 
     def _composite_key(self, bar: BarRecord) -> str:
         edit_id = bar.edit_distance_id if bar.edit_distance_id is not None else -1
         if bar.kmeans_id is None:
             return f"E{edit_id}"
         return f"E{edit_id}_K{bar.kmeans_id}"
+
+    def _phrase_position(self, bar: BarRecord) -> int:
+        modulo = max(1, int(self.config.position_modulo))
+        if self.config.position_source != "bar_index":
+            raise ValueError("observation_vocab.position_source currently supports only 'bar_index'.")
+        return int(bar.bar_index) % modulo
+
+    def _period_role(self, phrase_position: int) -> str:
+        position = int(phrase_position) % max(1, int(self.config.position_modulo))
+        if position in {0, 1}:
+            return "begin"
+        if position in {2, 3, 4, 5}:
+            return "middle"
+        return "end"
+
+    def _position_context(self, bar: BarRecord) -> str:
+        phrase_position = self._phrase_position(bar)
+        if self.config.position_strategy == "exact_mod":
+            return str(phrase_position)
+        if self.config.position_strategy == "period_role":
+            return self._period_role(phrase_position)
+        raise ValueError("observation_vocab.position_strategy must be 'exact_mod' or 'period_role'.")
+
+    def _position_key_prefix(self, bar: BarRecord) -> str:
+        context = self._position_context(bar)
+        if self.config.position_strategy == "exact_mod":
+            return f"P{context}"
+        return f"R{context}"
 
 
 class BarClusteringPipeline:
@@ -878,7 +965,7 @@ class BarClusteringPipeline:
         density_analyzer = TokenDensityAnalyzer.from_style_config(self.config)
         kmeans = KMeansFeatureClusterer.from_style_config(self.config)
         kmeans.assign(songs)
-        vocab_builder = ObservationVocabBuilder()
+        vocab_builder = ObservationVocabBuilder.from_style_config(self.config)
         vocab = vocab_builder.assign(songs)
         self.edit_distance_codebook = self._build_edit_distance_codebook(
             songs,
