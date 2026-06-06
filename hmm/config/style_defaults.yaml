@@ -233,6 +233,10 @@ hmm_generation:
   max_same_label_run: 4
   max_same_state_run: null
   avoid_exact_bar_repeat: true
+  # none disables section source reuse. sampled_path reuses the source
+  # section's exact sampled observations and concrete bars. anchor_resample
+  # keeps the source section as an anchor while resampling similar bars.
+  source_reuse_mode: anchor_resample
 
 harmonic_engine:
   style: classic
