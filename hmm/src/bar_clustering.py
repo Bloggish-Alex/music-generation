@@ -960,6 +960,7 @@ class BarClusteringPipeline:
         self.distance = EditDistanceCalculator.from_style_config(config)
 
     def run(self, songs: Sequence[SongRecord]) -> ObservationVocab:
+        self.distance.fit_corpus([bar for song in songs for bar in song.bars])
         codebook = GlobalCodebookClusterer.from_style_config(self.config, self.distance)
         codebook.assign(songs)
         density_analyzer = TokenDensityAnalyzer.from_style_config(self.config)
@@ -974,6 +975,7 @@ class BarClusteringPipeline:
         )
         self.diagnostics = {
             "edit_distance": codebook.diagnostics,
+            "bar_autoencoder": self.distance.autoencoder.diagnostics,
             "codebook_density": self._codebook_density_diagnostics(),
             "kmeans": kmeans.diagnostics,
             "observation_vocab": vocab_builder.diagnostics(songs, vocab),

@@ -20,6 +20,7 @@ grid_tokenizer:
   min_overlap_fraction: 0.05
 
 distance_matrix:
+  backend: autoencoder_edit_distance  # token, multi_channel, or autoencoder_edit_distance
   # If gamma is null, the builder estimates sigma from the median non-zero
   # edit distance and uses gamma_scale / (2 * sigma^2).
   gamma: null
@@ -29,11 +30,14 @@ distance_matrix:
   # 0.25 means roughly 25% of the bar grid may differ.
   normalize_distance: true
   token_offset: 2
-  # Preserve relative contour, but encode the bar root pitch class into note-on
-  # tokens. This prevents sparse bars like [0, sustain...] from collapsing
-  # across every pitch class.
-  token_strategy: root_pitch_class_relative
+  # Diagnostic token strategy. With backend=multi_channel, actual distance is
+  # computed from rhythm, contour, and pitch-relative channels below.
+  token_strategy: relative
   root_pitch_class_token_multiplier: 100
+  multi_channel:
+    rhythm_weight: 0.45
+    contour_weight: 0.35
+    pitch_weight: 0.20
   context_features:
     root_pitch_class:
       enabled: false
@@ -48,17 +52,33 @@ distance_matrix:
       bucket_count: 8
       weight: 0.01
 
+bar_autoencoder:
+  enabled: true
+  token_strategy: relative
+  # Direct narrow autoencoder: 16 token values -> Dense(latent_dim) -> 16 token values.
+  latent_dim: 8
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.001
+  random_seed: 42
+  device: cpu  # cpu, cuda, or auto
+  normalize_latent: true
+  # Quantize the 8 latent values into integer tokens, then run Levenshtein on
+  # that 8-token sequence.
+  quantization_bins: 32
+  quantization_clip: 3.0
+
 bar_clustering:
   backend: global_agglomerative  # global_agglomerative, agglomerative, or spectral
 
 kmeans_clustering:
   enabled: true
-  n_clusters: 64
+  n_clusters: 16
   random_seed: 42
 
 observation_vocab:
   strategy: positioned_composite  # composite or positioned_composite
-  position_strategy: period_role  # exact_mod or period_role
+  position_strategy: exact_mod  # exact_mod or period_role
   position_modulo: 8
   position_source: bar_index
   key_format: structured
@@ -89,14 +109,14 @@ global_agglomerative_clustering:
   # while giving all songs the same bar-label vocabulary for HMM training.
   song_distance_threshold: 0.25
   song_max_clusters: 48
-  codebook_size: 64
-  codebook_clustering_strategy: filtered_rare_bar  # default or filtered_rare_bar
+  codebook_size: 384
+  codebook_clustering_strategy: default  # default or filtered_rare_bar
   codebook_filter_min_bar_count: 3
   # Build the global codebook by distance first. Fixed-size maxclust alone can
   # merge unrelated medoids, then assignment collapses many bars into one label.
-  codebook_distance_threshold: 0.5
+  codebook_distance_threshold: 0.35
   assignment_distance_threshold: 0.35
-  expand_codebook_on_assignment_miss: true  # valid only when codebook_clustering_strategy is default
+  expand_codebook_on_assignment_miss: false  # valid only when codebook_clustering_strategy is default
   song_linkage: average
   codebook_linkage: average
   criterion: distance
@@ -144,22 +164,18 @@ forms:
         length: 8
         pitch_offset: 0
         cadence: perfect #
-        source: Expo_Primary
       - name: Recap_Transition
         length: 8
         pitch_offset: 5
         cadence: half #
-        source: Expo_Transition
       - name: Recap_Secondary
         length: 8
         pitch_offset: 0
         cadence: perfect #
-        source: Expo_Secondary
       - name: Recap_Coda
         length: 8
         pitch_offset: 0
         cadence: perfect #
-        source: Expo_Codetta
   ternary: # ABA
     sections:
       - name: Theme_A
@@ -276,7 +292,7 @@ harmonic_render:
   tempo: 120
   time_signature: 4/4
   velocity: 72
-  track_mode: single  # single or split_by_pitch
+  track_mode: split_by_pitch  # single or split_by_pitch
   voice_sharing_enabled: false
   voice_sharing_threshold: 0.8
   tracks:

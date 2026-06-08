@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 from Levenshtein import distance as levenshtein_distance
 
+from bar_autoencoder import BarAutoencoderConfig, BarTokenAutoencoderFeatureExtractor
 from config_loader import ConfigLoader, ConfigView
 from core_data import BarRecord, SongRecord
 
@@ -32,10 +33,15 @@ class PositionBucketFeatureConfig:
 
 @dataclass(frozen=True)
 class EditDistanceConfig:
+    backend: str = "token"
     normalize_distance: bool = True
     token_offset: int = 2
     token_strategy: str = "relative"
     root_pitch_class_token_multiplier: int = 100
+    rhythm_weight: float = 0.45
+    contour_weight: float = 0.35
+    pitch_weight: float = 0.20
+    autoencoder: BarAutoencoderConfig = field(default_factory=BarAutoencoderConfig)
     root_pitch_class: RootPitchClassFeatureConfig = field(default_factory=RootPitchClassFeatureConfig)
     position_bucket: PositionBucketFeatureConfig = field(default_factory=PositionBucketFeatureConfig)
 
@@ -106,6 +112,7 @@ class EditDistanceCalculator:
 
     def __init__(self, config: EditDistanceConfig) -> None:
         self.config = config
+        self.autoencoder = BarTokenAutoencoderFeatureExtractor(config.autoencoder)
 
     @classmethod
     def from_style_config(cls, config: Dict[str, Any]) -> "EditDistanceCalculator":
@@ -116,11 +123,31 @@ class EditDistanceCalculator:
         root_pitch_class = root_pitch_class if isinstance(root_pitch_class, dict) else {}
         position_bucket = context.get("position_bucket", {})
         position_bucket = position_bucket if isinstance(position_bucket, dict) else {}
+        multi_channel = section.get("multi_channel", {})
+        multi_channel = multi_channel if isinstance(multi_channel, dict) else {}
+        autoencoder = ConfigView(config).section("bar_autoencoder")
         return cls(EditDistanceConfig(
+            backend=str(section.get("backend", "token")),
             normalize_distance=bool(section.get("normalize_distance", True)),
             token_offset=int(section.get("token_offset", 2)),
             token_strategy=str(section.get("token_strategy", "relative")),
             root_pitch_class_token_multiplier=int(section.get("root_pitch_class_token_multiplier", 100)),
+            rhythm_weight=float(multi_channel.get("rhythm_weight", section.get("rhythm_weight", 0.45))),
+            contour_weight=float(multi_channel.get("contour_weight", section.get("contour_weight", 0.35))),
+            pitch_weight=float(multi_channel.get("pitch_weight", section.get("pitch_weight", 0.20))),
+            autoencoder=BarAutoencoderConfig(
+                enabled=bool(autoencoder.get("enabled", False)),
+                token_strategy=str(autoencoder.get("token_strategy", "relative")),
+                latent_dim=int(autoencoder.get("latent_dim", 8)),
+                epochs=int(autoencoder.get("epochs", 80)),
+                batch_size=int(autoencoder.get("batch_size", 128)),
+                learning_rate=float(autoencoder.get("learning_rate", 0.001)),
+                random_seed=int(autoencoder.get("random_seed", 42)),
+                device=str(autoencoder.get("device", "cpu")),
+                normalize_latent=bool(autoencoder.get("normalize_latent", True)),
+                quantization_bins=int(autoencoder.get("quantization_bins", 32)),
+                quantization_clip=float(autoencoder.get("quantization_clip", 3.0)),
+            ),
             root_pitch_class=RootPitchClassFeatureConfig(
                 enabled=bool(root_pitch_class.get("enabled", False)),
                 weight=float(root_pitch_class.get("weight", 0.05)),
@@ -131,6 +158,12 @@ class EditDistanceCalculator:
                 bucket_count=int(position_bucket.get("bucket_count", 8)),
             ),
         ))
+
+    def fit_corpus(self, bars: Sequence[BarRecord]) -> None:
+        if self.config.backend == "autoencoder_edit_distance":
+            if not hasattr(self, "autoencoder"):
+                self.autoencoder = BarTokenAutoencoderFeatureExtractor(self.config.autoencoder)
+            self.autoencoder.fit(bars)
 
     def build_matrix(self, bars: Sequence[BarRecord]) -> np.ndarray:
         encoded = [self._encode(self.tokens_for_bar(bar)) for bar in bars]
@@ -151,6 +184,10 @@ class EditDistanceCalculator:
 
     def tokens_for_bar(self, bar: BarRecord) -> List[int]:
         """Return the exact token sequence used by this calculator."""
+        if self.config.backend == "autoencoder_edit_distance":
+            if not hasattr(self, "autoencoder"):
+                self.autoencoder = BarTokenAutoencoderFeatureExtractor(self.config.autoencoder)
+            return self.autoencoder.tokens_for_bar(bar)
         if self.config.token_strategy == "root_pitch_class_relative":
             root_pitch_class = self._bar_root_pitch_class(bar)
             if root_pitch_class is None:
@@ -175,11 +212,84 @@ class EditDistanceCalculator:
         encoded_left: str,
         encoded_right: str,
     ) -> float:
+        if self.config.backend == "multi_channel":
+            value = self._multi_channel_distance(left, right)
+        elif self.config.backend == "autoencoder_edit_distance":
+            value = self._encoded_edit_distance(encoded_left, encoded_right)
+        elif self.config.backend == "token":
+            value = self._encoded_edit_distance(encoded_left, encoded_right)
+        else:
+            raise ValueError(f"Unsupported edit distance backend: {self.config.backend}")
+        value += self._root_pitch_class_distance(left, right) * self.config.root_pitch_class.weight
+        value += self._position_bucket_distance(left, right) * self.config.position_bucket.weight
+        return float(value)
+
+    def _multi_channel_distance(self, left: BarRecord, right: BarRecord) -> float:
+        left_tokens = [int(token) for token in left.tokens_for_edit_distance("relative")]
+        right_tokens = [int(token) for token in right.tokens_for_edit_distance("relative")]
+        weighted_distances = [
+            (self.config.rhythm_weight, self._token_edit_distance(
+                self._rhythm_tokens(left_tokens),
+                self._rhythm_tokens(right_tokens),
+            )),
+            (self.config.contour_weight, self._token_edit_distance(
+                self._contour_tokens(left_tokens),
+                self._contour_tokens(right_tokens),
+            )),
+            (self.config.pitch_weight, self._token_edit_distance(left_tokens, right_tokens)),
+        ]
+        weight_sum = sum(max(0.0, float(weight)) for weight, _ in weighted_distances)
+        if weight_sum <= 0.0:
+            return 0.0
+        return float(sum(max(0.0, float(weight)) * value for weight, value in weighted_distances) / weight_sum)
+
+    def _rhythm_tokens(self, tokens: Sequence[int]) -> List[int]:
+        result: List[int] = []
+        for token in tokens:
+            token = int(token)
+            if token == -1:
+                result.append(0)
+            elif token == -2:
+                result.append(1)
+            else:
+                result.append(2)
+        return result
+
+    def _contour_tokens(self, tokens: Sequence[int]) -> List[int]:
+        result: List[int] = []
+        previous_pitch: Optional[int] = None
+        for token in tokens:
+            token = int(token)
+            if token == -1:
+                result.append(0)
+                continue
+            if token == -2:
+                result.append(1)
+                continue
+            if previous_pitch is None:
+                result.append(2)
+            else:
+                diff = token - previous_pitch
+                if diff == 0:
+                    result.append(3)
+                elif 0 < diff <= 2:
+                    result.append(4)
+                elif -2 <= diff < 0:
+                    result.append(5)
+                elif diff > 2:
+                    result.append(6)
+                else:
+                    result.append(7)
+            previous_pitch = token
+        return result
+
+    def _token_edit_distance(self, left_tokens: Sequence[int], right_tokens: Sequence[int]) -> float:
+        return self._encoded_edit_distance(self._encode(left_tokens), self._encode(right_tokens))
+
+    def _encoded_edit_distance(self, encoded_left: str, encoded_right: str) -> float:
         value = float(levenshtein_distance(encoded_left, encoded_right))
         if self.config.normalize_distance:
             value = value / max(1, max(len(encoded_left), len(encoded_right)))
-        value += self._root_pitch_class_distance(left, right) * self.config.root_pitch_class.weight
-        value += self._position_bucket_distance(left, right) * self.config.position_bucket.weight
         return float(value)
 
     def _root_pitch_class_distance(self, left: BarRecord, right: BarRecord) -> float:
@@ -239,6 +349,7 @@ class EditDistanceCLI:
         songs = [SongRecord.from_dict(item) for item in payload.get("songs", [])]
         bars = [bar for song in songs for bar in song.bars]
         calculator = EditDistanceCalculator.from_style_config(config)
+        calculator.fit_corpus(bars)
         matrix = calculator.build_matrix(bars)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(args.output, distance=matrix)
