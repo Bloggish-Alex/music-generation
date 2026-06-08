@@ -56,6 +56,7 @@ class FormDrivenGenerator:
         self.bundle = bundle
         self.config = config or bundle.config
         self.diagnostics = GenerationDiagnostics()
+        self._chunk_cache: Dict[int, List[List[BarRecord]]] = {}
 
     def generate(self, form_name: str, seed: Optional[int] = None) -> GenerationResult:
         if form_name not in self.bundle.form_models:
@@ -69,7 +70,8 @@ class FormDrivenGenerator:
         for section in plan:
             state_id = int(section.state_id)
             section_events: List[SampledBar] = []
-            for local_index in range(int(section.bars)):
+            local_index = 0
+            while local_index < int(section.bars):
                 event = self._source_reuse_event(
                     model,
                     section,
@@ -78,11 +80,33 @@ class FormDrivenGenerator:
                     sampled_by_section,
                     rng,
                 )
-                if event is None:
-                    event = self._sample_event(model, state_id, section, local_index, len(sampled), rng)
+                if event is not None:
+                    sampled.append(event)
+                    section_events.append(event)
+                    self.diagnostics.record_sampled_bar(event.to_dict())
+                    local_index += 1
+                    continue
+                chunk_events = self._sample_phrase_chunk(
+                    model,
+                    state_id,
+                    section,
+                    local_index,
+                    int(section.bars) - local_index,
+                    len(sampled),
+                    rng,
+                )
+                if chunk_events:
+                    for chunk_event in chunk_events:
+                        sampled.append(chunk_event)
+                        section_events.append(chunk_event)
+                        self.diagnostics.record_sampled_bar(chunk_event.to_dict())
+                    local_index += len(chunk_events)
+                    continue
+                event = self._sample_event(model, state_id, section, local_index, len(sampled), rng)
                 sampled.append(event)
                 section_events.append(event)
                 self.diagnostics.record_sampled_bar(event.to_dict())
+                local_index += 1
             sampled_by_section[section.name] = section_events
         return GenerationResult(
             form=form_name,
@@ -133,6 +157,220 @@ class FormDrivenGenerator:
             **sampling_policy,
         })
         return event
+
+    def _sample_phrase_chunk(
+        self,
+        model: Any,
+        state_id: int,
+        section: SectionPlanItem,
+        local_index: int,
+        remaining_bars: int,
+        output_bar_index: int,
+        rng: np.random.Generator,
+    ) -> Optional[List[SampledBar]]:
+        generation = ConfigView(self.config).section("hmm_generation")
+        if str(generation.get("sampling_unit", "bar")) != "phrase_chunk":
+            return None
+        chunk_size = int(generation.get("phrase_chunk_bars", 2))
+        if chunk_size <= 1 or remaining_bars < chunk_size:
+            return None
+        candidates = self._phrase_chunk_candidates(model, state_id, local_index, chunk_size)
+        if not candidates:
+            self.diagnostics.append_event("phrase_chunk_sampling", {
+                "section": section.name,
+                "section_local_index": int(local_index),
+                "output_bar_index": int(output_bar_index),
+                "used": False,
+                "reason": "no_matching_chunk",
+                "chunk_bars": int(chunk_size),
+            })
+            return None
+        top_k = int(generation.get("phrase_chunk_top_k", 32))
+        temperature = float(generation.get("phrase_chunk_temperature", 0.7))
+        candidate_indices = self._top_score_indices(
+            np.array([candidate["score"] for candidate in candidates], dtype=np.float64),
+            top_k,
+        )
+        probabilities = self._temperature_probabilities(
+            np.array([candidates[index]["score"] for index in candidate_indices], dtype=np.float64),
+            temperature,
+        )
+        selected_local = int(rng.choice(len(candidate_indices), p=probabilities))
+        selected_index = int(candidate_indices[selected_local])
+        selected = candidates[selected_index]
+        full_probabilities = np.zeros(len(candidates), dtype=np.float64)
+        for index, probability in zip(candidate_indices, probabilities):
+            full_probabilities[int(index)] = float(probability)
+        events = [
+            self._event_from_bar(
+                bar,
+                section,
+                local_index + offset,
+                output_bar_index + offset,
+                state_id,
+                float(model.emissionprob[int(state_id), int(bar.observation_id)]),
+            )
+            for offset, bar in enumerate(selected["bars"])
+        ]
+        self.diagnostics.append_event("phrase_chunk_sampling", {
+            "section": section.name,
+            "section_local_index": int(local_index),
+            "output_bar_index": int(output_bar_index),
+            "used": True,
+            "chunk_bars": int(chunk_size),
+            "candidate_count": len(candidates),
+            "sampling_candidate_count": int(len(candidate_indices)),
+            "top_k": int(top_k),
+            "temperature": float(temperature),
+            "selected_index": int(selected_index),
+            "selected_probability": round(float(full_probabilities[selected_index]), 6),
+            "selected": self._chunk_diagnostics(selected),
+            "top_candidates": [
+                {
+                    **self._chunk_diagnostics(candidates[index]),
+                    "candidate_index": int(index),
+                    "probability": round(float(full_probabilities[index]), 6),
+                }
+                for index in sorted(
+                    range(len(candidates)),
+                    key=lambda idx: float(candidates[idx]["score"]),
+                    reverse=True,
+                )[:5]
+            ],
+        })
+        return events
+
+    def _phrase_chunk_candidates(
+        self,
+        model: Any,
+        state_id: int,
+        local_index: int,
+        chunk_size: int,
+    ) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        probs = np.asarray(model.emissionprob[int(state_id)], dtype=np.float64)
+        for bars in self._training_chunks(chunk_size):
+            if not self._chunk_matches_position(bars, local_index):
+                continue
+            observation_ids = [int(bar.observation_id) for bar in bars if bar.observation_id is not None]
+            if len(observation_ids) != chunk_size:
+                continue
+            emission_probs = [float(probs[observation_id]) for observation_id in observation_ids]
+            if any(prob <= 0.0 for prob in emission_probs):
+                continue
+            score = float(np.prod(np.array(emission_probs, dtype=np.float64)))
+            candidates.append({
+                "bars": list(bars),
+                "score": score,
+                "emission_probabilities": emission_probs,
+            })
+        return candidates
+
+    def _training_chunks(self, chunk_size: int) -> List[List[BarRecord]]:
+        if int(chunk_size) in self._chunk_cache:
+            return self._chunk_cache[int(chunk_size)]
+        groups: Dict[str, List[BarRecord]] = {}
+        for pool in self.bundle.observation_to_bars.values():
+            for bar in pool:
+                groups.setdefault(str(bar.file_path), []).append(bar)
+        chunks: List[List[BarRecord]] = []
+        for bars in groups.values():
+            unique = {
+                int(bar.bar_index): bar
+                for bar in bars
+            }
+            ordered = [unique[index] for index in sorted(unique)]
+            for start in range(0, max(0, len(ordered) - chunk_size + 1)):
+                candidate = ordered[start:start + chunk_size]
+                if all(
+                    int(candidate[offset + 1].bar_index) == int(candidate[offset].bar_index) + 1
+                    for offset in range(chunk_size - 1)
+                ):
+                    chunks.append(candidate)
+        self._chunk_cache[int(chunk_size)] = chunks
+        return chunks
+
+    def _chunk_matches_position(self, bars: Sequence[BarRecord], local_index: int) -> bool:
+        vocab_config = ConfigView(self.config).section("observation_vocab")
+        if str(vocab_config.get("strategy", "composite")) != "positioned_composite":
+            return True
+        modulo = max(1, int(vocab_config.get("position_modulo", 8)))
+        position_strategy = str(vocab_config.get("position_strategy", "period_role"))
+        for offset, bar in enumerate(bars):
+            expected = self._position_context((int(local_index) + offset) % modulo, position_strategy, modulo)
+            if self._bar_position_context(bar) != expected:
+                return False
+        return True
+
+    def _event_from_bar(
+        self,
+        bar: BarRecord,
+        section: SectionPlanItem,
+        local_index: int,
+        output_bar_index: int,
+        state_id: int,
+        emission_probability: float,
+    ) -> SampledBar:
+        observation_id = int(bar.observation_id)
+        return SampledBar(
+            output_bar_index=int(output_bar_index),
+            section=section.name,
+            section_local_index=int(local_index),
+            hidden_state=int(state_id),
+            observation_id=observation_id,
+            composite_key=self.bundle.observation_vocab.composite_for(observation_id),
+            emission_probability=float(emission_probability),
+            source_file=bar.file_path,
+            source_bar_index=int(bar.bar_index),
+            edit_distance_id=int(bar.edit_distance_id),
+            kmeans_id=bar.kmeans_id,
+            absolute_tokens=list(bar.absolute_tokens),
+            relative_tokens=list(bar.relative_tokens),
+        )
+
+    def _chunk_diagnostics(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        bars = candidate["bars"]
+        return {
+            "score": round(float(candidate["score"]), 12),
+            "emission_probabilities": [
+                round(float(value), 12)
+                for value in candidate["emission_probabilities"]
+            ],
+            "source_file": bars[0].file_path,
+            "source_bar_indices": [int(bar.bar_index) for bar in bars],
+            "observation_ids": [int(bar.observation_id) for bar in bars],
+            "composite_keys": [
+                self.bundle.observation_vocab.composite_for(int(bar.observation_id))
+                for bar in bars
+            ],
+            "edit_distance_ids": [int(bar.edit_distance_id) for bar in bars],
+            "kmeans_ids": [bar.kmeans_id for bar in bars],
+            "position_contexts": [self._bar_position_context(bar) for bar in bars],
+            "relative_tokens": [list(bar.relative_tokens) for bar in bars],
+        }
+
+    def _top_score_indices(self, scores: np.ndarray, top_k: int) -> np.ndarray:
+        if len(scores) == 0:
+            return np.array([], dtype=np.int64)
+        if top_k <= 0 or top_k >= len(scores):
+            return np.arange(len(scores), dtype=np.int64)
+        return np.array(
+            sorted(
+                np.argpartition(scores, -top_k)[-top_k:],
+                key=lambda index: float(scores[int(index)]),
+                reverse=True,
+            ),
+            dtype=np.int64,
+        )
+
+    def _temperature_probabilities(self, scores: np.ndarray, temperature: float) -> np.ndarray:
+        if len(scores) == 0:
+            return np.array([], dtype=np.float64)
+        adjusted = np.power(np.maximum(scores, 1.0e-12), 1.0 / max(float(temperature), 1.0e-6))
+        total = float(adjusted.sum())
+        if total <= 0.0:
+            return np.full(len(scores), 1.0 / len(scores), dtype=np.float64)
+        return adjusted / total
 
     def _sample_observation(
         self,
