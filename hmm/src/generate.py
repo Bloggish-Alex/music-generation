@@ -11,42 +11,15 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from architecture import DecodeContext
 from config_loader import ConfigLoader, ConfigView
 from core_data import BarRecord
+from decoder import SectionPlanBuilder
 from diagnostics import GenerationDiagnostics
 from generation_data import GenerationResult, SampledBar, SectionPlanItem
-from harmonic_engine import HarmonicCliOverrides, HarmonicEngine, HarmonicMidiRenderer
+from harmonic_engine import HarmonicCliOverrides
 from model_store import ModelBundle
-
-
-class SectionPlanBuilder:
-    """Build a deterministic section plan from a trained form template."""
-
-    def build(self, bundle: ModelBundle, form_name: str) -> List[SectionPlanItem]:
-        template = bundle.form_templates.get(form_name, {})
-        sections = template.get("sections", [])
-        if not sections:
-            model = bundle.form_models[form_name]
-            sections = [
-                {
-                    "name": model.state_role_map.get(index, f"State_{index}"),
-                    "length": model.section_lengths[index] if index < len(model.section_lengths) else 1,
-                    "source": None,
-                }
-                for index in range(model.n_states)
-            ]
-        plan = []
-        for state_id, section in enumerate(sections):
-            plan.append(SectionPlanItem(
-                state_id=int(state_id),
-                name=str(section.get("name", f"State_{state_id}")),
-                bars=int(section.get("length", 1)),
-                source=section.get("source"),
-                pitch_offset=int(section.get("pitch_offset", 0) or 0),
-                cadence=str(section.get("cadence", "none")),
-                start_degree=section.get("start_degree"),
-            ))
-        return plan
+from renderer import HarmonicPhysicalRenderer
 
 
 class FormDrivenGenerator:
@@ -56,7 +29,6 @@ class FormDrivenGenerator:
         self.bundle = bundle
         self.config = config or bundle.config
         self.diagnostics = GenerationDiagnostics()
-        self._chunk_cache: Dict[int, List[List[BarRecord]]] = {}
 
     def generate(self, form_name: str, seed: Optional[int] = None) -> GenerationResult:
         if form_name not in self.bundle.form_models:
@@ -70,8 +42,7 @@ class FormDrivenGenerator:
         for section in plan:
             state_id = int(section.state_id)
             section_events: List[SampledBar] = []
-            local_index = 0
-            while local_index < int(section.bars):
+            for local_index in range(int(section.bars)):
                 event = self._source_reuse_event(
                     model,
                     section,
@@ -84,29 +55,11 @@ class FormDrivenGenerator:
                     sampled.append(event)
                     section_events.append(event)
                     self.diagnostics.record_sampled_bar(event.to_dict())
-                    local_index += 1
-                    continue
-                chunk_events = self._sample_phrase_chunk(
-                    model,
-                    state_id,
-                    section,
-                    local_index,
-                    int(section.bars) - local_index,
-                    len(sampled),
-                    rng,
-                )
-                if chunk_events:
-                    for chunk_event in chunk_events:
-                        sampled.append(chunk_event)
-                        section_events.append(chunk_event)
-                        self.diagnostics.record_sampled_bar(chunk_event.to_dict())
-                    local_index += len(chunk_events)
                     continue
                 event = self._sample_event(model, state_id, section, local_index, len(sampled), rng)
                 sampled.append(event)
                 section_events.append(event)
                 self.diagnostics.record_sampled_bar(event.to_dict())
-                local_index += 1
             sampled_by_section[section.name] = section_events
         return GenerationResult(
             form=form_name,
@@ -131,7 +84,7 @@ class FormDrivenGenerator:
             rng,
         )
         selected_bar = self._sample_bar(observation_id, rng)
-        composite = self.bundle.observation_vocab.composite_for(observation_id)
+        composite = self.bundle.symbol_vocabulary.descriptor_key_for(observation_id)
         event = SampledBar(
             output_bar_index=output_bar_index,
             section=section.name,
@@ -142,7 +95,7 @@ class FormDrivenGenerator:
             emission_probability=emission_prob,
             source_file=selected_bar.file_path,
             source_bar_index=selected_bar.bar_index,
-            edit_distance_id=int(selected_bar.edit_distance_id),
+            codebook_id=int(selected_bar.codebook_id),
             kmeans_id=selected_bar.kmeans_id,
             absolute_tokens=list(selected_bar.absolute_tokens),
             relative_tokens=list(selected_bar.relative_tokens),
@@ -158,220 +111,6 @@ class FormDrivenGenerator:
         })
         return event
 
-    def _sample_phrase_chunk(
-        self,
-        model: Any,
-        state_id: int,
-        section: SectionPlanItem,
-        local_index: int,
-        remaining_bars: int,
-        output_bar_index: int,
-        rng: np.random.Generator,
-    ) -> Optional[List[SampledBar]]:
-        generation = ConfigView(self.config).section("hmm_generation")
-        if str(generation.get("sampling_unit", "bar")) != "phrase_chunk":
-            return None
-        chunk_size = int(generation.get("phrase_chunk_bars", 2))
-        if chunk_size <= 1 or remaining_bars < chunk_size:
-            return None
-        candidates = self._phrase_chunk_candidates(model, state_id, local_index, chunk_size)
-        if not candidates:
-            self.diagnostics.append_event("phrase_chunk_sampling", {
-                "section": section.name,
-                "section_local_index": int(local_index),
-                "output_bar_index": int(output_bar_index),
-                "used": False,
-                "reason": "no_matching_chunk",
-                "chunk_bars": int(chunk_size),
-            })
-            return None
-        top_k = int(generation.get("phrase_chunk_top_k", 32))
-        temperature = float(generation.get("phrase_chunk_temperature", 0.7))
-        candidate_indices = self._top_score_indices(
-            np.array([candidate["score"] for candidate in candidates], dtype=np.float64),
-            top_k,
-        )
-        probabilities = self._temperature_probabilities(
-            np.array([candidates[index]["score"] for index in candidate_indices], dtype=np.float64),
-            temperature,
-        )
-        selected_local = int(rng.choice(len(candidate_indices), p=probabilities))
-        selected_index = int(candidate_indices[selected_local])
-        selected = candidates[selected_index]
-        full_probabilities = np.zeros(len(candidates), dtype=np.float64)
-        for index, probability in zip(candidate_indices, probabilities):
-            full_probabilities[int(index)] = float(probability)
-        events = [
-            self._event_from_bar(
-                bar,
-                section,
-                local_index + offset,
-                output_bar_index + offset,
-                state_id,
-                float(model.emissionprob[int(state_id), int(bar.observation_id)]),
-            )
-            for offset, bar in enumerate(selected["bars"])
-        ]
-        self.diagnostics.append_event("phrase_chunk_sampling", {
-            "section": section.name,
-            "section_local_index": int(local_index),
-            "output_bar_index": int(output_bar_index),
-            "used": True,
-            "chunk_bars": int(chunk_size),
-            "candidate_count": len(candidates),
-            "sampling_candidate_count": int(len(candidate_indices)),
-            "top_k": int(top_k),
-            "temperature": float(temperature),
-            "selected_index": int(selected_index),
-            "selected_probability": round(float(full_probabilities[selected_index]), 6),
-            "selected": self._chunk_diagnostics(selected),
-            "top_candidates": [
-                {
-                    **self._chunk_diagnostics(candidates[index]),
-                    "candidate_index": int(index),
-                    "probability": round(float(full_probabilities[index]), 6),
-                }
-                for index in sorted(
-                    range(len(candidates)),
-                    key=lambda idx: float(candidates[idx]["score"]),
-                    reverse=True,
-                )[:5]
-            ],
-        })
-        return events
-
-    def _phrase_chunk_candidates(
-        self,
-        model: Any,
-        state_id: int,
-        local_index: int,
-        chunk_size: int,
-    ) -> List[Dict[str, Any]]:
-        candidates: List[Dict[str, Any]] = []
-        probs = np.asarray(model.emissionprob[int(state_id)], dtype=np.float64)
-        for bars in self._training_chunks(chunk_size):
-            if not self._chunk_matches_position(bars, local_index):
-                continue
-            observation_ids = [int(bar.observation_id) for bar in bars if bar.observation_id is not None]
-            if len(observation_ids) != chunk_size:
-                continue
-            emission_probs = [float(probs[observation_id]) for observation_id in observation_ids]
-            if any(prob <= 0.0 for prob in emission_probs):
-                continue
-            score = float(np.prod(np.array(emission_probs, dtype=np.float64)))
-            candidates.append({
-                "bars": list(bars),
-                "score": score,
-                "emission_probabilities": emission_probs,
-            })
-        return candidates
-
-    def _training_chunks(self, chunk_size: int) -> List[List[BarRecord]]:
-        if int(chunk_size) in self._chunk_cache:
-            return self._chunk_cache[int(chunk_size)]
-        groups: Dict[str, List[BarRecord]] = {}
-        for pool in self.bundle.observation_to_bars.values():
-            for bar in pool:
-                groups.setdefault(str(bar.file_path), []).append(bar)
-        chunks: List[List[BarRecord]] = []
-        for bars in groups.values():
-            unique = {
-                int(bar.bar_index): bar
-                for bar in bars
-            }
-            ordered = [unique[index] for index in sorted(unique)]
-            for start in range(0, max(0, len(ordered) - chunk_size + 1)):
-                candidate = ordered[start:start + chunk_size]
-                if all(
-                    int(candidate[offset + 1].bar_index) == int(candidate[offset].bar_index) + 1
-                    for offset in range(chunk_size - 1)
-                ):
-                    chunks.append(candidate)
-        self._chunk_cache[int(chunk_size)] = chunks
-        return chunks
-
-    def _chunk_matches_position(self, bars: Sequence[BarRecord], local_index: int) -> bool:
-        vocab_config = ConfigView(self.config).section("observation_vocab")
-        if str(vocab_config.get("strategy", "composite")) != "positioned_composite":
-            return True
-        modulo = max(1, int(vocab_config.get("position_modulo", 8)))
-        position_strategy = str(vocab_config.get("position_strategy", "period_role"))
-        for offset, bar in enumerate(bars):
-            expected = self._position_context((int(local_index) + offset) % modulo, position_strategy, modulo)
-            if self._bar_position_context(bar) != expected:
-                return False
-        return True
-
-    def _event_from_bar(
-        self,
-        bar: BarRecord,
-        section: SectionPlanItem,
-        local_index: int,
-        output_bar_index: int,
-        state_id: int,
-        emission_probability: float,
-    ) -> SampledBar:
-        observation_id = int(bar.observation_id)
-        return SampledBar(
-            output_bar_index=int(output_bar_index),
-            section=section.name,
-            section_local_index=int(local_index),
-            hidden_state=int(state_id),
-            observation_id=observation_id,
-            composite_key=self.bundle.observation_vocab.composite_for(observation_id),
-            emission_probability=float(emission_probability),
-            source_file=bar.file_path,
-            source_bar_index=int(bar.bar_index),
-            edit_distance_id=int(bar.edit_distance_id),
-            kmeans_id=bar.kmeans_id,
-            absolute_tokens=list(bar.absolute_tokens),
-            relative_tokens=list(bar.relative_tokens),
-        )
-
-    def _chunk_diagnostics(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        bars = candidate["bars"]
-        return {
-            "score": round(float(candidate["score"]), 12),
-            "emission_probabilities": [
-                round(float(value), 12)
-                for value in candidate["emission_probabilities"]
-            ],
-            "source_file": bars[0].file_path,
-            "source_bar_indices": [int(bar.bar_index) for bar in bars],
-            "observation_ids": [int(bar.observation_id) for bar in bars],
-            "composite_keys": [
-                self.bundle.observation_vocab.composite_for(int(bar.observation_id))
-                for bar in bars
-            ],
-            "edit_distance_ids": [int(bar.edit_distance_id) for bar in bars],
-            "kmeans_ids": [bar.kmeans_id for bar in bars],
-            "position_contexts": [self._bar_position_context(bar) for bar in bars],
-            "relative_tokens": [list(bar.relative_tokens) for bar in bars],
-        }
-
-    def _top_score_indices(self, scores: np.ndarray, top_k: int) -> np.ndarray:
-        if len(scores) == 0:
-            return np.array([], dtype=np.int64)
-        if top_k <= 0 or top_k >= len(scores):
-            return np.arange(len(scores), dtype=np.int64)
-        return np.array(
-            sorted(
-                np.argpartition(scores, -top_k)[-top_k:],
-                key=lambda index: float(scores[int(index)]),
-                reverse=True,
-            ),
-            dtype=np.int64,
-        )
-
-    def _temperature_probabilities(self, scores: np.ndarray, temperature: float) -> np.ndarray:
-        if len(scores) == 0:
-            return np.array([], dtype=np.float64)
-        adjusted = np.power(np.maximum(scores, 1.0e-12), 1.0 / max(float(temperature), 1.0e-6))
-        total = float(adjusted.sum())
-        if total <= 0.0:
-            return np.full(len(scores), 1.0 / len(scores), dtype=np.float64)
-        return adjusted / total
-
     def _sample_observation(
         self,
         model: Any,
@@ -379,6 +118,18 @@ class FormDrivenGenerator:
         local_index: int,
         rng: np.random.Generator,
     ) -> tuple[int, float, Dict[str, Any]]:
+        encoder_backend = (
+            self.bundle.encoder_model.metadata.get("backend")
+            if self.bundle.encoder_model is not None
+            else None
+        )
+        if encoder_backend == "vae_latent":
+            observation_id, emission_prob = model.sample_from_state(state_id, rng)
+            return int(observation_id), float(emission_prob), {
+                "strategy": "vae_latent",
+                "used_position_conditioning": False,
+                "reason": "vae_latent_symbols_do_not_expand_by_position",
+            }
         vocab_config = ConfigView(self.config).section("observation_vocab")
         strategy = str(vocab_config.get("strategy", "composite"))
         if strategy != "positioned_composite":
@@ -392,7 +143,7 @@ class FormDrivenGenerator:
         position_strategy = str(vocab_config.get("position_strategy", "period_role"))
         target_context = self._position_context(target_position, position_strategy, modulo)
         probs = np.asarray(model.emissionprob[int(state_id)], dtype=np.float64)
-        allowed = self._observations_for_position_context(target_context, position_strategy)
+        allowed = self._observations_for_position_context(target_context, position_strategy, target_position)
         if allowed:
             masked = np.zeros_like(probs)
             masked[allowed] = probs[allowed]
@@ -422,15 +173,20 @@ class FormDrivenGenerator:
             "fallback": "no_positive_position_emission",
         }
 
-    def _observations_for_position_context(self, context: str, position_strategy: str) -> List[int]:
-        result: List[int] = []
-        for observation_id, composite in self.bundle.observation_vocab.observation_to_composite.items():
-            parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
-            if str(parts.get("position_strategy", position_strategy)) != str(position_strategy):
-                continue
-            if str(parts.get("position_context")) == str(context):
-                result.append(int(observation_id))
-        return result
+    def _observations_for_position_context(
+        self,
+        context: str,
+        position_strategy: str,
+        phrase_position: Optional[int] = None,
+    ) -> List[int]:
+        decode_context = DecodeContext(
+            phrase_position=phrase_position if position_strategy == "exact_mod" else None,
+            position_context=str(context),
+        )
+        return self.bundle.symbol_vocabulary.symbols_for_context(
+            decode_context,
+            position_strategy=position_strategy,
+        )
 
     def _position_context(self, phrase_position: int, position_strategy: str, modulo: int) -> str:
         position = int(phrase_position) % max(1, int(modulo))
@@ -480,7 +236,7 @@ class FormDrivenGenerator:
             emission_probability=source_event.emission_probability,
             source_file=source_event.source_file,
             source_bar_index=source_event.source_bar_index,
-            edit_distance_id=source_event.edit_distance_id,
+            codebook_id=source_event.codebook_id,
             kmeans_id=source_event.kmeans_id,
             absolute_tokens=list(source_event.absolute_tokens),
             relative_tokens=list(source_event.relative_tokens),
@@ -495,7 +251,7 @@ class FormDrivenGenerator:
             "mode": mode,
             "reused_hidden_state": int(source_event.hidden_state),
             "reused_observation_id": int(source_event.observation_id),
-            "reused_edit_distance_id": int(source_event.edit_distance_id),
+            "reused_codebook_id": int(source_event.codebook_id),
             "reused_kmeans_id": source_event.kmeans_id,
         })
         return reused
@@ -512,7 +268,7 @@ class FormDrivenGenerator:
         state_id = int(section.state_id)
         selected_bar, policy = self._anchor_resample_bar(source_event, rng)
         observation_id = int(selected_bar.observation_id)
-        composite = self.bundle.observation_vocab.composite_for(observation_id)
+        composite = self.bundle.symbol_vocabulary.descriptor_key_for(observation_id)
         emission_prob = float(model.emissionprob[state_id, observation_id])
         event = SampledBar(
             output_bar_index=output_bar_index,
@@ -524,7 +280,7 @@ class FormDrivenGenerator:
             emission_probability=emission_prob,
             source_file=selected_bar.file_path,
             source_bar_index=selected_bar.bar_index,
-            edit_distance_id=int(selected_bar.edit_distance_id),
+            codebook_id=int(selected_bar.codebook_id),
             kmeans_id=selected_bar.kmeans_id,
             absolute_tokens=list(selected_bar.absolute_tokens),
             relative_tokens=list(selected_bar.relative_tokens),
@@ -540,11 +296,11 @@ class FormDrivenGenerator:
             "policy": policy,
             "anchor_hidden_state": int(source_event.hidden_state),
             "anchor_observation_id": int(source_event.observation_id),
-            "anchor_edit_distance_id": int(source_event.edit_distance_id),
+            "anchor_codebook_id": int(source_event.codebook_id),
             "anchor_kmeans_id": source_event.kmeans_id,
             "selected_hidden_state": int(event.hidden_state),
             "selected_observation_id": int(event.observation_id),
-            "selected_edit_distance_id": int(event.edit_distance_id),
+            "selected_codebook_id": int(event.codebook_id),
             "selected_kmeans_id": event.kmeans_id,
             "selected_source_file": event.source_file,
             "selected_source_bar_index": int(event.source_bar_index),
@@ -562,7 +318,7 @@ class FormDrivenGenerator:
 
         same_edit_kmeans = self._candidate_bars(
             lambda bar: (
-                int(bar.edit_distance_id) == int(source_event.edit_distance_id)
+                int(bar.codebook_id) == int(source_event.codebook_id)
                 and bar.kmeans_id is not None
                 and source_event.kmeans_id is not None
                 and int(bar.kmeans_id) == int(source_event.kmeans_id)
@@ -575,7 +331,7 @@ class FormDrivenGenerator:
 
         same_edit = self._candidate_bars(
             lambda bar: (
-                int(bar.edit_distance_id) == int(source_event.edit_distance_id)
+                int(bar.codebook_id) == int(source_event.codebook_id)
                 and self._bar_position_context(bar) == target_context
             )
         )
@@ -592,7 +348,7 @@ class FormDrivenGenerator:
             for bar in pool:
                 if (
                     bar.observation_id is not None
-                    and bar.edit_distance_id is not None
+                    and bar.codebook_id is not None
                     and predicate(bar)
                 ):
                     candidates.append(bar)
@@ -617,21 +373,20 @@ class FormDrivenGenerator:
         return pool[int(rng.integers(0, len(pool)))]
 
     def _event_position_context(self, event: SampledBar) -> Optional[str]:
-        composite = self.bundle.observation_vocab.observation_to_composite.get(int(event.observation_id))
-        if composite is None:
+        try:
+            value = self.bundle.symbol_vocabulary.descriptor_for(int(event.observation_id)).position_context
+        except KeyError:
             return None
-        parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
-        value = parts.get("position_context")
         return str(value) if value is not None else None
 
     def _bar_position_context(self, bar: BarRecord) -> Optional[str]:
         if bar.observation_id is not None:
-            composite = self.bundle.observation_vocab.observation_to_composite.get(int(bar.observation_id))
-            if composite is not None:
-                parts = self.bundle.observation_vocab.composite_parts.get(str(composite), {})
-                value = parts.get("position_context")
+            try:
+                value = self.bundle.symbol_vocabulary.descriptor_for(int(bar.observation_id)).position_context
                 if value is not None:
                     return str(value)
+            except KeyError:
+                pass
         vocab_config = ConfigView(self.config).section("observation_vocab")
         if str(vocab_config.get("strategy", "composite")) != "positioned_composite":
             return None
@@ -647,16 +402,19 @@ class FormDrivenGenerator:
 
     def write_outputs(self, generation: GenerationResult, json_path: Path, midi_path: Path) -> None:
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        engine = HarmonicEngine(self.config, self.bundle.edit_distance_codebook)
-        realized = engine.realize(generation)
-        render_diag = HarmonicMidiRenderer.from_style_config(self.config).write(
-            realized.harmonic_bars,
-            midi_path,
+        codebook = (
+            self.bundle.encoder_model.codebook.entries
+            if self.bundle.encoder_model is not None
+            else self.bundle.global_codebook
         )
-        engine.diagnostics["render"] = render_diag
+        renderer = HarmonicPhysicalRenderer(self.config, codebook)
+        render_result = renderer.realize(generation)
+        realized = render_result.generation
+        render_diag = renderer.write_midi(realized, midi_path)
+        render_result.diagnostics["render"] = render_diag
         json_path.write_text(json.dumps(realized.to_dict(), indent=2), encoding="utf-8")
-        self.diagnostics.record_stage("harmonic_engine", engine.diagnostics)
-        for event in engine.diagnostics.get("rare_bar_selection", {}).get("events", []):
+        self.diagnostics.record_stage("harmonic_engine", render_result.diagnostics)
+        for event in render_result.diagnostics.get("rare_bar_selection", {}).get("events", []):
             self.diagnostics.record_rare_bar_selection(event)
 
     def _sample_bar(self, observation_id: int, rng: np.random.Generator) -> BarRecord:

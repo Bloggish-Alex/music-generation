@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Train and evaluate a denoising VAE bar encoder as an isolated experiment."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+
+from analyze_encoder_variants import EncoderVariantInputLoader
+from config_loader import ConfigLoader
+from core_data import BarRecord, SongRecord
+from model_analysis import MarkdownReport
+from vae_bar_encoder import (
+    DenoisingVAEConfig,
+    DenoisingVAETrainer,
+    LatentClusterAnalyzer,
+    LatentClusteringConfig,
+)
+
+
+class VAEEncoderReport:
+    """Render markdown diagnostics for the denoising VAE encoder."""
+
+    def __init__(
+        self,
+        songs: Sequence[SongRecord],
+        vae_config: DenoisingVAEConfig,
+        cluster_config: LatentClusteringConfig,
+        training_log: Sequence[Dict[str, float]],
+        reconstruction: Dict[str, Any],
+        clustering: Dict[str, Any],
+    ) -> None:
+        self.songs = list(songs)
+        self.bars = [bar for song in songs for bar in song.bars]
+        self.vae_config = vae_config
+        self.cluster_config = cluster_config
+        self.training_log = list(training_log)
+        self.reconstruction = reconstruction
+        self.clustering = clustering
+
+    def write(self, output_path: Path) -> None:
+        report = MarkdownReport()
+        report.heading("Denoising VAE Encoder Report")
+        report.paragraph(
+            "This report evaluates a denoising VAE encoder independently from the main HMM training pipeline. "
+            "The decoder is trained with multi-head loss: slot type classification, note-on pitch regression, and KL regularization. "
+            "Clustering uses z_mu latent vectors."
+        )
+        report.table([
+            "Metric",
+            "Value",
+        ], [
+            ["song_count", len(self.songs)],
+            ["bar_count", len(self.bars)],
+            ["latent_dim", self.vae_config.latent_dim],
+            ["hidden_dim", self.vae_config.hidden_dim],
+            ["epochs", self.vae_config.epochs],
+            ["cluster_method", self.cluster_config.method],
+            ["n_clusters", self.cluster_config.n_clusters],
+        ])
+
+        report.heading("VAE Config", 2)
+        report.table(["Parameter", "Value"], [[key, value] for key, value in asdict(self.vae_config).items()])
+        report.heading("Latent Clustering Config", 2)
+        report.table(["Parameter", "Value"], [[key, value] for key, value in asdict(self.cluster_config).items()])
+
+        report.heading("Training Loss", 2)
+        report.table([
+            "Epoch",
+            "Loss",
+            "Type loss",
+            "Pitch loss",
+            "KL loss",
+            "KL weight",
+        ], [
+            [
+                int(item["epoch"]),
+                item["loss"],
+                item["type_loss"],
+                item["pitch_loss"],
+                item["kl_loss"],
+                item["kl_weight"],
+            ]
+            for item in self._sampled_training_log()
+        ])
+
+        report.heading("Reconstruction / Multi-head Metrics", 2)
+        report.table(["Metric", "Value"], [[key, value] for key, value in self.reconstruction.items()])
+
+        report.heading("Latent Cluster Distribution", 2)
+        report.table([
+            "Metric",
+            "Value",
+            "Meaning",
+        ], [
+            ["total_assignments", self.clustering.get("total_assignments"), "Number of bars assigned to latent clusters."],
+            ["used_label_count", self.clustering.get("used_label_count"), "Number of non-empty latent labels."],
+            ["singleton_label_count", self.clustering.get("singleton_label_count"), "Labels with one bar only."],
+            ["singleton_ratio", self.clustering.get("singleton_ratio"), "Lower is better for HMM reuse."],
+            ["max_label", self.clustering.get("max_label"), "Largest latent cluster ID."],
+            ["max_label_count", self.clustering.get("max_label_count"), "Bars in largest latent cluster."],
+            ["max_label_ratio", self.clustering.get("max_label_ratio"), "Too high can indicate cluster collapse."],
+            ["normalized_entropy", self.clustering.get("normalized_entropy"), "Higher means more even label usage."],
+            ["effective_label_count", self.clustering.get("effective_label_count"), "Entropy-equivalent number of used labels."],
+        ])
+
+        latent = self.clustering.get("latent", {})
+        report.heading("Latent Space Summary", 2)
+        report.table([
+            "Metric",
+            "Value",
+        ], [
+            ["shape", latent.get("shape")],
+            ["mean_abs", latent.get("mean_abs")],
+            ["std", latent.get("std")],
+            ["dim_std", latent.get("dim_std")],
+        ])
+
+        report.heading("Top Latent Labels", 2)
+        report.table([
+            "Label",
+            "Count",
+            "Ratio",
+        ], [
+            [item["label"], item["count"], item["ratio"]]
+            for item in self.clustering.get("top_labels", [])
+        ])
+
+        report.heading("Top Label Examples", 2)
+        for item in self.clustering.get("top_label_examples", []):
+            report.paragraph(f"Label `{item['label']}` count={item['count']}")
+            report.table([
+                "Song",
+                "Bar",
+                "Relative tokens",
+                "Variance",
+                "Sharing",
+            ], [
+                [
+                    example["song_id"],
+                    example["bar_index"],
+                    example["relative_tokens"],
+                    example["token_variance"],
+                    example["sharing_score"],
+                ]
+                for example in item.get("examples", [])
+            ])
+
+        report.heading("Latent Nearest Neighbors", 2)
+        for item in self.clustering.get("nearest_neighbors", []):
+            anchor = item["anchor"]
+            report.paragraph(
+                f"Anchor `{anchor['song_id']}` bar `{anchor['bar_index']}` tokens `{anchor['relative_tokens']}`"
+            )
+            report.table([
+                "Song",
+                "Bar",
+                "Distance",
+                "Relative tokens",
+            ], [
+                [
+                    neighbor["song_id"],
+                    neighbor["bar_index"],
+                    neighbor["latent_distance"],
+                    neighbor["relative_tokens"],
+                ]
+                for neighbor in item.get("neighbors", [])
+            ])
+        report.heading("Initial Interpretation", 2)
+        report.table([
+            "Signal",
+            "How to read it",
+        ], [
+            ["singleton_ratio lower than edit-distance baseline", "VAE latent is producing a more reusable vocabulary."],
+            ["type_accuracy high but singleton_ratio high", "Model reconstructs slot types but latent may still memorize surface patterns."],
+            ["pitch_mse low but max_label_ratio high", "Pitch structure may be over-smoothed into dominant clusters."],
+            ["latent dim_std near zero", "Possible posterior collapse; reduce beta_kl or use longer KL warmup."],
+            ["nearest neighbors musically unrelated", "Representation is not yet meaningful even if distribution metrics look good."],
+        ])
+        report.write(output_path)
+
+    def _sampled_training_log(self) -> List[Dict[str, float]]:
+        if len(self.training_log) <= 20:
+            return list(self.training_log)
+        keep = set(np.linspace(0, len(self.training_log) - 1, num=20, dtype=int).tolist())
+        return [item for index, item in enumerate(self.training_log) if index in keep]
+
+
+class VAEEncoderCLI:
+    """CLI entrypoint."""
+
+    def build_parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(description="Train and analyze a denoising VAE bar encoder.")
+        source = parser.add_mutually_exclusive_group(required=True)
+        source.add_argument("--model-dir", type=Path)
+        source.add_argument("--model-bundle", type=Path)
+        source.add_argument("--songs-json", type=Path)
+        source.add_argument("--music-dir", type=Path)
+        parser.add_argument("--config", type=Path, default=None)
+        parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument("--diagnostics-output", type=Path, default=None)
+        parser.add_argument("--latents-output", type=Path, default=None)
+        parser.add_argument("--checkpoint-output", type=Path, default=None)
+
+        parser.add_argument("--hidden-dim", type=int, default=32)
+        parser.add_argument("--latent-dim", type=int, default=8)
+        parser.add_argument("--epochs", type=int, default=80)
+        parser.add_argument("--batch-size", type=int, default=128)
+        parser.add_argument("--learning-rate", type=float, default=0.001)
+        parser.add_argument("--beta-kl", type=float, default=0.001)
+        parser.add_argument("--kl-warmup-epochs", type=int, default=10)
+        parser.add_argument("--pitch-weight", type=float, default=1.0)
+        parser.add_argument("--note-drop-prob", type=float, default=0.15)
+        parser.add_argument("--sustain-fill-prob", type=float, default=0.10)
+        parser.add_argument("--drop-to-rest-prob", type=float, default=0.5)
+        parser.add_argument("--ornament-pitch-radius", type=int, default=2)
+        parser.add_argument("--pitch-scale", type=float, default=24.0)
+        parser.add_argument("--random-seed", type=int, default=42)
+        parser.add_argument("--device", type=str, default="cpu")
+
+        parser.add_argument("--cluster-method", choices=["kmeans", "agglomerative"], default="kmeans")
+        parser.add_argument("--n-clusters", type=int, default=384)
+        parser.add_argument("--distance-threshold", type=float, default=1.0)
+        parser.add_argument("--linkage-method", type=str, default="average")
+        return parser
+
+    def run(self, argv: Optional[Sequence[str]] = None) -> None:
+        args = self.build_parser().parse_args(argv)
+        config = ConfigLoader().load(args.config)
+        songs = EncoderVariantInputLoader(config).load(
+            model_dir=args.model_dir,
+            model_bundle=args.model_bundle,
+            songs_json=args.songs_json,
+            music_dir=args.music_dir,
+        )
+        bars = [bar for song in songs for bar in song.bars]
+        vae_config = self._vae_config(args)
+        cluster_config = self._cluster_config(args)
+        trainer = DenoisingVAETrainer(vae_config).fit(bars)
+        latents = trainer.encode(bars)
+        labels = LatentClusterAnalyzer(cluster_config).cluster(latents)
+        reconstruction = trainer.evaluate_reconstruction(bars)
+        clustering = LatentClusterAnalyzer(cluster_config).diagnostics(bars, latents, labels)
+
+        VAEEncoderReport(
+            songs=songs,
+            vae_config=vae_config,
+            cluster_config=cluster_config,
+            training_log=trainer.training_log,
+            reconstruction=reconstruction,
+            clustering=clustering,
+        ).write(args.output)
+
+        diagnostics = {
+            "vae_config": asdict(vae_config),
+            "cluster_config": asdict(cluster_config),
+            "training_log": trainer.training_log,
+            "reconstruction": reconstruction,
+            "clustering": clustering,
+        }
+        if args.diagnostics_output:
+            args.diagnostics_output.parent.mkdir(parents=True, exist_ok=True)
+            args.diagnostics_output.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+        if args.latents_output:
+            args.latents_output.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                args.latents_output,
+                latents=latents,
+                labels=labels,
+                song_id=np.asarray([bar.song_id for bar in bars]),
+                bar_index=np.asarray([int(bar.bar_index) for bar in bars], dtype=np.int64),
+            )
+        if args.checkpoint_output:
+            trainer.save(args.checkpoint_output)
+        print(f"VAE encoder report -> {args.output}")
+
+    def _vae_config(self, args: argparse.Namespace) -> DenoisingVAEConfig:
+        return DenoisingVAEConfig(
+            hidden_dim=int(args.hidden_dim),
+            latent_dim=int(args.latent_dim),
+            epochs=int(args.epochs),
+            batch_size=int(args.batch_size),
+            learning_rate=float(args.learning_rate),
+            beta_kl=float(args.beta_kl),
+            kl_warmup_epochs=int(args.kl_warmup_epochs),
+            pitch_weight=float(args.pitch_weight),
+            note_drop_prob=float(args.note_drop_prob),
+            sustain_fill_prob=float(args.sustain_fill_prob),
+            drop_to_rest_prob=float(args.drop_to_rest_prob),
+            ornament_pitch_radius=int(args.ornament_pitch_radius),
+            pitch_scale=float(args.pitch_scale),
+            random_seed=int(args.random_seed),
+            device=str(args.device),
+        )
+
+    def _cluster_config(self, args: argparse.Namespace) -> LatentClusteringConfig:
+        return LatentClusteringConfig(
+            method=str(args.cluster_method),
+            n_clusters=int(args.n_clusters),
+            distance_threshold=float(args.distance_threshold),
+            linkage_method=str(args.linkage_method),
+            random_seed=int(args.random_seed),
+        )
+
+
+def main() -> None:
+    VAEEncoderCLI().run()
+
+
+if __name__ == "__main__":
+    main()

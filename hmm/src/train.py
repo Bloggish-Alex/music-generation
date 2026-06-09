@@ -8,9 +8,9 @@ import json
 from pathlib import Path
 from typing import Optional, Sequence
 
-from bar_clustering import BarClusteringPipeline
 from config_loader import ConfigLoader
 from diagnostics import TrainingDiagnostics
+from encoder import SymbolEncoderFactory
 from form_hmm import FormHMMTrainer, FormTemplateLibrary
 from model_store import ModelBundle, ObservationBarPoolBuilder
 from music_input import InputParser
@@ -29,13 +29,15 @@ class TrainingPipeline:
         bars = [bar for song in songs for bar in song.bars]
         self.diagnostics.record_input_summary(len(songs), parser.failed_files, len(bars))
 
-        clustering = BarClusteringPipeline(self.config)
-        vocab = clustering.run(songs)
-        self.diagnostics.record_clustering(clustering.diagnostics)
-        self.diagnostics.record_observation_vocab(clustering.diagnostics.get("observation_vocab", {}))
+        encoding = SymbolEncoderFactory().from_config(self.config).fit(songs)
+        vocab = encoding.observation_vocab
+
+        self.diagnostics.record_clustering(encoding.diagnostics)
+        self.diagnostics.record_observation_vocab(encoding.diagnostics.get("observation_vocab", {}))
 
         hmm_trainer = FormHMMTrainer(self.config)
         form_models = hmm_trainer.train(songs, vocab)
+
         for form_name, diag in hmm_trainer.diagnostics.items():
             self.diagnostics.record_hmm(form_name, diag)
 
@@ -48,7 +50,9 @@ class TrainingPipeline:
             "model_dir": str(model_dir),
             "song_count": len(songs),
             "bar_count": len(bars),
+            "codebook_count": len(encoding.global_codebook),
             "observation_count": len(vocab.composite_to_observation),
+            "symbol_count": len(vocab.composite_to_observation),
             "observation_bar_pools": pool_diagnostics,
             "forms": sorted(form_models),
         }
@@ -68,15 +72,27 @@ class TrainingPipeline:
             }
             for name, template in FormTemplateLibrary.from_style_config(self.config).templates.items()
         }
-        return ModelBundle.from_training(
+        bundle = ModelBundle.from_training(
             self.config,
             songs,
             vocab,
             form_models,
             summary,
             form_templates=templates,
-            edit_distance_codebook=clustering.edit_distance_codebook,
+            global_codebook=encoding.global_codebook,
+            encoder_model=encoding.encoder_model,
         )
+        self.diagnostics.record_stage("encoder_model", {
+            "codebook_count": len(bundle.encoder_model.codebook.entries) if bundle.encoder_model else 0,
+            "symbol_count": (
+                len(bundle.encoder_model.vocabulary.symbol_to_descriptor)
+                if bundle.encoder_model else len(vocab.composite_to_observation)
+            ),
+            "symbol_id_field": "observation_id",
+            "codebook_id_field": "codebook_id",
+            "vocabulary_interface": "SymbolVocabulary",
+        })
+        return bundle
 
 
 class TrainingCLI:

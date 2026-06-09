@@ -12,7 +12,7 @@ from core_data import NoteRecord
 
 @dataclass(frozen=True)
 class CodebookCandidate:
-    """One physical training bar assigned to an edit-distance codebook label."""
+    """One physical training bar assigned to a global codebook label."""
 
     source_song: Optional[str]
     source_file: Optional[str]
@@ -68,9 +68,9 @@ class CodebookCandidate:
 
 @dataclass(frozen=True)
 class CodebookEntry:
-    """One global edit-distance codebook entry used for harmonic realization."""
+    """One global codebook entry used for harmonic realization."""
 
-    edit_distance_id: int
+    codebook_id: int
     source_song: Optional[str]
     source_file: Optional[str]
     source_bar_index: Optional[int]
@@ -95,7 +95,7 @@ class CodebookEntry:
         token_variance = float(payload.get("token_variance", cls._token_variance(relative_tokens)))
         density_payload = payload.get("density")
         return cls(
-            edit_distance_id=int(payload.get("edit_distance_id", 0)),
+            codebook_id=int(payload.get("codebook_id", 0)),
             source_song=payload.get("source_song"),
             source_file=payload.get("source_file"),
             source_bar_index=int(source_bar_index) if source_bar_index is not None else None,
@@ -175,7 +175,7 @@ class SampledBar:
     emission_probability: float
     source_file: str
     source_bar_index: int
-    edit_distance_id: int
+    codebook_id: int
     kmeans_id: Optional[int]
     absolute_tokens: List[int]
     relative_tokens: List[int]
@@ -196,7 +196,7 @@ class SampledBar:
             emission_probability=float(payload["emission_probability"]),
             source_file=str(payload["source_file"]),
             source_bar_index=int(payload["source_bar_index"]),
-            edit_distance_id=int(payload["edit_distance_id"]),
+            codebook_id=int(payload["codebook_id"]),
             kmeans_id=int(kmeans_id) if kmeans_id is not None else None,
             absolute_tokens=[int(x) for x in payload.get("absolute_tokens", [])],
             relative_tokens=[int(x) for x in payload.get("relative_tokens", [])],

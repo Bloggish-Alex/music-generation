@@ -28,7 +28,7 @@ log = logging.getLogger("bar_clustering")
 
 @dataclass(frozen=True)
 class GlobalCodebookConfig:
-    song_distance_threshold: float = 0.25
+    song_distance_threshold: float = 0.25 # used as threshold for edit distance
     song_max_clusters: int = 48
     codebook_size: int = 1024
     codebook_clustering_strategy: str = "default"
@@ -78,6 +78,15 @@ class CodebookBuildResult:
     reserved_rare_cluster_id: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class BarClusteringResult:
+    """Complete output of global codebook and symbol vocabulary construction."""
+
+    observation_vocab: ObservationVocab
+    global_codebook: Dict[int, CodebookEntry]
+    diagnostics: Dict[str, Any]
+
+
 class SongAgglomerativeClusterer:
     """Cluster bars inside one song with distance threshold plus max-cluster cap."""
 
@@ -85,6 +94,12 @@ class SongAgglomerativeClusterer:
         self.config = config
 
     def cluster(self, matrix: np.ndarray) -> SongClusterResult:
+        """
+        Cluster Edit Distance Matrix:
+            do "distance" criteria first, then "maxclust" if number of clusters is bigger than configured number
+
+        matrix: edit distance matrix
+        """
         if matrix.shape[0] <= 1:
             labels = [0 for _ in range(matrix.shape[0])]
             return SongClusterResult(labels, {
@@ -124,6 +139,11 @@ class SongAgglomerativeClusterer:
         })
 
     def _compact(self, labels: Sequence[int]) -> List[int]:
+        """
+        Compact labels into ordered list:
+            In: [9, 4, 7 ...]
+            Out: [0, 1, 2 ...]
+        """
         mapping: Dict[int, int] = {}
         compact: List[int] = []
         for label in labels:
@@ -329,7 +349,6 @@ class FilteredRareBarCodebookClusteringStrategy(CodebookClusteringStrategy):
         codebook, diagnostics = clusterer._build_codebook_from_bars(
             frequent_bars,
             codebook_size=main_size,
-            force_fixed_count=True,
         )
         rare_representative = self._rare_representative(clusterer, rare_bars)
         if rare_representative is not None:
@@ -411,11 +430,21 @@ class GlobalCodebookClusterer:
         distance_calculator: EditDistanceCalculator,
     ) -> "GlobalCodebookClusterer":
         section = ConfigView(config).section("global_agglomerative_clustering")
+        codebook_clustering_strategy = str(section.get("codebook_clustering_strategy", "default"))
+        if (
+            distance_calculator.config.backend == "autoencoder_edit_distance"
+            and codebook_clustering_strategy == "filtered_rare_bar"
+        ):
+            raise ValueError(
+                "autoencoder_edit_distance cannot be used with filtered_rare_bar. "
+                "The rare bucket bypasses autoencoder edit-distance clustering; "
+                "set global_agglomerative_clustering.codebook_clustering_strategy to 'default'."
+            )
         return cls(GlobalCodebookConfig(
             song_distance_threshold=float(section.get("song_distance_threshold", 0.25)),
             song_max_clusters=int(section.get("song_max_clusters", 48)),
             codebook_size=int(section.get("codebook_size", 1024)),
-            codebook_clustering_strategy=str(section.get("codebook_clustering_strategy", "default")),
+            codebook_clustering_strategy=codebook_clustering_strategy,
             codebook_filter_min_bar_count=int(section.get("codebook_filter_min_bar_count", 1)),
             codebook_distance_threshold=cls._optional_float(section.get("codebook_distance_threshold")),
             assignment_distance_threshold=cls._optional_float(section.get("assignment_distance_threshold")),
@@ -434,11 +463,15 @@ class GlobalCodebookClusterer:
         song_diagnostics: List[Dict[str, Any]] = []
         matrix_analyzer = EditDistanceDiagnosticsAnalyzer(self.distance_calculator.config)
         song_clusterer = SongAgglomerativeClusterer(self.config)
+
         for song in songs:
             if not song.bars:
                 continue
+
             matrix = self.distance_calculator.build_matrix(song.bars)
+
             log.info("Built song edit-distance matrix: song=%s shape=%s", song.song_id, matrix.shape)
+
             cluster_result = song_clusterer.cluster(matrix)
             labels = cluster_result.labels
             medoid_indices = self._medoids(matrix, labels)
@@ -461,6 +494,7 @@ class GlobalCodebookClusterer:
                     represented_bar_count=int(label_counts[int(local_label)]),
                     member_bar_ids=tuple(id(song.bars[index]) for index in member_indices),
                 ))
+
             song_diagnostics.append({
                 "song_id": song.song_id,
                 "file_path": song.file_path,
@@ -484,36 +518,52 @@ class GlobalCodebookClusterer:
                     for label, index in sorted(medoid_indices.items())
                 ],
             })
+
+        # medoids contains medoid bar and member bars of all songs
         build_result = CodebookClusteringStrategyFactory().from_config(self.config).build(self, medoids, songs)
-        codebook = build_result.codebook
+        codebook = build_result.codebook # codebook contains a list of bars which are medoids
+
         codebook_matrix_diagnostics = build_result.diagnostics
-        assignment_records = self._assign_nearest_edit_distance_id(
+
+        # assign nearest global codebook id onto each bar
+        assignment_records = self._assign_nearest_codebook_id(
             songs,
             codebook,
             forced_rare_bar_ids=build_result.forced_rare_bar_ids or set(),
             reserved_rare_cluster_id=build_result.reserved_rare_cluster_id,
         )
+
+        # collect rare buckets, those which appears once or twice but clustered as one cluster
         preserve_ids = (
             set(range(int(build_result.reserved_rare_cluster_id) + 1))
             if build_result.reserved_rare_cluster_id is not None
             else set()
         )
+
+        """
+        To handle a case that sometimes several bars may have the same relative tokens but labelled as different clusters
+        Merge the data, and returns id mapping, which is a dict: dict[old_codebook_id, new_codebook_id].
+        The new id needs to update into assignments as well.
+        """
         deduplication_diagnostics, id_mapping = self._deduplicate_codebook_by_relative_tokens(
             songs,
             codebook,
             preserve_ids=preserve_ids,
         )
+        # update codebook_id by id_mapping
         self._remap_assignment_records(assignment_records, id_mapping)
         self.codebook = list(codebook)
+
         log.info(
-            "Built global edit-distance codebook: medoids=%d codebook_size=%d assignments=%d forced_rare_assignments=%d duplicate_entries=%d",
+            "Built global codebook: medoids=%d codebook_size=%d assignments=%d forced_rare_assignments=%d duplicate_entries=%d",
             len(medoids),
             len(codebook),
             len(assignment_records),
             sum(1 for record in assignment_records if record.get("assignment_policy") == "forced_rare_cluster"),
             deduplication_diagnostics["duplicate_entry_count"],
         )
-        counts = Counter(bar.edit_distance_id for song in songs for bar in song.bars)
+
+        counts = Counter(bar.codebook_id for song in songs for bar in song.bars)
         self.diagnostics = {
             "backend": "global_agglomerative",
             "config": asdict(self.config),
@@ -534,7 +584,7 @@ class GlobalCodebookClusterer:
             "song_diagnostics": song_diagnostics,
             "codebook": [
                 {
-                    "edit_distance_id": int(index),
+                    "codebook_id": int(index),
                     "source_song": bar.song_id,
                     "source_bar_index": int(bar.bar_index),
                     "token_strategy": self.distance_calculator.config.token_strategy,
@@ -547,52 +597,14 @@ class GlobalCodebookClusterer:
             ],
         }
 
-    def _cluster_by_count(self, matrix: np.ndarray, count: int, method: str) -> List[int]:
-        if matrix.shape[0] <= 1:
-            return [0 for _ in range(matrix.shape[0])]
-        target = min(max(1, count), matrix.shape[0])
-        z_matrix = linkage(squareform(matrix, checks=False), method=method)
-        return self._compact(self._labels_from_linkage_exact_count(z_matrix, matrix.shape[0], target))
-
-    def _labels_from_linkage_exact_count(
-        self,
-        z_matrix: np.ndarray,
-        item_count: int,
-        target_count: int,
-    ) -> List[int]:
-        parent = list(range(item_count))
-        members: Dict[int, List[int]] = {index: [index] for index in range(item_count)}
-        next_cluster_id = item_count
-
-        def find(value: int) -> int:
-            while parent[value] != value:
-                parent[value] = parent[parent[value]]
-                value = parent[value]
-            return value
-
-        merge_count = max(0, item_count - target_count)
-        for left_raw, right_raw, _distance, _size in z_matrix[:merge_count]:
-            left_id = int(left_raw)
-            right_id = int(right_raw)
-            left_members = members.pop(left_id)
-            right_members = members.pop(right_id)
-            merged_members = left_members + right_members
-            parent.append(next_cluster_id)
-            for member in merged_members:
-                parent[find(member)] = next_cluster_id
-            members[next_cluster_id] = merged_members
-            next_cluster_id += 1
-
-        root_to_label: Dict[int, int] = {}
-        labels: List[int] = []
-        for item in range(item_count):
-            root = find(item)
-            if root not in root_to_label:
-                root_to_label[root] = len(root_to_label)
-            labels.append(root_to_label[root])
-        return labels
-
     def _cluster_codebook(self, matrix: np.ndarray, codebook_size: Optional[int] = None) -> tuple[List[int], Dict[str, Any]]:
+        """
+        Cluster codebook with specified max codebook size (number of clusters):
+            1. return clustered labels, if cluster count <= wanted codebook size
+            2. redo clustering with "maxclust" cap, force to reduce the cluster size, to be <= codebook size
+
+        Return (labels, diagnostics), e.g. ([1, 2,], {})
+        """
         target_size = int(codebook_size if codebook_size is not None else self.config.codebook_size)
         if matrix.shape[0] <= 1:
             return [0 for _ in range(matrix.shape[0])], {
@@ -601,7 +613,9 @@ class GlobalCodebookClusterer:
                 "final_cluster_count": int(matrix.shape[0]),
                 "max_clusters_applied": False,
             }
+
         z_matrix = linkage(squareform(matrix, checks=False), method=self.config.codebook_linkage)
+
         if self.config.codebook_distance_threshold is None:
             labels = self._compact(fcluster(
                 z_matrix,
@@ -609,13 +623,15 @@ class GlobalCodebookClusterer:
                 criterion="maxclust",
             ).tolist())
             return labels, {
-                "mode": "fixed_codebook_size",
+                "mode": "limited_codebook_size",
                 "threshold": None,
                 "threshold_cluster_count": None,
                 "final_cluster_count": len(set(map(int, labels))),
                 "max_clusters": target_size,
                 "max_clusters_applied": True,
             }
+
+        # calculation by distance
         threshold_labels = self._compact(fcluster(
             z_matrix,
             t=float(self.config.codebook_distance_threshold),
@@ -623,19 +639,23 @@ class GlobalCodebookClusterer:
         ).tolist())
         threshold_count = len(set(map(int, threshold_labels)))
         if threshold_count <= target_size:
+            # it is ok, even the size is smaller than what we wanted.
             return threshold_labels, {
-                "mode": "distance_threshold",
+                "mode": "distance_threshold_within_codebook_limit",
                 "threshold": self.config.codebook_distance_threshold,
                 "threshold_cluster_count": threshold_count,
                 "final_cluster_count": threshold_count,
                 "max_clusters": target_size,
                 "max_clusters_applied": False,
             }
+
+        # redo using maxclust cap, force the size to be equal or less than what we wanted
         capped_labels = self._compact(fcluster(
             z_matrix,
             t=min(max(1, target_size), matrix.shape[0]),
             criterion="maxclust",
         ).tolist())
+
         return capped_labels, {
             "mode": "distance_threshold_with_maxclust_cap",
             "threshold": self.config.codebook_distance_threshold,
@@ -649,30 +669,29 @@ class GlobalCodebookClusterer:
         self,
         bars: Sequence[BarRecord],
         codebook_size: Optional[int] = None,
-        force_fixed_count: bool = False,
     ) -> tuple[List[BarRecord], Dict[str, Any]]:
+        """
+        Build codebook from bars of all songs
+        """
         if not bars:
             return [], {}
+
+        # edit distance on medoids of all songs
         matrix = self.distance_calculator.build_matrix(bars)
+
         log.info("Built global medoid edit-distance matrix: shape=%s", matrix.shape)
-        if force_fixed_count:
-            target_size = int(codebook_size if codebook_size is not None else self.config.codebook_size)
-            labels = self._cluster_by_count(matrix, target_size, self.config.codebook_linkage)
-            cluster_diagnostics = {
-                "mode": "forced_fixed_count",
-                "final_cluster_count": len(set(map(int, labels))),
-                "max_clusters": min(max(1, target_size), matrix.shape[0]),
-                "max_clusters_applied": True,
-            }
-        else:
-            labels, cluster_diagnostics = self._cluster_codebook(matrix, codebook_size=codebook_size)
+
+        # ok, this is the final medoids by edit distance and hierarchical clustering
+        labels, cluster_diagnostics = self._cluster_codebook(matrix, codebook_size=codebook_size)
         medoid_indices = self._medoids(matrix, labels)
+
         diagnostics = EditDistanceDiagnosticsAnalyzer(self.distance_calculator.config).summarize(matrix)
         diagnostics["cluster_reduction"] = cluster_diagnostics
         diagnostics["selected_codebook_size"] = len(medoid_indices)
+
         return [bars[index] for _, index in sorted(medoid_indices.items())], diagnostics
 
-    def _assign_nearest_edit_distance_id(
+    def _assign_nearest_codebook_id(
         self,
         songs: Sequence[SongRecord],
         codebook: List[BarRecord],
@@ -684,7 +703,7 @@ class GlobalCodebookClusterer:
             return assignments
         for song in songs:
             for bar in song.bars:
-                assignment_policy = "nearest_edit_distance"
+                assignment_policy = "nearest_codebook"
                 distances = [self.distance_calculator.distance(bar, candidate) for candidate in codebook]
                 nearest_id = int(np.argmin(distances))
                 nearest_distance = float(distances[nearest_id])
@@ -701,12 +720,12 @@ class GlobalCodebookClusterer:
                     nearest_id = len(codebook) - 1
                     nearest_distance = 0.0
                     assignment_policy = "assignment_miss_expansion"
-                bar.edit_distance_id = nearest_id
+                bar.codebook_id = nearest_id
                 assignments.append({
                     "song_id": song.song_id,
                     "file_path": song.file_path,
                     "bar_index": int(bar.bar_index),
-                    "edit_distance_id": nearest_id,
+                    "codebook_id": nearest_id,
                     "nearest_distance": round(nearest_distance, 6),
                     "assignment_policy": assignment_policy,
                     "edit_distance_tokens": self.distance_calculator.tokens_for_bar(bar),
@@ -749,19 +768,19 @@ class GlobalCodebookClusterer:
             codebook[:] = canonical_entries
             for song in songs:
                 for bar in song.bars:
-                    if bar.edit_distance_id is not None:
-                        bar.edit_distance_id = id_mapping[int(bar.edit_distance_id)]
+                    if bar.codebook_id is not None:
+                        bar.codebook_id = id_mapping[int(bar.codebook_id)]
         return {
             "strategy": "relative_tokens",
-            "preserved_edit_distance_ids": sorted(int(item) for item in preserve_ids),
+            "preserved_codebook_ids": sorted(int(item) for item in preserve_ids),
             "before_size": len(id_mapping),
             "after_size": len(canonical_entries),
             "duplicate_group_count": len(duplicate_groups),
             "duplicate_entry_count": len(id_mapping) - len(canonical_entries),
             "largest_duplicate_groups": [
                 {
-                    "canonical_edit_distance_id": int(canonical_id),
-                    "duplicate_edit_distance_ids": [int(item) for item in duplicates[:30]],
+                    "canonical_codebook_id": int(canonical_id),
+                    "duplicate_codebook_ids": [int(item) for item in duplicates[:30]],
                     "duplicate_count": len(duplicates),
                     "relative_tokens": codebook[int(canonical_id)].tokens_for_edit_distance("relative"),
                 }
@@ -779,8 +798,8 @@ class GlobalCodebookClusterer:
         id_mapping: Dict[int, int],
     ) -> None:
         for assignment in assignments:
-            old_id = int(assignment["edit_distance_id"])
-            assignment["edit_distance_id"] = int(id_mapping.get(old_id, old_id))
+            old_id = int(assignment["codebook_id"])
+            assignment["codebook_id"] = int(id_mapping.get(old_id, old_id))
 
     def _medoids(self, matrix: np.ndarray, labels: Sequence[int]) -> Dict[int, int]:
         result: Dict[int, int] = {}
@@ -823,11 +842,13 @@ class KMeansFeatureClusterer:
 
     def assign(self, songs: Sequence[SongRecord]) -> None:
         bars = [bar for song in songs for bar in song.bars]
+
         if not self.config.enabled or not bars:
             for bar in bars:
                 bar.kmeans_id = None
             self.diagnostics = {"enabled": False}
             return
+
         vectors = np.asarray([bar.feature_vector for bar in bars], dtype=np.float64)
         n_clusters = min(self.config.n_clusters, len(bars))
         labels = KMeans(n_clusters=n_clusters, random_state=self.config.random_seed, n_init="auto").fit_predict(vectors)
@@ -861,6 +882,7 @@ class ObservationVocabBuilder:
         bars = [bar for song in songs for bar in song.bars]
         for bar in bars:
             bar.composite_key = self._observation_key(bar)
+
         unique_keys = sorted({str(bar.composite_key) for bar in bars})
         composite_to_observation = {key: index for index, key in enumerate(unique_keys)}
         observation_to_composite = {index: key for key, index in composite_to_observation.items()}
@@ -916,10 +938,10 @@ class ObservationVocabBuilder:
         return parts
 
     def _composite_key(self, bar: BarRecord) -> str:
-        edit_id = bar.edit_distance_id if bar.edit_distance_id is not None else -1
+        codebook_id = bar.codebook_id if bar.codebook_id is not None else -1
         if bar.kmeans_id is None:
-            return f"E{edit_id}"
-        return f"E{edit_id}_K{bar.kmeans_id}"
+            return f"C{codebook_id}"
+        return f"C{codebook_id}_K{bar.kmeans_id}"
 
     def _phrase_position(self, bar: BarRecord) -> int:
         modulo = max(1, int(self.config.position_modulo))
@@ -951,24 +973,31 @@ class ObservationVocabBuilder:
 
 
 class BarClusteringPipeline:
-    """Run edit-distance codebook, optional KMeans, and observation vocab."""
+    """Run global codebook construction, optional KMeans, and observation vocab."""
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.diagnostics: Dict[str, Any] = {}
-        self.edit_distance_codebook: Dict[int, CodebookEntry] = {}
         self.distance = EditDistanceCalculator.from_style_config(config)
 
-    def run(self, songs: Sequence[SongRecord]) -> ObservationVocab:
+    def run(self, songs: Sequence[SongRecord]) -> BarClusteringResult:
         self.distance.fit_corpus([bar for song in songs for bar in song.bars])
+
+        # codebook by edit distance and hierarchical clustering
         codebook = GlobalCodebookClusterer.from_style_config(self.config, self.distance)
         codebook.assign(songs)
+
         density_analyzer = TokenDensityAnalyzer.from_style_config(self.config)
+
+        # clustering by features, assign the kmeans_id on each bar.
+        # ??? the
         kmeans = KMeansFeatureClusterer.from_style_config(self.config)
         kmeans.assign(songs)
+
         vocab_builder = ObservationVocabBuilder.from_style_config(self.config)
         vocab = vocab_builder.assign(songs)
-        self.edit_distance_codebook = self._build_edit_distance_codebook(
+
+        global_codebook = self._build_global_codebook(
             songs,
             codebook.codebook,
             density_analyzer,
@@ -976,13 +1005,17 @@ class BarClusteringPipeline:
         self.diagnostics = {
             "edit_distance": codebook.diagnostics,
             "bar_autoencoder": self.distance.autoencoder.diagnostics,
-            "codebook_density": self._codebook_density_diagnostics(),
+            "codebook_density": self._codebook_density_diagnostics(global_codebook),
             "kmeans": kmeans.diagnostics,
             "observation_vocab": vocab_builder.diagnostics(songs, vocab),
         }
-        return vocab
+        return BarClusteringResult(
+            observation_vocab=vocab,
+            global_codebook=global_codebook,
+            diagnostics=self.diagnostics,
+        )
 
-    def _build_edit_distance_codebook(
+    def _build_global_codebook(
         self,
         songs: Sequence[SongRecord],
         codebook: Sequence[BarRecord],
@@ -991,16 +1024,16 @@ class BarClusteringPipeline:
         candidates_by_label: Dict[int, List[CodebookCandidate]] = defaultdict(list)
         for song in songs:
             for bar in song.bars:
-                if bar.edit_distance_id is None:
+                if bar.codebook_id is None:
                     continue
-                candidates_by_label[int(bar.edit_distance_id)].append(
+                candidates_by_label[int(bar.codebook_id)].append(
                     self._candidate_for_bar(bar, density_analyzer)
                 )
         entries: Dict[int, CodebookEntry] = {}
         for index, bar in enumerate(codebook):
             relative_tokens = bar.tokens_for_edit_distance("relative")
             entries[int(index)] = CodebookEntry(
-                edit_distance_id=int(index),
+                codebook_id=int(index),
                 source_song=bar.song_id,
                 source_file=bar.file_path,
                 source_bar_index=int(bar.bar_index),
@@ -1038,8 +1071,8 @@ class BarClusteringPipeline:
             return 0.0
         return float(int(bar.bar_index) / max(1, int(bar.source_bar_count) - 1))
 
-    def _codebook_density_diagnostics(self) -> Dict[str, Any]:
-        entries = list(self.edit_distance_codebook.values())
+    def _codebook_density_diagnostics(self, global_codebook: Dict[int, CodebookEntry]) -> Dict[str, Any]:
+        entries = list(global_codebook.values())
         sparse = [entry for entry in entries if entry.density is not None and entry.density.is_sparse]
         semi_sparse = [
             entry
@@ -1050,15 +1083,15 @@ class BarClusteringPipeline:
             "codebook_size": len(entries),
             "sparse_count": len(sparse),
             "semi_sparse_count": len(semi_sparse),
-            "sparse_edit_distance_ids": [entry.edit_distance_id for entry in sparse],
-            "semi_sparse_edit_distance_ids": [entry.edit_distance_id for entry in semi_sparse],
+            "sparse_codebook_ids": [entry.codebook_id for entry in sparse],
+            "semi_sparse_codebook_ids": [entry.codebook_id for entry in semi_sparse],
             "candidate_counts": {
-                str(entry.edit_distance_id): len(entry.candidates)
+                str(entry.codebook_id): len(entry.candidates)
                 for entry in entries
             },
             "entries": [
                 {
-                    "edit_distance_id": entry.edit_distance_id,
+                    "codebook_id": entry.codebook_id,
                     "source_song": entry.source_song,
                     "source_file": entry.source_file,
                     "source_bar_index": entry.source_bar_index,
@@ -1202,14 +1235,21 @@ class BarClusteringCLI:
         payload = json.loads(args.songs.read_text(encoding="utf-8"))
         songs = [SongRecord.from_dict(item) for item in payload.get("songs", [])]
         pipeline = BarClusteringPipeline(config)
-        vocab = pipeline.run(songs)
+        result = pipeline.run(songs)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
-            json.dumps({"songs": [song.to_dict() for song in songs], "observation_vocab": vocab.to_dict()}, indent=2),
+            json.dumps({
+                "songs": [song.to_dict() for song in songs],
+                "observation_vocab": result.observation_vocab.to_dict(),
+                "global_codebook": {
+                    str(key): value.to_dict()
+                    for key, value in result.global_codebook.items()
+                },
+            }, indent=2),
             encoding="utf-8",
         )
         if args.diagnostics_output:
-            args.diagnostics_output.write_text(json.dumps(pipeline.diagnostics, indent=2), encoding="utf-8")
+            args.diagnostics_output.write_text(json.dumps(result.diagnostics, indent=2), encoding="utf-8")
         print(f"Wrote clustered bars -> {args.output}")
 
 

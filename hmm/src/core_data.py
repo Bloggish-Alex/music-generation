@@ -49,7 +49,7 @@ class BarRecord:
     sharing_score: float = 1.0
     feature_vector: List[float] = field(default_factory=list)
     pitch_intervals: List[int] = field(default_factory=list)
-    edit_distance_id: Optional[int] = None
+    codebook_id: Optional[int] = None
     kmeans_id: Optional[int] = None
     composite_key: Optional[str] = None
     observation_id: Optional[int] = None
@@ -62,7 +62,7 @@ class BarRecord:
 
     def composite_parts(self) -> Dict[str, Optional[int]]:
         return {
-            "edit_distance_id": self.edit_distance_id,
+            "codebook_id": self.codebook_id,
             "kmeans_id": self.kmeans_id,
         }
 

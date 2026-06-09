@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from music21 import chord, converter, note, stream
 
+from bar_features import BarFeatureExtractor
 from config_loader import ConfigLoader, ConfigView
 from core_data import BarRecord, NoteRecord, SongRecord
 from diagnostics import TrainingDiagnostics
@@ -43,6 +44,10 @@ class InputParser:
     def __init__(self, config: InputParserConfig) -> None:
         self.config = config
         self.failed_files: List[Dict[str, Any]] = []
+        self.feature_extractor = BarFeatureExtractor(
+            rest_token=config.rest_token,
+            sustain_token=config.sustain_token,
+        )
 
     @classmethod
     def from_style_config(cls, config: Dict[str, Any]) -> "InputParser":
@@ -192,10 +197,7 @@ class InputParser:
     def _preprocess_bar(self, bar: BarRecord) -> None:
         bar.absolute_tokens = self._tokenize_bar(bar)
         bar.relative_tokens = self._relative_tokens(bar.absolute_tokens)
-        bar.token_variance = self._token_variance(bar.relative_tokens)
-        bar.sharing_score = self._sharing_score(bar.token_variance)
-        bar.pitch_intervals = self._pitch_intervals(bar)
-        bar.feature_vector = self._feature_vector(bar)
+        self.feature_extractor.apply(bar)
 
     def _tokenize_bar(self, bar: BarRecord) -> List[int]:
         slot_len = self.config.bar_length_ql / self.config.steps_per_bar
@@ -228,52 +230,10 @@ class InputParser:
         root = min(pitches)
         return [token - root if token >= 0 else token for token in tokens]
 
-    def _token_variance(self, tokens: Sequence[int]) -> float:
-        values = [float(token) for token in tokens if int(token) >= 0]
-        if not values:
-            return 0.0
-        mean = sum(values) / len(values)
-        return float(sum((value - mean) ** 2 for value in values) / len(values))
-
-    def _sharing_score(self, variance: float) -> float:
-        return float(1.0 / (1.0 + max(0.0, variance)))
-
     def _quantize_slot(self, onset_ql: float, slot_len: float) -> int:
         if self.config.quantize_policy == "floor":
             return int(math.floor(onset_ql / slot_len))
         return int(round(onset_ql / slot_len))
-
-    def _pitch_intervals(self, bar: BarRecord) -> List[int]:
-        pitches = [note_record.pitch for note_record in sorted(bar.notes, key=lambda n: n.onset_ql)]
-        return [b - a for a, b in zip(pitches, pitches[1:])]
-
-    def _feature_vector(self, bar: BarRecord) -> List[float]:
-        notes = bar.notes
-        if not notes:
-            return [0.0] * 8
-        durations = [note_record.duration_ql for note_record in notes]
-        pitches = [note_record.pitch for note_record in notes]
-        density = len(notes) / max(1e-9, bar.bar_length_ql)
-        mean_duration = sum(durations) / len(durations)
-        duration_var = sum((x - mean_duration) ** 2 for x in durations) / len(durations)
-        short_ratio = sum(1 for x in durations if x < 0.5) / len(durations)
-        silence_ratio = max(0.0, 1.0 - sum(durations) / max(1e-9, bar.bar_length_ql))
-        pitch_mean = sum(pitches) / len(pitches)
-        pitch_range = max(pitches) - min(pitches)
-        interval_mean = (
-            sum(abs(x) for x in bar.pitch_intervals) / len(bar.pitch_intervals)
-            if bar.pitch_intervals else 0.0
-        )
-        return [
-            float(density),
-            float(mean_duration),
-            float(duration_var),
-            float(short_ratio),
-            float(silence_ratio),
-            float(pitch_mean),
-            float(pitch_range),
-            float(interval_mean),
-        ]
 
 
 class InputParserCLI:
