@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
+from architecture import EncoderModel, SymbolVocabulary
 from core_data import BarRecord, ObservationVocab, SongRecord
 from form_hmm import LeftToRightFormHMM
 from generation_data import CodebookEntry
@@ -52,9 +53,10 @@ class ModelBundle:
     observation_vocab: ObservationVocab
     form_models: Dict[str, LeftToRightFormHMM]
     form_templates: Dict[str, Any]
-    edit_distance_codebook: Dict[int, CodebookEntry]
+    global_codebook: Dict[int, CodebookEntry]
     observation_to_bars: Dict[int, List[BarRecord]]
     training_summary: Dict[str, Any]
+    encoder_model: EncoderModel | None = None
 
     @classmethod
     def from_training(
@@ -65,7 +67,8 @@ class ModelBundle:
         form_models: Dict[str, LeftToRightFormHMM],
         training_summary: Dict[str, Any],
         form_templates: Dict[str, Any] | None = None,
-        edit_distance_codebook: Dict[int, CodebookEntry] | None = None,
+        global_codebook: Dict[int, CodebookEntry] | None = None,
+        encoder_model: EncoderModel | None = None,
     ) -> "ModelBundle":
         pools = ObservationBarPoolBuilder().build(songs)
         templates = form_templates or {
@@ -80,15 +83,32 @@ class ModelBundle:
             }
             for name, model in form_models.items()
         }
+        codebook = global_codebook or {}
+        encoder_model = encoder_model or EncoderModel.from_legacy(
+            codebook,
+            vocab,
+            metadata={
+                "source": "legacy_bar_clustering",
+                "symbol_id_field": "observation_id",
+                "codebook_id_field": "codebook_id",
+            },
+        )
         return cls(
             config,
             vocab,
             form_models,
             templates,
-            edit_distance_codebook or {},
+            codebook,
             dict(pools),
             training_summary,
+            encoder_model,
         )
+
+    @property
+    def symbol_vocabulary(self) -> SymbolVocabulary:
+        if self.encoder_model is not None:
+            return self.encoder_model.vocabulary
+        return SymbolVocabulary.from_observation_vocab(self.observation_vocab)
 
     def save(self, model_dir: str | Path) -> None:
         model_dir = Path(model_dir)
@@ -98,9 +118,18 @@ class ModelBundle:
             "observation_vocab": self.observation_vocab.to_dict(),
             "form_models": {name: model.to_dict() for name, model in self.form_models.items()},
             "form_templates": self.form_templates,
-            "edit_distance_codebook": {
-                str(key): value.to_dict() for key, value in self.edit_distance_codebook.items()
+            "global_codebook": {
+                str(key): value.to_dict() for key, value in self.global_codebook.items()
             },
+            "encoder_model": (
+                self.encoder_model.to_dict()
+                if self.encoder_model is not None
+                else EncoderModel.from_legacy(
+                    self.global_codebook,
+                    self.observation_vocab,
+                    metadata={"source": "legacy_save_adapter"},
+                ).to_dict()
+            ),
             "observation_to_bars": {
                 str(obs): [bar.to_dict() for bar in bars]
                 for obs, bars in self.observation_to_bars.items()
@@ -112,21 +141,34 @@ class ModelBundle:
     @classmethod
     def load(cls, model_dir: str | Path) -> "ModelBundle":
         payload = json.loads((Path(model_dir) / "model_bundle.json").read_text(encoding="utf-8"))
+        observation_vocab = ObservationVocab.from_dict(payload["observation_vocab"])
+        global_codebook = {
+            int(key): CodebookEntry.from_dict({**value, "codebook_id": int(key)})
+            for key, value in payload.get("global_codebook", {}).items()
+        }
+        encoder_payload = payload.get("encoder_model")
+        encoder_model = (
+            EncoderModel.from_dict(encoder_payload)
+            if encoder_payload is not None
+            else EncoderModel.from_legacy(
+                global_codebook,
+                observation_vocab,
+                metadata={"source": "legacy_load_adapter"},
+            )
+        )
         return cls(
             config=payload["config"],
-            observation_vocab=ObservationVocab.from_dict(payload["observation_vocab"]),
+            observation_vocab=observation_vocab,
             form_models={
                 name: LeftToRightFormHMM.from_dict(model_payload)
                 for name, model_payload in payload.get("form_models", {}).items()
             },
             form_templates=payload.get("form_templates", {}),
-            edit_distance_codebook={
-                int(key): CodebookEntry.from_dict({**value, "edit_distance_id": int(key)})
-                for key, value in payload.get("edit_distance_codebook", {}).items()
-            },
+            global_codebook=global_codebook,
             observation_to_bars={
                 int(obs): [BarRecord.from_dict(item) for item in bars]
                 for obs, bars in payload.get("observation_to_bars", {}).items()
             },
             training_summary=payload.get("training_summary", {}),
+            encoder_model=encoder_model,
         )

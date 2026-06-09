@@ -758,10 +758,10 @@ class RareBarSelector:
             for index, probability in zip(candidate_indices, probabilities):
                 full_probabilities[int(index)] = float(probability)
         selected = entry.candidates[selected_index]
-        selected_entry = self._entry_from_candidate(entry.edit_distance_id, selected, entry.candidates)
+        selected_entry = self._entry_from_candidate(entry.codebook_id, selected, entry.candidates)
         return RareBarSelection(entry=selected_entry, diagnostics={
             "used": True,
-            "edit_distance_id": int(entry.edit_distance_id),
+            "codebook_id": int(entry.codebook_id),
             "candidate_count": len(entry.candidates),
             "sampling_candidate_count": int(len(candidate_indices)),
             "top_k": int(self.config.top_k),
@@ -880,12 +880,12 @@ class RareBarSelector:
 
     def _entry_from_candidate(
         self,
-        edit_distance_id: int,
+        codebook_id: int,
         candidate: CodebookCandidate,
         candidates: Sequence[CodebookCandidate],
     ) -> CodebookEntry:
         return CodebookEntry(
-            edit_distance_id=int(edit_distance_id),
+            codebook_id=int(codebook_id),
             source_song=candidate.source_song,
             source_file=candidate.source_file,
             source_bar_index=candidate.source_bar_index,
@@ -920,9 +920,9 @@ class RareBarSelector:
 class HarmonicEngine:
     """High-level facade that plans harmony and realizes generated bar IDs."""
 
-    def __init__(self, config: Dict[str, Any], edit_distance_codebook: Dict[int, CodebookEntry]) -> None:
+    def __init__(self, config: Dict[str, Any], global_codebook: Dict[int, CodebookEntry]) -> None:
         self.config = config
-        self.edit_distance_codebook = edit_distance_codebook
+        self.global_codebook = global_codebook
         self.progression = HarmonyProgressionPlanner.from_style_config(config)
         self.harmonizer = TokenHarmonizer.from_style_config(config)
         self.rare_selector = RareBarSelector(
@@ -939,7 +939,7 @@ class HarmonicEngine:
         section_lengths = {section.name: int(section.bars) for section in generation.section_plan}
         rng = np.random.default_rng(generation.seed)
         for sampled, harmony in zip(generation.sampled_bars, harmony_plan):
-            edit_distance_id = int(sampled.edit_distance_id)
+            codebook_id = int(sampled.codebook_id)
             codebook_entry = self._codebook_entry_for_sampled_bar(sampled)
             selection = self.rare_selector.select(
                 codebook_entry,
@@ -955,7 +955,7 @@ class HarmonicEngine:
                 "section_local_index": int(sampled.section_local_index),
                 "hidden_state": int(sampled.hidden_state),
                 "observation_id": int(sampled.observation_id),
-                "edit_distance_id": edit_distance_id,
+                "codebook_id": codebook_id,
                 "harmony_degree": harmony.degree,
                 **selection.diagnostics,
             })
@@ -1013,15 +1013,15 @@ class HarmonicEngine:
         return counts
 
     def _codebook_entry_for_sampled_bar(self, sampled: SampledBar) -> CodebookEntry:
-        edit_distance_id = int(sampled.edit_distance_id)
-        codebook_entry = self.edit_distance_codebook.get(edit_distance_id)
+        codebook_id = int(sampled.codebook_id)
+        codebook_entry = self.global_codebook.get(codebook_id)
         if codebook_entry is not None:
             return codebook_entry
-        self.missing_codebook_ids.append(edit_distance_id)
+        self.missing_codebook_ids.append(codebook_id)
         relative_tokens = [int(token) for token in sampled.relative_tokens]
         token_variance = self._token_variance(relative_tokens)
         return CodebookEntry(
-            edit_distance_id=edit_distance_id,
+            codebook_id=codebook_id,
             source_song=None,
             source_file=sampled.source_file,
             source_bar_index=int(sampled.source_bar_index),
@@ -1062,7 +1062,7 @@ class HarmonicEngineCLI:
         config = HarmonicCliOverrides.from_args(args).apply(ConfigLoader().load(args.config))
         generation = GenerationResult.from_dict(json.loads(args.generation_json.read_text(encoding="utf-8")))
         codebook = {
-            int(key): CodebookEntry.from_dict({**value, "edit_distance_id": int(key)})
+            int(key): CodebookEntry.from_dict({**value, "codebook_id": int(key)})
             for key, value in json.loads(args.codebook_json.read_text(encoding="utf-8")).items()
         }
         engine = HarmonicEngine(config, codebook)

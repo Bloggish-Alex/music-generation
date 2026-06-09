@@ -19,6 +19,33 @@ grid_tokenizer:
   quantize_policy: nearest
   min_overlap_fraction: 0.05
 
+encoder:
+  backend: vae_latent  # legacy or vae_latent
+
+vae_encoder:
+  steps_per_bar: 16
+  hidden_dim: 32
+  latent_dim: 8
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.001
+  beta_kl: 0.001
+  kl_warmup_epochs: 10
+  pitch_weight: 1.0
+  note_drop_prob: 0.15
+  sustain_fill_prob: 0.10
+  drop_to_rest_prob: 0.5
+  ornament_pitch_radius: 2
+  pitch_scale: 24.0
+  random_seed: 42
+  device: cpu
+  clustering:
+    method: kmeans
+    n_clusters: 192
+    distance_threshold: 1.0
+    linkage_method: average
+    random_seed: 42
+
 distance_matrix:
   backend: autoencoder_edit_distance  # token, multi_channel, or autoencoder_edit_distance
   # If gamma is null, the builder estimates sigma from the median non-zero
@@ -73,7 +100,7 @@ bar_clustering:
 
 kmeans_clustering:
   enabled: true
-  n_clusters: 16
+  n_clusters: 64
   random_seed: 42
 
 observation_vocab:
@@ -109,17 +136,17 @@ global_agglomerative_clustering:
   # while giving all songs the same bar-label vocabulary for HMM training.
   song_distance_threshold: 0.25
   song_max_clusters: 48
-  codebook_size: 384
+  codebook_size: 64
   codebook_clustering_strategy: default  # default or filtered_rare_bar
   codebook_filter_min_bar_count: 3
   # Build the global codebook by distance first. Fixed-size maxclust alone can
   # merge unrelated medoids, then assignment collapses many bars into one label.
-  codebook_distance_threshold: 0.35
+  codebook_distance_threshold: 0.5
   assignment_distance_threshold: 0.35
-  expand_codebook_on_assignment_miss: false  # valid only when codebook_clustering_strategy is default
+  expand_codebook_on_assignment_miss: true  # valid only when codebook_clustering_strategy is default
   song_linkage: average
   codebook_linkage: average
-  criterion: distance
+  criterion: distance # comment: useless, code always do distance first and then check if max clusters satisfied
   min_clusters_warn: 3
   max_clusters_warn_fraction: 0.6
 
@@ -276,7 +303,7 @@ harmonic_engine:
   fallback_policy: raw
   rare_bar_selector:
     enabled: true
-    min_candidates: 100
+    min_candidates: 16
     harmony_weight: 1.0
     state_weight: 1.0
     density_weight: 2.0
@@ -292,7 +319,7 @@ harmonic_render:
   tempo: 120
   time_signature: 4/4
   velocity: 72
-  track_mode: split_by_pitch  # single or split_by_pitch
+  track_mode: single  # single or split_by_pitch
   voice_sharing_enabled: false
   voice_sharing_threshold: 0.8
   tracks:
