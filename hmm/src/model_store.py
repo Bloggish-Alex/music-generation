@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Sequence
 
 from architecture import EncoderModel, SymbolVocabulary
 from core_data import BarRecord, ObservationVocab, SongRecord
-from form_hmm import LeftToRightFormHMM
+from candidate_selector import CandidateSelectorModel
+from form_hmm import ExplicitDurationFormHSMM, LeftToRightFormHMM
 from generation_data import CodebookEntry
 
 
@@ -51,12 +52,13 @@ class ModelBundle:
 
     config: Dict[str, Any]
     observation_vocab: ObservationVocab
-    form_models: Dict[str, LeftToRightFormHMM]
+    form_models: Dict[str, Any]
     form_templates: Dict[str, Any]
     global_codebook: Dict[int, CodebookEntry]
     observation_to_bars: Dict[int, List[BarRecord]]
     training_summary: Dict[str, Any]
     encoder_model: EncoderModel | None = None
+    candidate_selector_model: CandidateSelectorModel | None = None
 
     @classmethod
     def from_training(
@@ -64,11 +66,12 @@ class ModelBundle:
         config: Dict[str, Any],
         songs: Sequence[SongRecord],
         vocab: ObservationVocab,
-        form_models: Dict[str, LeftToRightFormHMM],
+        form_models: Dict[str, Any],
         training_summary: Dict[str, Any],
         form_templates: Dict[str, Any] | None = None,
         global_codebook: Dict[int, CodebookEntry] | None = None,
         encoder_model: EncoderModel | None = None,
+        candidate_selector_model: CandidateSelectorModel | None = None,
     ) -> "ModelBundle":
         pools = ObservationBarPoolBuilder().build(songs)
         templates = form_templates or {
@@ -102,6 +105,7 @@ class ModelBundle:
             dict(pools),
             training_summary,
             encoder_model,
+            candidate_selector_model,
         )
 
     @property
@@ -129,6 +133,11 @@ class ModelBundle:
                     self.observation_vocab,
                     metadata={"source": "legacy_save_adapter"},
                 ).to_dict()
+            ),
+            "candidate_selector_model": (
+                self.candidate_selector_model.to_dict()
+                if self.candidate_selector_model is not None
+                else None
             ),
             "observation_to_bars": {
                 str(obs): [bar.to_dict() for bar in bars]
@@ -160,7 +169,7 @@ class ModelBundle:
             config=payload["config"],
             observation_vocab=observation_vocab,
             form_models={
-                name: LeftToRightFormHMM.from_dict(model_payload)
+                name: load_form_sequence_model(model_payload)
                 for name, model_payload in payload.get("form_models", {}).items()
             },
             form_templates=payload.get("form_templates", {}),
@@ -171,4 +180,14 @@ class ModelBundle:
             },
             training_summary=payload.get("training_summary", {}),
             encoder_model=encoder_model,
+            candidate_selector_model=CandidateSelectorModel.from_dict(payload.get("candidate_selector_model")),
         )
+
+
+def load_form_sequence_model(payload: Dict[str, Any]) -> Any:
+    model_type = str(payload.get("model_type", "left_to_right_hmm"))
+    if model_type == "explicit_duration_hsmm":
+        return ExplicitDurationFormHSMM.from_dict(payload)
+    if model_type == "left_to_right_hmm":
+        return LeftToRightFormHMM.from_dict(payload)
+    raise ValueError(f"Unsupported form sequence model type: {model_type}")

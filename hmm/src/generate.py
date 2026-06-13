@@ -12,12 +12,13 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from architecture import DecodeContext
+from candidate_selector import CandidateSelectionContext, LearnedCandidateSelector
 from config_loader import ConfigLoader, ConfigView
 from core_data import BarRecord
 from decoder import SectionPlanBuilder
 from diagnostics import GenerationDiagnostics
-from generation_data import GenerationResult, SampledBar, SectionPlanItem
-from harmonic_engine import HarmonicCliOverrides
+from generation_data import CodebookCandidate, GenerationResult, HarmonyBarPlan, SampledBar, SectionPlanItem
+from harmonic_engine import HarmonicCliOverrides, HarmonyProgressionPlanner
 from model_store import ModelBundle
 from renderer import HarmonicPhysicalRenderer
 
@@ -36,13 +37,27 @@ class FormDrivenGenerator:
         rng = np.random.default_rng(seed)
         model = self.bundle.form_models[form_name]
         plan = SectionPlanBuilder().build(self.bundle, form_name)
+        harmony_plan = HarmonyProgressionPlanner.from_style_config(self.config).plan(plan, seed)
+        self.diagnostics.record_stage("decoder_model", {
+            "form": form_name,
+            "model_type": str(getattr(model, "diagnostics", {}).get("model_type", model.__class__.__name__)),
+            "state_count": int(getattr(model, "n_states", len(plan))),
+            "observation_count": int(getattr(model, "n_observations", 0)),
+            "uses_explicit_duration": hasattr(model, "durationprob"),
+            "section_lengths": list(getattr(model, "section_lengths", [])),
+            "duration_mode_by_state": list(
+                getattr(model, "diagnostics", {}).get("duration_mode_by_state", [])
+            ),
+        })
         self.diagnostics.record_section_plan([section.to_dict() for section in plan])
         sampled = []
         sampled_by_section: Dict[str, List[SampledBar]] = {}
+        previous_candidate: Optional[CodebookCandidate] = None
         for section in plan:
             state_id = int(section.state_id)
             section_events: List[SampledBar] = []
             for local_index in range(int(section.bars)):
+                harmony = harmony_plan[len(sampled)]
                 event = self._source_reuse_event(
                     model,
                     section,
@@ -54,11 +69,23 @@ class FormDrivenGenerator:
                 if event is not None:
                     sampled.append(event)
                     section_events.append(event)
+                    previous_candidate = self._candidate_from_sampled_event(event)
                     self.diagnostics.record_sampled_bar(event.to_dict())
                     continue
-                event = self._sample_event(model, state_id, section, local_index, len(sampled), rng)
+                event, selected_candidate = self._sample_event(
+                    model,
+                    state_id,
+                    section,
+                    local_index,
+                    len(sampled),
+                    harmony,
+                    int(section.bars),
+                    previous_candidate,
+                    rng,
+                )
                 sampled.append(event)
                 section_events.append(event)
+                previous_candidate = selected_candidate or self._candidate_from_sampled_event(event)
                 self.diagnostics.record_sampled_bar(event.to_dict())
             sampled_by_section[section.name] = section_events
         return GenerationResult(
@@ -75,8 +102,24 @@ class FormDrivenGenerator:
         section: SectionPlanItem,
         local_index: int,
         output_bar_index: int,
+        harmony: HarmonyBarPlan,
+        section_length: int,
+        previous_candidate: Optional[CodebookCandidate],
         rng: np.random.Generator,
-    ) -> SampledBar:
+    ) -> tuple[SampledBar, Optional[CodebookCandidate]]:
+        joint = self._joint_sample_event(
+            model,
+            state_id,
+            section,
+            local_index,
+            output_bar_index,
+            harmony,
+            section_length,
+            previous_candidate,
+            rng,
+        )
+        if joint is not None:
+            return joint
         observation_id, emission_prob, sampling_policy = self._sample_observation(
             model,
             state_id,
@@ -99,6 +142,7 @@ class FormDrivenGenerator:
             kmeans_id=selected_bar.kmeans_id,
             absolute_tokens=list(selected_bar.absolute_tokens),
             relative_tokens=list(selected_bar.relative_tokens),
+            selection_mode="observation_sampled_bar",
         )
         self.diagnostics.append_event("observation_position_sampling", {
             "output_bar_index": int(output_bar_index),
@@ -109,7 +153,154 @@ class FormDrivenGenerator:
             "composite_key": composite,
             **sampling_policy,
         })
-        return event
+        return event, self._candidate_from_sampled_event(event)
+
+    def _joint_sample_event(
+        self,
+        model: Any,
+        state_id: int,
+        section: SectionPlanItem,
+        local_index: int,
+        output_bar_index: int,
+        harmony: HarmonyBarPlan,
+        section_length: int,
+        previous_candidate: Optional[CodebookCandidate],
+        rng: np.random.Generator,
+    ) -> Optional[tuple[SampledBar, Optional[CodebookCandidate]]]:
+        if self.bundle.candidate_selector_model is None or self.bundle.encoder_model is None:
+            return None
+        encoder_backend = self.bundle.encoder_model.metadata.get("backend")
+        if encoder_backend != "vae_latent":
+            return None
+        selector = LearnedCandidateSelector(
+            self.config,
+            self.bundle.candidate_selector_model,
+            mode=str(self.config.get("harmonic_engine", {}).get("mode", "major")),
+        )
+        if (
+            not selector.config.enabled
+            or selector.config.backend != "learned_ranker"
+            or selector.config.selection_stage != "joint"
+        ):
+            return None
+        probs = np.asarray(model.emissionprob[int(state_id)], dtype=np.float64)
+        top_k = max(1, int(selector.config.observation_top_k))
+        observation_indices = np.array(
+            sorted(
+                np.argpartition(probs, -min(top_k, len(probs)))[-min(top_k, len(probs)):],
+                key=lambda index: float(probs[int(index)]),
+                reverse=True,
+            ),
+            dtype=np.int64,
+        )
+        observation_entries = []
+        for observation_id in observation_indices:
+            obs = int(observation_id)
+            try:
+                codebook_id = self.bundle.symbol_vocabulary.codebook_id_for(obs)
+                entry = self.bundle.encoder_model.codebook.entries[int(codebook_id)]
+                composite = self.bundle.symbol_vocabulary.descriptor_key_for(obs)
+            except KeyError:
+                continue
+            observation_entries.append((obs, float(probs[obs]), composite, entry))
+        if not observation_entries:
+            return None
+        context_sampled = self._placeholder_sampled_bar(
+            int(observation_entries[0][0]),
+            str(observation_entries[0][2]),
+            int(observation_entries[0][3].codebook_id),
+            section,
+            local_index,
+            output_bar_index,
+            state_id,
+            float(observation_entries[0][1]),
+            observation_entries[0][3],
+        )
+        observation_id, emission_prob, composite, selection = selector.select_from_observations(
+            observation_entries,
+            CandidateSelectionContext(
+                sampled=context_sampled,
+                harmony=harmony,
+                section_length=section_length,
+                previous_candidate=previous_candidate,
+            ),
+            rng,
+        )
+        if observation_id is None or emission_prob is None or composite is None:
+            self.diagnostics.append_event("joint_observation_candidate_selection", {
+                "output_bar_index": int(output_bar_index),
+                "section": section.name,
+                "section_local_index": int(local_index),
+                "state_id": int(state_id),
+                **selection.diagnostics,
+            })
+            return None
+        selected_entry = selection.entry
+        event = SampledBar(
+            output_bar_index=output_bar_index,
+            section=section.name,
+            section_local_index=local_index,
+            hidden_state=state_id,
+            observation_id=int(observation_id),
+            composite_key=str(composite),
+            emission_probability=float(emission_prob),
+            source_file=str(selected_entry.source_file or ""),
+            source_bar_index=int(selected_entry.source_bar_index or 0),
+            codebook_id=int(selected_entry.codebook_id),
+            kmeans_id=None,
+            absolute_tokens=list(selected_entry.absolute_tokens),
+            relative_tokens=list(selected_entry.relative_tokens),
+            selection_mode="joint_observation_candidate",
+        )
+        self.diagnostics.append_event("joint_observation_candidate_selection", {
+            "output_bar_index": int(output_bar_index),
+            "section": section.name,
+            "section_local_index": int(local_index),
+            "state_id": int(state_id),
+            **selection.diagnostics,
+        })
+        self.diagnostics.append_event("observation_position_sampling", {
+            "output_bar_index": int(output_bar_index),
+            "section": section.name,
+            "section_local_index": int(local_index),
+            "state_id": int(state_id),
+            "observation_id": int(observation_id),
+            "composite_key": str(composite),
+            "strategy": "joint_observation_candidate",
+            "used_position_conditioning": False,
+            "emission_probability": float(emission_prob),
+            "observation_top_k": int(top_k),
+        })
+        return event, self._candidate_from_codebook_entry(selected_entry)
+
+    def _placeholder_sampled_bar(
+        self,
+        observation_id: int,
+        composite: str,
+        codebook_id: int,
+        section: SectionPlanItem,
+        local_index: int,
+        output_bar_index: int,
+        state_id: int,
+        emission_probability: float,
+        entry: Any,
+    ) -> SampledBar:
+        return SampledBar(
+            output_bar_index=output_bar_index,
+            section=section.name,
+            section_local_index=local_index,
+            hidden_state=state_id,
+            observation_id=int(observation_id),
+            composite_key=str(composite),
+            emission_probability=float(emission_probability),
+            source_file=str(entry.source_file or ""),
+            source_bar_index=int(entry.source_bar_index or 0),
+            codebook_id=int(codebook_id),
+            kmeans_id=None,
+            absolute_tokens=list(entry.absolute_tokens),
+            relative_tokens=list(entry.relative_tokens),
+            selection_mode="placeholder",
+        )
 
     def _sample_observation(
         self,
@@ -240,6 +431,7 @@ class FormDrivenGenerator:
             kmeans_id=source_event.kmeans_id,
             absolute_tokens=list(source_event.absolute_tokens),
             relative_tokens=list(source_event.relative_tokens),
+            selection_mode=source_event.selection_mode,
         )
         self.diagnostics.append_event("section_source_reuse", {
             "section": section.name,
@@ -284,6 +476,7 @@ class FormDrivenGenerator:
             kmeans_id=selected_bar.kmeans_id,
             absolute_tokens=list(selected_bar.absolute_tokens),
             relative_tokens=list(selected_bar.relative_tokens),
+            selection_mode="anchor_resample",
         )
         self.diagnostics.append_event("section_source_reuse", {
             "section": section.name,
@@ -400,6 +593,52 @@ class FormDrivenGenerator:
             raise ValueError("hmm_generation.source_reuse_mode must be 'none', 'sampled_path', or 'anchor_resample'.")
         return mode
 
+    def _candidate_from_sampled_event(self, event: SampledBar) -> CodebookCandidate:
+        codebook = (
+            self.bundle.encoder_model.codebook.entries
+            if self.bundle.encoder_model is not None
+            else self.bundle.global_codebook
+        )
+        entry = codebook.get(int(event.codebook_id))
+        if entry is not None:
+            for candidate in entry.candidates:
+                if (
+                    str(candidate.source_file) == str(event.source_file)
+                    and candidate.source_bar_index is not None
+                    and int(candidate.source_bar_index) == int(event.source_bar_index)
+                ):
+                    return candidate
+            return self._candidate_from_codebook_entry(entry)
+        return CodebookCandidate(
+            source_song=None,
+            source_file=event.source_file,
+            source_bar_index=int(event.source_bar_index),
+            relative_tokens=list(event.relative_tokens),
+            absolute_tokens=list(event.absolute_tokens),
+            kmeans_id=event.kmeans_id,
+            observation_id=int(event.observation_id),
+        )
+
+    def _candidate_from_codebook_entry(self, entry: Any) -> CodebookCandidate:
+        return CodebookCandidate(
+            source_song=entry.source_song,
+            source_file=entry.source_file,
+            source_bar_index=entry.source_bar_index,
+            relative_tokens=list(entry.relative_tokens),
+            absolute_tokens=list(entry.absolute_tokens),
+            density=entry.density,
+            token_variance=float(entry.token_variance),
+            sharing_score=float(entry.sharing_score),
+            kmeans_id=None,
+            observation_id=None,
+            position_ratio=float(getattr(entry, "position_ratio", 0.0)),
+            latent_vector=(
+                [float(value) for value in entry.latent_vector]
+                if getattr(entry, "latent_vector", None) is not None
+                else None
+            ),
+        )
+
     def write_outputs(self, generation: GenerationResult, json_path: Path, midi_path: Path) -> None:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         codebook = (
@@ -407,7 +646,11 @@ class FormDrivenGenerator:
             if self.bundle.encoder_model is not None
             else self.bundle.global_codebook
         )
-        renderer = HarmonicPhysicalRenderer(self.config, codebook)
+        renderer = HarmonicPhysicalRenderer(
+            self.config,
+            codebook,
+            candidate_selector_model=self.bundle.candidate_selector_model,
+        )
         render_result = renderer.realize(generation)
         realized = render_result.generation
         render_diag = renderer.write_midi(realized, midi_path)
@@ -432,6 +675,7 @@ class GenerationCLI:
         "harmonic_render",
         "midi_render",
         "hmm_generation",
+        "candidate_selector",
     )
 
     def build_parser(self) -> argparse.ArgumentParser:

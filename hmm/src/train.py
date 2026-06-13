@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from config_loader import ConfigLoader
+from candidate_selector import CandidateSelectorTrainer
 from diagnostics import TrainingDiagnostics
 from encoder import SymbolEncoderFactory
 from form_hmm import FormHMMTrainer, FormTemplateLibrary
@@ -34,6 +35,13 @@ class TrainingPipeline:
 
         self.diagnostics.record_clustering(encoding.diagnostics)
         self.diagnostics.record_observation_vocab(encoding.diagnostics.get("observation_vocab", {}))
+
+        selector_trainer = CandidateSelectorTrainer(
+            self.config,
+            mode=str(self.config.get("harmonic_engine", {}).get("mode", "major")),
+        )
+        candidate_selector_model = selector_trainer.fit(encoding.global_codebook)
+        self.diagnostics.record_stage("candidate_selector", selector_trainer.diagnostics)
 
         hmm_trainer = FormHMMTrainer(self.config)
         form_models = hmm_trainer.train(songs, vocab)
@@ -81,6 +89,7 @@ class TrainingPipeline:
             form_templates=templates,
             global_codebook=encoding.global_codebook,
             encoder_model=encoding.encoder_model,
+            candidate_selector_model=candidate_selector_model,
         )
         self.diagnostics.record_stage("encoder_model", {
             "codebook_count": len(bundle.encoder_model.codebook.entries) if bundle.encoder_model else 0,

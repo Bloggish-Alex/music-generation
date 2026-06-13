@@ -20,7 +20,7 @@ grid_tokenizer:
   min_overlap_fraction: 0.05
 
 encoder:
-  backend: vae_latent  # legacy or vae_latent
+  backend: legacy  # legacy or vae_latent
 
 vae_encoder:
   steps_per_bar: 16
@@ -136,12 +136,12 @@ global_agglomerative_clustering:
   # while giving all songs the same bar-label vocabulary for HMM training.
   song_distance_threshold: 0.25
   song_max_clusters: 48
-  codebook_size: 64
+  codebook_size: 192
   codebook_clustering_strategy: default  # default or filtered_rare_bar
   codebook_filter_min_bar_count: 3
   # Build the global codebook by distance first. Fixed-size maxclust alone can
   # merge unrelated medoids, then assignment collapses many bars into one label.
-  codebook_distance_threshold: 0.5
+  codebook_distance_threshold: 0.35
   assignment_distance_threshold: 0.35
   expand_codebook_on_assignment_miss: true  # valid only when codebook_clustering_strategy is default
   song_linkage: average
@@ -151,13 +151,21 @@ global_agglomerative_clustering:
   max_clusters_warn_fraction: 0.6
 
 section_hmm:
-  backend: numpy  # numpy or hmmlearn
+  backend: numpy  # numpy or hsmm
   n_sections: 4
   max_iter: 80
   tol: 0.0001
   self_transition_bias: 3.0
   emission_smoothing: 0.2
   transition_smoothing: 0.5
+  # Used by backend=hsmm. HSMM learns an explicit state-duration distribution
+  # instead of relying on HMM self-loop probabilities for section length.
+  duration_smoothing: 0.2
+  duration_warm_start_strength: 8.0
+  max_duration: null
+  hsmm_allow_self_loop: false
+  require_final_state: true
+  max_expected_segment_operations: 20000000
   random_seed: 42
   topology: left_to_right
   max_forward_jump: 1
@@ -270,10 +278,6 @@ forms:
         pitch_offset: 2
         cadence: perfect # 副歌高潮整体升调(飙高音)
 
-hmmlearn_section_hmm:
-  algorithm: viterbi
-  implementation: log
-
 hmm_generation:
   # Temperatures above 1.0 flatten over-confident HMM distributions during
   # generation without changing the trained matrices saved in the model.
@@ -289,6 +293,36 @@ hmm_generation:
   # keeps the source section as an anchor while resampling similar bars.
   source_reuse_mode: anchor_resample
 
+candidate_selector:
+  # Learned post-emission selector. Decoder still emits a global codebook ID;
+  # this layer only chooses the concrete physical bar inside that codebook pool.
+  enabled: true
+  backend: learned_ranker  # none, heuristic, or learned_ranker
+  model_type: mlp
+  selection_stage: candidate  # candidate or joint
+  train_enabled: true
+  negatives_per_positive: 3
+  hidden_dim: 16
+  epochs: 160
+  learning_rate: 0.01
+  l2: 0.0001
+  random_seed: 42
+  min_candidates: 2
+  top_k: 32
+  temperature: 0.9
+  learned_weight: 1.0
+  harmony_weight: 0.5
+  position_weight: 0.25
+  boundary_weight: 0.5
+  boundary_sigma: 8.0
+  latent_weight: 0.15
+  latent_sigma: 4.0
+  observation_top_k: 16
+  candidates_per_observation: 5
+  observation_emission_weight: 2.2
+  min_score: 1.0e-9
+  diagnostics_top_k: 5
+
 harmonic_engine:
   style: classic
   key: C
@@ -303,7 +337,7 @@ harmonic_engine:
   fallback_policy: raw
   rare_bar_selector:
     enabled: true
-    min_candidates: 16
+    min_candidates: 100
     harmony_weight: 1.0
     state_weight: 1.0
     density_weight: 2.0
