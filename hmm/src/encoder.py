@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -199,13 +199,15 @@ class VAELatentSymbolEncoder:
                 token_variance=float(representative.token_variance),
                 sharing_score=float(representative.sharing_score),
                 candidates=[
-                    self._candidate_for_bar(bars[index])
+                    self._candidate_for_bar(bars[index], latents[index])
                     for index in indices
                 ],
+                latent_vector=[float(value) for value in np.asarray(latents[medoid_index], dtype=float).tolist()],
+                position_ratio=self._position_ratio(representative),
             )
         return entries
 
-    def _candidate_for_bar(self, bar: Any) -> CodebookCandidate:
+    def _candidate_for_bar(self, bar: Any, latent: Optional[np.ndarray] = None) -> CodebookCandidate:
         relative_tokens = bar.tokens_for_edit_distance("relative")
         return CodebookCandidate(
             source_song=bar.song_id,
@@ -219,6 +221,11 @@ class VAELatentSymbolEncoder:
             kmeans_id=None,
             observation_id=int(bar.observation_id) if bar.observation_id is not None else None,
             position_ratio=self._position_ratio(bar),
+            latent_vector=(
+                [float(value) for value in np.asarray(latent, dtype=float).tolist()]
+                if latent is not None
+                else None
+            ),
         )
 
     def _latent_medoid(self, latents: np.ndarray, indices: Sequence[int]) -> int:

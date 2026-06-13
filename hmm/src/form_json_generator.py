@@ -95,6 +95,7 @@ class SSMBuilder:
     def build_similarity(self, bars: Sequence[Any]) -> np.ndarray:
         if not bars:
             return np.zeros((0, 0), dtype=np.float64)
+        self.distance.fit_corpus(bars)
         distance_matrix = self.distance.build_matrix(bars)
         return np.clip(1.0 - distance_matrix, 0.0, 1.0)
 

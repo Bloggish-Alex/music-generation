@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from candidate_selector import CandidateSelectorModel
 from generation_data import CodebookEntry, GenerationResult
 from harmonic_engine import HarmonicEngine, HarmonicMidiRenderer
 
@@ -22,12 +23,18 @@ class RenderResult:
 class HarmonicPhysicalRenderer:
     """Adapter around the current harmonic engine and MIDI renderer."""
 
-    def __init__(self, config: Dict[str, Any], codebook: Dict[int, CodebookEntry]) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        codebook: Dict[int, CodebookEntry],
+        candidate_selector_model: Optional[CandidateSelectorModel] = None,
+    ) -> None:
         self.config = config
         self.codebook = codebook
+        self.candidate_selector_model = candidate_selector_model
 
     def realize(self, generation: GenerationResult) -> RenderResult:
-        engine = HarmonicEngine(self.config, self.codebook)
+        engine = HarmonicEngine(self.config, self.codebook, self.candidate_selector_model)
         realized = engine.realize(generation)
         return RenderResult(realized, dict(engine.diagnostics))
 

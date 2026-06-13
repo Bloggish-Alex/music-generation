@@ -25,6 +25,7 @@ class CodebookCandidate:
     kmeans_id: Optional[int] = None
     observation_id: Optional[int] = None
     position_ratio: float = 0.0
+    latent_vector: Optional[List[float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -56,6 +57,11 @@ class CodebookCandidate:
             kmeans_id=int(kmeans_id) if kmeans_id is not None else None,
             observation_id=int(observation_id) if observation_id is not None else None,
             position_ratio=float(payload.get("position_ratio", 0.0)),
+            latent_vector=(
+                [float(x) for x in payload["latent_vector"]]
+                if payload.get("latent_vector") is not None
+                else None
+            ),
         )
 
     def source(self) -> "CodebookSource":
@@ -80,6 +86,8 @@ class CodebookEntry:
     token_variance: float = 0.0
     sharing_score: float = 1.0
     candidates: List[CodebookCandidate] = field(default_factory=list)
+    latent_vector: Optional[List[float]] = None
+    position_ratio: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -112,6 +120,12 @@ class CodebookEntry:
                 CodebookCandidate.from_dict(item)
                 for item in payload.get("candidates", [])
             ],
+            latent_vector=(
+                [float(x) for x in payload["latent_vector"]]
+                if payload.get("latent_vector") is not None
+                else None
+            ),
+            position_ratio=float(payload.get("position_ratio", 0.0)),
         )
 
     @staticmethod
@@ -179,6 +193,7 @@ class SampledBar:
     kmeans_id: Optional[int]
     absolute_tokens: List[int]
     relative_tokens: List[int]
+    selection_mode: str = "sampled_bar"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -200,6 +215,7 @@ class SampledBar:
             kmeans_id=int(kmeans_id) if kmeans_id is not None else None,
             absolute_tokens=[int(x) for x in payload.get("absolute_tokens", [])],
             relative_tokens=[int(x) for x in payload.get("relative_tokens", [])],
+            selection_mode=str(payload.get("selection_mode", "sampled_bar")),
         )
 
 

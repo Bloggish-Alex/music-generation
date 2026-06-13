@@ -14,6 +14,11 @@ import numpy as np
 from config_loader import ConfigLoader, ConfigView, ROOT_DIR
 from core_data import NoteRecord
 from bar_density import TokenDensityAnalyzer
+from candidate_selector import (
+    CandidateSelectionContext,
+    CandidateSelectorModel,
+    LearnedCandidateSelector,
+)
 from generation_data import (
     CodebookCandidate,
     CodebookEntry,
@@ -895,6 +900,12 @@ class RareBarSelector:
             token_variance=float(candidate.token_variance),
             sharing_score=float(candidate.sharing_score),
             candidates=list(candidates),
+            latent_vector=(
+                [float(value) for value in candidate.latent_vector]
+                if candidate.latent_vector is not None
+                else None
+            ),
+            position_ratio=float(candidate.position_ratio),
         )
 
     def _top_candidates(
@@ -920,7 +931,12 @@ class RareBarSelector:
 class HarmonicEngine:
     """High-level facade that plans harmony and realizes generated bar IDs."""
 
-    def __init__(self, config: Dict[str, Any], global_codebook: Dict[int, CodebookEntry]) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        global_codebook: Dict[int, CodebookEntry],
+        candidate_selector_model: Optional[CandidateSelectorModel] = None,
+    ) -> None:
         self.config = config
         self.global_codebook = global_codebook
         self.progression = HarmonyProgressionPlanner.from_style_config(config)
@@ -928,6 +944,11 @@ class HarmonicEngine:
         self.rare_selector = RareBarSelector(
             RareBarSelectionConfig.from_style_config(config),
             self.progression.config.mode,
+        )
+        self.learned_selector = LearnedCandidateSelector(
+            config,
+            candidate_selector_model,
+            mode=self.progression.config.mode,
         )
         self.diagnostics: Dict[str, Any] = {}
         self.missing_codebook_ids: List[int] = []
@@ -938,14 +959,19 @@ class HarmonicEngine:
         rare_selection_diagnostics: List[Dict[str, Any]] = []
         section_lengths = {section.name: int(section.bars) for section in generation.section_plan}
         rng = np.random.default_rng(generation.seed)
+        previous_candidate: Optional[CodebookCandidate] = None
+        previous_harmony: Optional[HarmonyBarPlan] = None
         for sampled, harmony in zip(generation.sampled_bars, harmony_plan):
             codebook_id = int(sampled.codebook_id)
             codebook_entry = self._codebook_entry_for_sampled_bar(sampled)
-            selection = self.rare_selector.select(
+            section_length = section_lengths.get(sampled.section, 1)
+            selection = self._select_candidate(
                 codebook_entry,
                 sampled,
                 harmony,
-                section_lengths.get(sampled.section, 1),
+                section_length,
+                previous_candidate,
+                previous_harmony,
                 rng,
             )
             codebook_entry = selection.entry
@@ -978,6 +1004,8 @@ class HarmonicEngine:
                 voice_sharing_applied=voice_sharing_applied,
                 notes=notes,
             ))
+            previous_candidate = self._candidate_from_entry(codebook_entry)
+            previous_harmony = harmony
         self.diagnostics = {
             "harmonic_engine": asdict(self.progression.config),
             "progression": self.progression.diagnostics,
@@ -986,8 +1014,25 @@ class HarmonicEngine:
                 "config": asdict(self.rare_selector.config),
                 "used_count": sum(1 for item in rare_selection_diagnostics if item.get("used")),
                 "skipped_count": sum(1 for item in rare_selection_diagnostics if not item.get("used")),
+                "backend_counts": self._backend_counts(rare_selection_diagnostics),
                 "candidate_count_distribution": self._candidate_count_distribution(rare_selection_diagnostics),
                 "events": rare_selection_diagnostics,
+            },
+            "candidate_selector": {
+                "backend": str(ConfigView(self.config).section("candidate_selector").get("backend", "none")),
+                "enabled": bool(ConfigView(self.config).section("candidate_selector").get("enabled", False)),
+                "used_count": sum(
+                    1 for item in rare_selection_diagnostics
+                    if item.get("backend") == "learned_ranker" and item.get("used")
+                ),
+                "skipped_count": sum(
+                    1 for item in rare_selection_diagnostics
+                    if item.get("backend") == "learned_ranker" and not item.get("used")
+                ),
+                "events": [
+                    item for item in rare_selection_diagnostics
+                    if item.get("backend") == "learned_ranker"
+                ],
             },
             "bars": [
                 {
@@ -1005,10 +1050,124 @@ class HarmonicEngine:
             harmonic_bars=realized_bars,
         )
 
+    def _select_candidate(
+        self,
+        entry: CodebookEntry,
+        sampled: SampledBar,
+        harmony: HarmonyBarPlan,
+        section_length: int,
+        previous_candidate: Optional[CodebookCandidate],
+        previous_harmony: Optional[HarmonyBarPlan],
+        rng: np.random.Generator,
+    ) -> RareBarSelection:
+        if str(getattr(sampled, "selection_mode", "")) == "joint_observation_candidate":
+            selected = self._entry_from_sampled_bar(sampled, entry.candidates)
+            return RareBarSelection(entry=selected, diagnostics={
+                "used": True,
+                "backend": "joint_observation_candidate",
+                "reason": "concrete_candidate_already_selected_by_decoder",
+                "candidate_count": len(entry.candidates),
+                "selection_mode": sampled.selection_mode,
+            })
+        learned = self.learned_selector.select(
+            entry,
+            CandidateSelectionContext(
+                sampled=sampled,
+                harmony=harmony,
+                section_length=section_length,
+                previous_candidate=previous_candidate,
+                previous_harmony=previous_harmony,
+            ),
+            rng,
+        )
+        if learned.diagnostics.get("used"):
+            return RareBarSelection(entry=learned.entry, diagnostics=learned.diagnostics)
+        rare = self.rare_selector.select(entry, sampled, harmony, section_length, rng)
+        return RareBarSelection(entry=rare.entry, diagnostics={
+            "backend": "heuristic",
+            "learned_candidate_selector": learned.diagnostics,
+            **rare.diagnostics,
+        })
+
+    def _entry_from_sampled_bar(
+        self,
+        sampled: SampledBar,
+        candidates: Sequence[CodebookCandidate],
+    ) -> CodebookEntry:
+        relative_tokens = [int(token) for token in sampled.relative_tokens]
+        matching = [
+            candidate for candidate in candidates
+            if (
+                str(candidate.source_file) == str(sampled.source_file)
+                and candidate.source_bar_index is not None
+                and int(candidate.source_bar_index) == int(sampled.source_bar_index)
+            )
+        ]
+        if matching:
+            candidate = matching[0]
+            return CodebookEntry(
+                codebook_id=int(sampled.codebook_id),
+                source_song=candidate.source_song,
+                source_file=candidate.source_file,
+                source_bar_index=candidate.source_bar_index,
+                relative_tokens=list(candidate.relative_tokens),
+                absolute_tokens=list(candidate.absolute_tokens),
+                density=candidate.density,
+                token_variance=float(candidate.token_variance),
+                sharing_score=float(candidate.sharing_score),
+                candidates=list(candidates),
+                latent_vector=(
+                    [float(value) for value in candidate.latent_vector]
+                    if candidate.latent_vector is not None
+                    else None
+                ),
+                position_ratio=float(candidate.position_ratio),
+            )
+        token_variance = self._token_variance(relative_tokens)
+        return CodebookEntry(
+            codebook_id=int(sampled.codebook_id),
+            source_song=None,
+            source_file=sampled.source_file,
+            source_bar_index=int(sampled.source_bar_index),
+            relative_tokens=relative_tokens,
+            absolute_tokens=[int(token) for token in sampled.absolute_tokens],
+            density=TokenDensityAnalyzer().analyze(relative_tokens),
+            token_variance=token_variance,
+            sharing_score=self._sharing_score(token_variance),
+            candidates=list(candidates),
+        )
+
+    def _candidate_from_entry(self, entry: CodebookEntry) -> CodebookCandidate:
+        return CodebookCandidate(
+            source_song=entry.source_song,
+            source_file=entry.source_file,
+            source_bar_index=entry.source_bar_index,
+            relative_tokens=list(entry.relative_tokens),
+            absolute_tokens=list(entry.absolute_tokens),
+            density=entry.density,
+            token_variance=float(entry.token_variance),
+            sharing_score=float(entry.sharing_score),
+            kmeans_id=None,
+            observation_id=None,
+            latent_vector=(
+                [float(value) for value in entry.latent_vector]
+                if entry.latent_vector is not None
+                else None
+            ),
+            position_ratio=float(entry.position_ratio),
+        )
+
     def _candidate_count_distribution(self, events: Sequence[Dict[str, Any]]) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for event in events:
             key = str(int(event.get("candidate_count", 0)))
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _backend_counts(self, events: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for event in events:
+            key = str(event.get("backend", "unknown"))
             counts[key] = counts.get(key, 0) + 1
         return counts
 

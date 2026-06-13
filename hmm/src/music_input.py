@@ -187,9 +187,12 @@ class InputParser:
     def _assign_form_section(self, bar: BarRecord, metadata: Dict[str, Any]) -> None:
         sections = metadata.get("sections") or []
         for idx, section in enumerate(sections):
-            start = int(section.get("start", 0))
-            length = int(section.get("length", 0))
-            if start <= bar.bar_index < start + length:
+            start = int(section.get("start_bar", section.get("start", 0)))
+            if section.get("end_bar", section.get("end")) is not None:
+                end = int(section.get("end_bar", section.get("end")))
+            else:
+                end = start + int(section.get("length", 0))
+            if start <= bar.bar_index < end:
                 bar.section_label = str(section.get("name"))
                 bar.section_index = idx
                 return
