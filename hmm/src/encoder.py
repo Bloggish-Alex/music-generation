@@ -20,7 +20,13 @@ from bar_density import TokenDensityAnalyzer
 from config_loader import ConfigView
 from core_data import ObservationVocab, SongRecord
 from generation_data import CodebookCandidate, CodebookEntry
-from vae_bar_encoder import DenoisingVAEConfig, DenoisingVAETrainer, LatentClusterAnalyzer, LatentClusteringConfig
+from vae_bar_encoder import (
+    DenoisingVAEConfig,
+    DenoisingVAETrainer,
+    LatentClusterAnalyzer,
+    LatentClusteringConfig,
+    LatentFeatureBuilder,
+)
 
 
 @dataclass
@@ -77,8 +83,11 @@ class VAELatentSymbolEncoder:
         vae_config = self._vae_config()
         cluster_config = self._cluster_config()
         trainer = DenoisingVAETrainer(vae_config).fit(bars)
-        latents = trainer.encode(bars)
-        labels = LatentClusterAnalyzer(cluster_config).cluster(latents)
+        latent_mu, latent_logvar = trainer.encode_distribution(bars)
+        feature_builder = LatentFeatureBuilder(cluster_config)
+        cluster_features = feature_builder.build(latent_mu, latent_logvar)
+        clusterer = LatentClusterAnalyzer(cluster_config)
+        labels = clusterer.cluster(cluster_features)
         labels = self._compact_labels(labels)
         for bar, label in zip(bars, labels):
             bar.codebook_id = int(label)
@@ -86,13 +95,14 @@ class VAELatentSymbolEncoder:
             bar.composite_key = f"V{int(label)}"
             bar.observation_id = int(label)
         vocab = self._build_vocab(labels)
-        global_codebook = self._build_codebook(bars, latents, labels)
+        global_codebook = self._build_codebook(bars, latent_mu, cluster_features, labels)
         reconstruction = trainer.evaluate_reconstruction(bars)
-        clustering = LatentClusterAnalyzer(cluster_config).diagnostics(bars, latents, labels)
+        clustering = clusterer.diagnostics(bars, cluster_features, labels)
         diagnostics = {
             "backend": "vae_latent",
             "vae_config": asdict(vae_config),
             "cluster_config": asdict(cluster_config),
+            "latent_features": feature_builder.diagnostics(latent_mu, latent_logvar, cluster_features),
             "training_log": trainer.training_log,
             "reconstruction": reconstruction,
             "clustering": clustering,
@@ -120,14 +130,18 @@ class VAELatentSymbolEncoder:
         section = ConfigView(self.config).section("vae_encoder")
         return DenoisingVAEConfig(
             steps_per_bar=int(section.get("steps_per_bar", 16)),
-            hidden_dim=int(section.get("hidden_dim", 32)),
-            latent_dim=int(section.get("latent_dim", 8)),
+            input_mode=str(section.get("input_mode", "multi_channel")),
+            hidden_dim=int(section.get("hidden_dim", 64)),
+            latent_dim=int(section.get("latent_dim", 12)),
             epochs=int(section.get("epochs", 80)),
             batch_size=int(section.get("batch_size", 128)),
             learning_rate=float(section.get("learning_rate", 0.001)),
             beta_kl=float(section.get("beta_kl", 0.001)),
             kl_warmup_epochs=int(section.get("kl_warmup_epochs", 10)),
             pitch_weight=float(section.get("pitch_weight", 1.0)),
+            onset_weight=float(section.get("onset_weight", 0.5)),
+            sustain_weight=float(section.get("sustain_weight", 0.5)),
+            global_weight=float(section.get("global_weight", 0.25)),
             note_drop_prob=float(section.get("note_drop_prob", 0.15)),
             sustain_fill_prob=float(section.get("sustain_fill_prob", 0.10)),
             drop_to_rest_prob=float(section.get("drop_to_rest_prob", 0.5)),
@@ -143,9 +157,14 @@ class VAELatentSymbolEncoder:
         clustering = clustering if isinstance(clustering, dict) else {}
         return LatentClusteringConfig(
             method=str(clustering.get("method", "kmeans")),
+            feature_mode=str(clustering.get("feature_mode", "mu")),
+            logvar_weight=float(clustering.get("logvar_weight", 0.25)),
             n_clusters=int(clustering.get("n_clusters", 192)),
             distance_threshold=float(clustering.get("distance_threshold", 1.0)),
             linkage_method=str(clustering.get("linkage_method", "average")),
+            covariance_type=str(clustering.get("covariance_type", "full")),
+            reg_covar=float(clustering.get("reg_covar", 1e-6)),
+            max_iter=int(clustering.get("max_iter", 200)),
             random_seed=int(clustering.get("random_seed", section.get("random_seed", 42))),
         )
 
@@ -177,7 +196,8 @@ class VAELatentSymbolEncoder:
     def _build_codebook(
         self,
         bars: Sequence[Any],
-        latents: np.ndarray,
+        content_latents: np.ndarray,
+        cluster_features: np.ndarray,
         labels: np.ndarray,
     ) -> Dict[int, CodebookEntry]:
         bars_by_label: Dict[int, List[int]] = defaultdict(list)
@@ -185,7 +205,7 @@ class VAELatentSymbolEncoder:
             bars_by_label[int(label)].append(int(index))
         entries: Dict[int, CodebookEntry] = {}
         for label, indices in sorted(bars_by_label.items()):
-            medoid_index = self._latent_medoid(latents, indices)
+            medoid_index = self._latent_medoid(cluster_features, indices)
             representative = bars[medoid_index]
             relative_tokens = representative.tokens_for_edit_distance("relative")
             entries[int(label)] = CodebookEntry(
@@ -199,10 +219,10 @@ class VAELatentSymbolEncoder:
                 token_variance=float(representative.token_variance),
                 sharing_score=float(representative.sharing_score),
                 candidates=[
-                    self._candidate_for_bar(bars[index], latents[index])
+                    self._candidate_for_bar(bars[index], content_latents[index])
                     for index in indices
                 ],
-                latent_vector=[float(value) for value in np.asarray(latents[medoid_index], dtype=float).tolist()],
+                latent_vector=[float(value) for value in np.asarray(content_latents[medoid_index], dtype=float).tolist()],
                 position_ratio=self._position_ratio(representative),
             )
         return entries

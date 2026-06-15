@@ -20,6 +20,7 @@ from vae_bar_encoder import (
     DenoisingVAETrainer,
     LatentClusterAnalyzer,
     LatentClusteringConfig,
+    LatentFeatureBuilder,
 )
 
 
@@ -48,7 +49,8 @@ class VAEEncoderReport:
         report.heading("Denoising VAE Encoder Report")
         report.paragraph(
             "This report evaluates a denoising VAE encoder independently from the main HMM training pipeline. "
-            "The decoder is trained with multi-head loss: slot type classification, note-on pitch regression, and KL regularization. "
+            "The decoder is trained with multi-head loss: slot type classification, note-on pitch regression, "
+            "onset reconstruction, sustain reconstruction, global bar-feature reconstruction, and KL regularization. "
             "Clustering uses z_mu latent vectors."
         )
         report.table([
@@ -69,12 +71,25 @@ class VAEEncoderReport:
         report.heading("Latent Clustering Config", 2)
         report.table(["Parameter", "Value"], [[key, value] for key, value in asdict(self.cluster_config).items()])
 
+        cluster_model = self.clustering.get("cluster_model", {})
+        if cluster_model:
+            report.heading("Latent Clustering Model", 2)
+            report.table(["Metric", "Value"], [[key, value] for key, value in cluster_model.items()])
+
+        latent_features = self.clustering.get("latent_features", {})
+        if latent_features:
+            report.heading("Latent Clustering Features", 2)
+            report.table(["Metric", "Value"], [[key, value] for key, value in latent_features.items()])
+
         report.heading("Training Loss", 2)
         report.table([
             "Epoch",
             "Loss",
             "Type loss",
             "Pitch loss",
+            "Onset loss",
+            "Sustain loss",
+            "Global loss",
             "KL loss",
             "KL weight",
         ], [
@@ -83,6 +98,9 @@ class VAEEncoderReport:
                 item["loss"],
                 item["type_loss"],
                 item["pitch_loss"],
+                item.get("onset_loss", 0.0),
+                item.get("sustain_loss", 0.0),
+                item.get("global_loss", 0.0),
                 item["kl_loss"],
                 item["kl_weight"],
             ]
@@ -109,6 +127,33 @@ class VAEEncoderReport:
             ["effective_label_count", self.clustering.get("effective_label_count"), "Entropy-equivalent number of used labels."],
         ])
 
+        assignment_confidence = self.clustering.get("assignment_confidence", {})
+        if assignment_confidence:
+            report.heading("GMM Assignment Confidence", 2)
+            report.table(["Metric", "Value"], [[key, value] for key, value in assignment_confidence.items()])
+
+        label_confidence = self.clustering.get("label_confidence", [])
+        if label_confidence:
+            report.heading("Top Label Confidence", 2)
+            report.table([
+                "Label",
+                "Count",
+                "Confidence mean",
+                "Confidence min",
+                "Low confidence < 0.8",
+                "Entropy mean",
+            ], [
+                [
+                    item.get("label"),
+                    item.get("count"),
+                    item.get("confidence_mean"),
+                    item.get("confidence_min"),
+                    item.get("low_confidence_ratio_lt_0_80"),
+                    item.get("entropy_mean"),
+                ]
+                for item in label_confidence
+            ])
+
         latent = self.clustering.get("latent", {})
         report.heading("Latent Space Summary", 2)
         report.table([
@@ -126,8 +171,18 @@ class VAEEncoderReport:
             "Label",
             "Count",
             "Ratio",
+            "Confidence mean",
+            "Confidence min",
+            "Low confidence < 0.8",
         ], [
-            [item["label"], item["count"], item["ratio"]]
+            [
+                item["label"],
+                item["count"],
+                item["ratio"],
+                item.get("confidence_mean"),
+                item.get("confidence_min"),
+                item.get("low_confidence_ratio_lt_0_80"),
+            ]
             for item in self.clustering.get("top_labels", [])
         ])
 
@@ -140,6 +195,8 @@ class VAEEncoderReport:
                 "Relative tokens",
                 "Variance",
                 "Sharing",
+                "Confidence",
+                "Entropy",
             ], [
                 [
                     example["song_id"],
@@ -147,6 +204,8 @@ class VAEEncoderReport:
                     example["relative_tokens"],
                     example["token_variance"],
                     example["sharing_score"],
+                    example.get("assignment_confidence"),
+                    example.get("assignment_entropy"),
                 ]
                 for example in item.get("examples", [])
             ])
@@ -201,32 +260,42 @@ class VAEEncoderCLI:
         source.add_argument("--model-bundle", type=Path)
         source.add_argument("--songs-json", type=Path)
         source.add_argument("--music-dir", type=Path)
-        parser.add_argument("--config", type=Path, default=None)
+        parser.add_argument("--config", type=Path, default=None, help="Optional style config override. VAE defaults are read from the merged style config.")
         parser.add_argument("--output", type=Path, required=True)
         parser.add_argument("--diagnostics-output", type=Path, default=None)
         parser.add_argument("--latents-output", type=Path, default=None)
         parser.add_argument("--checkpoint-output", type=Path, default=None)
 
-        parser.add_argument("--hidden-dim", type=int, default=32)
-        parser.add_argument("--latent-dim", type=int, default=8)
-        parser.add_argument("--epochs", type=int, default=80)
-        parser.add_argument("--batch-size", type=int, default=128)
-        parser.add_argument("--learning-rate", type=float, default=0.001)
-        parser.add_argument("--beta-kl", type=float, default=0.001)
-        parser.add_argument("--kl-warmup-epochs", type=int, default=10)
-        parser.add_argument("--pitch-weight", type=float, default=1.0)
-        parser.add_argument("--note-drop-prob", type=float, default=0.15)
-        parser.add_argument("--sustain-fill-prob", type=float, default=0.10)
-        parser.add_argument("--drop-to-rest-prob", type=float, default=0.5)
-        parser.add_argument("--ornament-pitch-radius", type=int, default=2)
-        parser.add_argument("--pitch-scale", type=float, default=24.0)
-        parser.add_argument("--random-seed", type=int, default=42)
-        parser.add_argument("--device", type=str, default="cpu")
+        parser.add_argument("--steps-per-bar", type=int, default=None)
+        parser.add_argument("--input-mode", choices=["token", "multi_channel"], default=None)
+        parser.add_argument("--hidden-dim", type=int, default=None)
+        parser.add_argument("--latent-dim", type=int, default=None)
+        parser.add_argument("--epochs", type=int, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--learning-rate", type=float, default=None)
+        parser.add_argument("--beta-kl", type=float, default=None)
+        parser.add_argument("--kl-warmup-epochs", type=int, default=None)
+        parser.add_argument("--pitch-weight", type=float, default=None)
+        parser.add_argument("--onset-weight", type=float, default=None)
+        parser.add_argument("--sustain-weight", type=float, default=None)
+        parser.add_argument("--global-weight", type=float, default=None)
+        parser.add_argument("--note-drop-prob", type=float, default=None)
+        parser.add_argument("--sustain-fill-prob", type=float, default=None)
+        parser.add_argument("--drop-to-rest-prob", type=float, default=None)
+        parser.add_argument("--ornament-pitch-radius", type=int, default=None)
+        parser.add_argument("--pitch-scale", type=float, default=None)
+        parser.add_argument("--random-seed", type=int, default=None)
+        parser.add_argument("--device", type=str, default=None)
 
-        parser.add_argument("--cluster-method", choices=["kmeans", "agglomerative"], default="kmeans")
-        parser.add_argument("--n-clusters", type=int, default=384)
-        parser.add_argument("--distance-threshold", type=float, default=1.0)
-        parser.add_argument("--linkage-method", type=str, default="average")
+        parser.add_argument("--cluster-method", choices=["kmeans", "gmm", "agglomerative"], default=None)
+        parser.add_argument("--feature-mode", choices=["mu", "mu_logvar"], default=None)
+        parser.add_argument("--logvar-weight", type=float, default=None)
+        parser.add_argument("--n-clusters", type=int, default=None)
+        parser.add_argument("--distance-threshold", type=float, default=None)
+        parser.add_argument("--linkage-method", type=str, default=None)
+        parser.add_argument("--covariance-type", choices=["full", "tied", "diag", "spherical"], default=None)
+        parser.add_argument("--reg-covar", type=float, default=None)
+        parser.add_argument("--gmm-max-iter", type=int, default=None)
         return parser
 
     def run(self, argv: Optional[Sequence[str]] = None) -> None:
@@ -239,13 +308,17 @@ class VAEEncoderCLI:
             music_dir=args.music_dir,
         )
         bars = [bar for song in songs for bar in song.bars]
-        vae_config = self._vae_config(args)
-        cluster_config = self._cluster_config(args)
+        vae_config = self._vae_config(args, config)
+        cluster_config = self._cluster_config(args, config)
         trainer = DenoisingVAETrainer(vae_config).fit(bars)
-        latents = trainer.encode(bars)
-        labels = LatentClusterAnalyzer(cluster_config).cluster(latents)
+        latent_mu, latent_logvar = trainer.encode_distribution(bars)
+        feature_builder = LatentFeatureBuilder(cluster_config)
+        cluster_features = feature_builder.build(latent_mu, latent_logvar)
+        clusterer = LatentClusterAnalyzer(cluster_config)
+        labels = clusterer.cluster(cluster_features)
         reconstruction = trainer.evaluate_reconstruction(bars)
-        clustering = LatentClusterAnalyzer(cluster_config).diagnostics(bars, latents, labels)
+        clustering = clusterer.diagnostics(bars, cluster_features, labels)
+        clustering["latent_features"] = feature_builder.diagnostics(latent_mu, latent_logvar, cluster_features)
 
         VAEEncoderReport(
             songs=songs,
@@ -270,7 +343,10 @@ class VAEEncoderCLI:
             args.latents_output.parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(
                 args.latents_output,
-                latents=latents,
+                latents=latent_mu,
+                latent_mu=latent_mu,
+                latent_logvar=latent_logvar,
+                cluster_features=cluster_features,
                 labels=labels,
                 song_id=np.asarray([bar.song_id for bar in bars]),
                 bar_index=np.asarray([int(bar.bar_index) for bar in bars], dtype=np.int64),
@@ -279,33 +355,65 @@ class VAEEncoderCLI:
             trainer.save(args.checkpoint_output)
         print(f"VAE encoder report -> {args.output}")
 
-    def _vae_config(self, args: argparse.Namespace) -> DenoisingVAEConfig:
+    def _vae_config(self, args: argparse.Namespace, config: Dict[str, Any]) -> DenoisingVAEConfig:
+        section = self._section(config, "vae_encoder")
         return DenoisingVAEConfig(
-            hidden_dim=int(args.hidden_dim),
-            latent_dim=int(args.latent_dim),
-            epochs=int(args.epochs),
-            batch_size=int(args.batch_size),
-            learning_rate=float(args.learning_rate),
-            beta_kl=float(args.beta_kl),
-            kl_warmup_epochs=int(args.kl_warmup_epochs),
-            pitch_weight=float(args.pitch_weight),
-            note_drop_prob=float(args.note_drop_prob),
-            sustain_fill_prob=float(args.sustain_fill_prob),
-            drop_to_rest_prob=float(args.drop_to_rest_prob),
-            ornament_pitch_radius=int(args.ornament_pitch_radius),
-            pitch_scale=float(args.pitch_scale),
-            random_seed=int(args.random_seed),
-            device=str(args.device),
+            steps_per_bar=int(self._config_value(args, section, "steps_per_bar", 16)),
+            input_mode=str(self._config_value(args, section, "input_mode", "multi_channel")),
+            hidden_dim=int(self._config_value(args, section, "hidden_dim", 64)),
+            latent_dim=int(self._config_value(args, section, "latent_dim", 12)),
+            epochs=int(self._config_value(args, section, "epochs", 80)),
+            batch_size=int(self._config_value(args, section, "batch_size", 128)),
+            learning_rate=float(self._config_value(args, section, "learning_rate", 0.001)),
+            beta_kl=float(self._config_value(args, section, "beta_kl", 0.001)),
+            kl_warmup_epochs=int(self._config_value(args, section, "kl_warmup_epochs", 10)),
+            pitch_weight=float(self._config_value(args, section, "pitch_weight", 1.0)),
+            onset_weight=float(self._config_value(args, section, "onset_weight", 0.5)),
+            sustain_weight=float(self._config_value(args, section, "sustain_weight", 0.5)),
+            global_weight=float(self._config_value(args, section, "global_weight", 0.25)),
+            note_drop_prob=float(self._config_value(args, section, "note_drop_prob", 0.15)),
+            sustain_fill_prob=float(self._config_value(args, section, "sustain_fill_prob", 0.10)),
+            drop_to_rest_prob=float(self._config_value(args, section, "drop_to_rest_prob", 0.5)),
+            ornament_pitch_radius=int(self._config_value(args, section, "ornament_pitch_radius", 2)),
+            pitch_scale=float(self._config_value(args, section, "pitch_scale", 24.0)),
+            random_seed=int(self._config_value(args, section, "random_seed", 42)),
+            device=str(self._config_value(args, section, "device", "cpu")),
         )
 
-    def _cluster_config(self, args: argparse.Namespace) -> LatentClusteringConfig:
+    def _cluster_config(self, args: argparse.Namespace, config: Dict[str, Any]) -> LatentClusteringConfig:
+        section = self._section(config, "vae_encoder")
+        clustering = section.get("clustering", {})
+        clustering = clustering if isinstance(clustering, dict) else {}
+        random_seed = self._config_value(args, section, "random_seed", 42)
         return LatentClusteringConfig(
-            method=str(args.cluster_method),
-            n_clusters=int(args.n_clusters),
-            distance_threshold=float(args.distance_threshold),
-            linkage_method=str(args.linkage_method),
-            random_seed=int(args.random_seed),
+            method=str(self._config_value(args, clustering, "method", "kmeans", "cluster_method")),
+            feature_mode=str(self._config_value(args, clustering, "feature_mode", "mu")),
+            logvar_weight=float(self._config_value(args, clustering, "logvar_weight", 0.25)),
+            n_clusters=int(self._config_value(args, clustering, "n_clusters", 384)),
+            distance_threshold=float(self._config_value(args, clustering, "distance_threshold", 1.0)),
+            linkage_method=str(self._config_value(args, clustering, "linkage_method", "average")),
+            covariance_type=str(self._config_value(args, clustering, "covariance_type", "full")),
+            reg_covar=float(self._config_value(args, clustering, "reg_covar", 1e-6)),
+            max_iter=int(self._config_value(args, clustering, "max_iter", 200, "gmm_max_iter")),
+            random_seed=int(self._config_value(args, clustering, "random_seed", random_seed)),
         )
+
+    def _section(self, config: Dict[str, Any], name: str) -> Dict[str, Any]:
+        value = config.get(name, {})
+        return value if isinstance(value, dict) else {}
+
+    def _config_value(
+        self,
+        args: argparse.Namespace,
+        section: Dict[str, Any],
+        config_key: str,
+        default: Any,
+        arg_name: Optional[str] = None,
+    ) -> Any:
+        cli_value = getattr(args, arg_name or config_key, None)
+        if cli_value is not None:
+            return cli_value
+        return section.get(config_key, default)
 
 
 def main() -> None:
