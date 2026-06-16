@@ -1,0 +1,1 @@
+"""Symbolic music generation engine."""

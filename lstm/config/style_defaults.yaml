@@ -1,0 +1,204 @@
+#
+# Runtime style defaults. Stable music-theory knowledge such as form templates
+# and temporal graph scripts is stored in form_knowledge.yaml and included here.
+#
+include:
+  form_knowledge: form_knowledge.yaml
+grid_tokenizer:
+  steps_per_bar: 16
+  bar_length_ql: 4.0
+  rest_token: -1
+  sustain_token: -2
+  polyphonic_strategy: melody_top
+  # Quantize parsed symbolic music before note extraction. This prevents small
+  # human-performance MIDI timing drift, such as 0.99 quarter notes, from
+  # creating unstable edit-distance tokens.
+  quantize_input: true
+  quantize_divisors: [4, 3]
+  quantize_offsets: true
+  quantize_durations: true
+  quantize_policy: nearest
+  min_overlap_fraction: 0.05
+encoder:
+  backend: vae_latent
+vae_encoder:
+  steps_per_bar: 16
+  # multi_channel input = 16 steps * [event_type, pitch, onset, sustain] + 8 global features = 72 dims.
+  # token keeps the legacy 16-dim relative-token input. hidden_dim:32, latent_dim: 8
+  input_mode: multi_channel  # token or multi_channel
+  hidden_dim: 64
+  latent_dim: 12
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.001
+  beta_kl: 0.003
+  kl_warmup_epochs: 20
+  pitch_weight: 2.0
+  onset_weight: 0.5
+  sustain_weight: 0.5
+  global_weight: 0.25
+  note_drop_prob: 0.15
+  sustain_fill_prob: 0.1
+  drop_to_rest_prob: 0.5
+  ornament_pitch_radius: 2
+  pitch_scale: 24.0
+  condition_on_previous_last_pitch: true
+  previous_last_pitch_scale: 24.0
+  decoder_head_architecture: split_rhythm_pitch
+  pitch_activation: hardtanh
+  random_seed: 42
+  device: cpu
+  clustering:
+    method: gmm  # kmeans, gmm, or agglomerative
+    feature_mode: mu  # mu or mu_logvar
+    logvar_weight: 0.25
+    n_clusters: 192
+    distance_threshold: 1.0
+    linkage_method: average
+    covariance_type: full  # full, tied, diag, or spherical; valid for gmm
+    reg_covar: 1.0e-06
+    max_iter: 200
+    random_seed: 42
+observation_vocab:
+  strategy: positioned_composite # composite or positioned_composite
+  position_strategy: exact_mod # exact_mod or period_role
+  position_modulo: 8
+  position_source: bar_index
+  key_format: structured
+bar_density:
+  sparse_active_duration_ql: 2.0
+  sparse_note_on_count: 2
+  sparse_rest_ratio: 0.5
+  semi_sparse_active_duration_ql: 3.5
+  semi_sparse_note_on_count: 6
+  semi_sparse_rest_ratio: 0.25
+decoder:
+  backend: temporal_lstm
+  source_reuse_mode: sampled_path
+  lstm_candidate_top_k: 32
+  lstm_temperature: 0.9
+  lstm_diagnostics_top_k: 8
+  boundary_continuity:
+    enabled: false
+    mode: soft_penalty  # soft_penalty or hard_mask
+    max_jump_semitones: 16
+    penalty_weight: 0.35
+    action_penalty_weight:
+      RETURN: 0.10
+      VARY_LIGHTLY: 0.20
+      CADENCE: 0.35
+      DEVELOP: 0.50
+    min_allowed_candidates: 6
+    diagnostics_top_k: 8
+  temporal_graph:
+    enabled: true
+    candidate_top_k: 32
+    min_candidates: 8
+    memory_window: 16
+    memory_bias: 2.0
+    anchor_span_bars: 4
+    aligned_anchor_bias: 4.0
+    same_theme_memory_bias: 1.5
+    memory_density_filter_enabled: true
+    memory_density_note_on_tolerance: 4
+    planning_enabled: true
+    planning_window_bars: 4
+    planning_beam_width: 4
+    planning_branch_top_k: 8
+    planning_path_temperature: 0.75
+    action_temperature:
+      default: 0.75
+      INTRODUCE: 0.45
+      REPEAT: 0.50
+      VARY: 0.65
+      CONTRAST: 0.90
+      DEVELOP: 0.95
+      SEQUENCE: 0.85
+      RETURN: 0.60
+      VARY_LIGHTLY: 0.60
+      CADENCE: 0.55
+      CADENCE_STRONG: 0.45
+    diagnostics_top_k: 8
+lstm_decoder:
+  context_size: 8
+  hidden_dim: 128
+  num_layers: 1
+  dropout: 0.0
+  batch_size: 128
+  epochs: 60
+  learning_rate: 0.001
+  weight_decay: 0.0
+  validation_ratio: 0.15
+  random_seed: 42
+  device: cpu
+  condition_on_hidden_state: true
+  state_condition_mode: output_embedding
+  state_embedding_dim: 16
+candidate_selector:
+  enabled: true
+  backend: learned_ranker
+  model_type: mlp
+  selection_stage: candidate
+  train_enabled: true
+  negatives_per_positive: 3
+  hidden_dim: 16
+  epochs: 160
+  learning_rate: 0.01
+  l2: 0.0001
+  random_seed: 42
+  min_candidates: 2
+  top_k: 32
+  temperature: 0.9
+  learned_weight: 1.0
+  harmony_weight: 0.5
+  position_weight: 0.25
+  boundary_weight: 0.5
+  boundary_sigma: 8.0
+  latent_weight: 0.15
+  latent_sigma: 4.0
+  observation_top_k: 16
+  candidates_per_observation: 5
+  observation_emission_weight: 2.2
+  min_score: 1.0e-09
+  diagnostics_top_k: 5
+harmonic_engine:
+  style: classic
+  key: C
+  mode: major
+  base_octave: 3
+  matrix_path: harmony_matrix.json
+  min_bar_base_pitch: 32
+  max_bar_base_pitch: 60
+  rest_token: -1
+  sustain_token: -2
+  default_start_degree: I
+  fallback_policy: raw
+  rare_bar_selector:
+    enabled: true
+    min_candidates: 100
+    harmony_weight: 1.0
+    state_weight: 1.0
+    density_weight: 2.0
+    position_weight: 0.5
+    density_sigma: 0.25
+    position_sigma: 0.35
+    top_k: 32
+    temperature: 0.5
+    min_score: 1.0e-09
+    diagnostics_top_k: 5
+harmonic_render:
+  tempo: 120
+  time_signature: 4/4
+  velocity: 72
+  track_mode: single
+  voice_sharing_enabled: false
+  voice_sharing_threshold: 0.8
+  tracks:
+  - name: high
+  - name: middle
+  - name: low
+midi_render:
+  tempo: 120
+  time_signature: 4/4
+  velocity: 72
+  channel: 0
