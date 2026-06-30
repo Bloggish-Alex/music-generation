@@ -224,7 +224,10 @@ class LSTMTokenModel:
         candidate_mask: CandidateTokenMask,
     ) -> TokenLogitResult:
         torch, _ = LSTMTokenTorchModel._torch()
-        latents = self._padded_latents(context.latent_sequence)
+        latents = self._padded_latents(
+            context.latent_sequence,
+            context.metadata.get("latent_context_seed"),
+        )
         state_id = self._state_id(context.metadata)
         device = self.device
         with torch.no_grad():
@@ -244,6 +247,8 @@ class LSTMTokenModel:
             "state_condition_mode": "output_embedding",
             "state_embedding_dim": int(self.metadata.config.state_embedding_dim),
             "target_state_id": int(state_id),
+            "latent_context_seed_enabled": context.metadata.get("latent_context_seed") is not None,
+            "latent_context_seed_source": context.metadata.get("latent_context_seed_source"),
         })
         return TokenLogitResult(
             vocab_size=result.vocab_size,
@@ -257,6 +262,7 @@ class LSTMTokenModel:
     def _padded_latents(
         self,
         latent_sequence: Sequence[Sequence[float]],
+        latent_context_seed: Optional[Sequence[float]] = None,
     ) -> List[List[float]]:
         context_size = int(self.metadata.config.context_size)
         latent_dim = int(self.metadata.latent_dim)
@@ -267,7 +273,12 @@ class LSTMTokenModel:
             latent = latent + [0.0] * max(0, latent_dim - len(latent))
             features = latent[:input_dim] + [0.0] * max(0, input_dim - len(latent))
             values.append(features)
-        padding = [[0.0 for _ in range(input_dim)] for _ in range(max(0, context_size - len(values)))]
+        seed_row = [0.0 for _ in range(input_dim)]
+        if latent_context_seed is not None:
+            seed_values = [float(x) for x in list(latent_context_seed)[:input_dim]]
+            seed_values.extend([0.0 for _ in range(max(0, input_dim - len(seed_values)))])
+            seed_row = seed_values[:input_dim]
+        padding = [list(seed_row) for _ in range(max(0, context_size - len(values)))]
         return padding + values
 
     def _state_id(self, metadata: Dict[str, Any]) -> int:

@@ -22,10 +22,12 @@ from data.generation_data import CodebookCandidate, CodebookEntry
 from encoder.vae_bar_encoder import (
     DenoisingVAEConfig,
     DenoisingVAETrainer,
+    GLOBAL_FEATURE_NAMES,
     LatentClusterAnalyzer,
     LatentClusteringConfig,
     LatentFeatureBuilder,
 )
+from encoder.opening_seed import OpeningSeedSelector
 
 
 @dataclass
@@ -65,18 +67,6 @@ class VAELatentSymbolEncoder:
             bar.observation_id = int(label)
         vocab = self._build_vocab(labels)
         global_codebook = self._build_codebook(bars, latent_mu, cluster_features, labels)
-        reconstruction = trainer.evaluate_reconstruction(bars)
-        clustering = clusterer.diagnostics(bars, cluster_features, labels)
-        diagnostics = {
-            "backend": "vae_latent",
-            "vae_config": asdict(vae_config),
-            "cluster_config": asdict(cluster_config),
-            "latent_features": feature_builder.diagnostics(latent_mu, latent_logvar, cluster_features),
-            "training_log": trainer.training_log,
-            "reconstruction": reconstruction,
-            "clustering": clustering,
-            "observation_vocab": self._vocab_diagnostics(vocab, bars),
-        }
         encoder_model = EncoderModel.from_legacy(
             global_codebook,
             vocab,
@@ -87,8 +77,30 @@ class VAELatentSymbolEncoder:
                 "codebook_id_field": "codebook_id",
                 "symbol_policy": "observation_id_equals_latent_cluster_id",
                 "vae_config": asdict(vae_config),
+                "global_feature_names": list(GLOBAL_FEATURE_NAMES),
+                "global_feature_dim": int(vae_config.global_feature_dim()),
             },
         )
+        opening_seed = self._opening_seed_diagnostics(global_codebook, encoder_model)
+        opening_pipelines = self._opening_theme_pipeline_diagnostics(songs, opening_seed)
+        encoder_model.metadata["opening_seed_candidates"] = opening_seed
+        encoder_model.metadata["opening_theme_pipelines"] = opening_pipelines
+        reconstruction = trainer.evaluate_reconstruction(bars)
+        clustering = clusterer.diagnostics(bars, cluster_features, labels)
+        diagnostics = {
+            "backend": "vae_latent",
+            "vae_config": asdict(vae_config),
+            "global_feature_names": list(GLOBAL_FEATURE_NAMES),
+            "global_feature_dim": int(vae_config.global_feature_dim()),
+            "cluster_config": asdict(cluster_config),
+            "latent_features": feature_builder.diagnostics(latent_mu, latent_logvar, cluster_features),
+            "training_log": trainer.training_log,
+            "reconstruction": reconstruction,
+            "clustering": clustering,
+            "opening_seed_candidates": opening_seed,
+            "opening_theme_pipelines": opening_pipelines,
+            "observation_vocab": self._vocab_diagnostics(vocab, bars),
+        }
         return EncodingResult(
             observation_vocab=vocab,
             encoder_model=encoder_model,
@@ -152,6 +164,24 @@ class VAELatentSymbolEncoder:
             max_iter=int(clustering.get("max_iter", 200)),
             random_seed=int(clustering.get("random_seed", section.get("random_seed", 42))),
         )
+
+    def _opening_seed_diagnostics(
+        self,
+        global_codebook: Dict[int, CodebookEntry],
+        encoder_model: EncoderModel,
+    ) -> Dict[str, Any]:
+        decoder_config = ConfigView(self.config).section("decoder")
+        selector = OpeningSeedSelector.from_config_dict(decoder_config.get("opening_seed", {}))
+        return selector.analyze_codebook(global_codebook, encoder_model)
+
+    def _opening_theme_pipeline_diagnostics(
+        self,
+        songs: Sequence[SongRecord],
+        opening_seed: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        decoder_config = ConfigView(self.config).section("decoder")
+        selector = OpeningSeedSelector.from_config_dict(decoder_config.get("opening_seed", {}))
+        return selector.analyze_theme_pipelines(songs, opening_seed)
 
     def _compact_labels(self, labels: Sequence[int]) -> np.ndarray:
         mapping: Dict[int, int] = {}

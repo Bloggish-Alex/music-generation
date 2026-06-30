@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
+from scipy.stats import skew
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 
@@ -23,6 +24,20 @@ SUSTAIN_TOKEN = -2
 NOTE_TYPE_REST = 0
 NOTE_TYPE_SUSTAIN = 1
 NOTE_TYPE_ON = 2
+GLOBAL_FEATURE_NAMES = (
+    "note_on_ratio",
+    "rest_ratio",
+    "sustain_ratio",
+    "active_ratio",
+    "pitch_variance_norm",
+    "sharing_score",
+    "pitch_range_norm",
+    "interval_variance_norm",
+    "first_note_offset_norm",
+    "last_note_offset_norm",
+    "pitch_skewness",
+    "rhythm_centroid",
+)
 
 
 @dataclass(frozen=True)
@@ -46,7 +61,7 @@ class DenoisingVAEConfig:
     sustain_fill_prob: float = 0.10
     drop_to_rest_prob: float = 0.5
     ornament_pitch_radius: int = 2
-    pitch_scale: float = 24.0
+    pitch_scale: float = 24.0 # according to 12-TET, 2 Octaves = 24 semitones
     condition_on_previous_last_pitch: bool = True
     previous_last_pitch_scale: float = 24.0
     decoder_head_architecture: str = "split_rhythm_pitch"
@@ -55,21 +70,35 @@ class DenoisingVAEConfig:
     device: str = "cpu"
 
     def input_dim(self) -> int:
+        """
+        multi_channel:   16 time steps × 4 channels + 12 global features = 76
+            16 time steps per bar
+            4 channles per time step:
+                event_type: REST / SUSTAIN / NOTE_ON
+                pitch_value: integer for NOTE_ON, normalized relative pitch
+                onset_mask: NOTE_ON = 1, 0 for others
+                sustain_mask: SUSTAIN = 1, 0 for others
+            bar-level global features: see GLOBAL_FEATURE_NAMES
+
+        """
         if self.input_mode == "token":
             return int(self.steps_per_bar)
         if self.input_mode == "multi_channel":
-            return int(self.steps_per_bar * 4 + 8)
+            return int(self.steps_per_bar * 4 + self.global_feature_dim())
         raise ValueError("vae_encoder.input_mode must be 'token' or 'multi_channel'.")
+
+    def global_feature_dim(self) -> int:
+        return len(GLOBAL_FEATURE_NAMES)
 
 
 @dataclass(frozen=True)
 class LatentClusteringConfig:
     """Config for clustering z_mu vectors."""
 
-    method: str = "kmeans"
-    feature_mode: str = "mu"
+    method: str = "kmeans" # gmm or kmeans
+    feature_mode: str = "mu" # mu or mu_logvar
     logvar_weight: float = 0.25
-    n_clusters: int = 384
+    n_clusters: int = 192
     distance_threshold: float = 1.0
     linkage_method: str = "average"
     covariance_type: str = "full"
@@ -93,16 +122,22 @@ class BarTokenCodec:
     def input_vector(self, tokens: Sequence[int]) -> np.ndarray:
         if self.config.input_mode == "token":
             return np.asarray([float(token) / self.config.pitch_scale for token in tokens], dtype=np.float32)
+
         if self.config.input_mode != "multi_channel":
             raise ValueError("vae_encoder.input_mode must be 'token' or 'multi_channel'.")
+
         event = self.type_targets(tokens).astype(np.float32) / 2.0
         pitch = self.pitch_targets(tokens)
         onset = self.onset_targets(tokens)
         sustain = self.sustain_targets(tokens)
         step_features = np.stack([event, pitch, onset, sustain], axis=1).reshape(-1)
+
         return np.concatenate([step_features, self.global_targets(tokens)], axis=0).astype(np.float32)
 
     def type_targets(self, tokens: Sequence[int]) -> np.ndarray:
+        """
+        event type to be used as tarin target for VAE Decoder output
+        """
         result = []
         for token in tokens:
             token = int(token)
@@ -115,6 +150,10 @@ class BarTokenCodec:
         return np.asarray(result, dtype=np.int64)
 
     def pitch_targets(self, tokens: Sequence[int]) -> np.ndarray:
+        """
+        pitch to be used as tarin target for VAE Decoder output
+        """
+
         return np.asarray([
             float(token) / self.config.pitch_scale if int(token) >= 0 else 0.0
             for token in tokens
@@ -133,6 +172,7 @@ class BarTokenCodec:
         values = [int(token) for token in tokens]
         count = max(1, len(values))
         note_values = [token for token in values if token >= 0]
+        note_indices = [index for index, token in enumerate(values) if token >= 0]
         note_count = len(note_values)
         rest_count = sum(1 for token in values if token == REST_TOKEN)
         sustain_count = sum(1 for token in values if token == SUSTAIN_TOKEN)
@@ -140,10 +180,21 @@ class BarTokenCodec:
             int(right) - int(left)
             for left, right in zip(note_values, note_values[1:])
         ]
+
         variance = float(np.var(note_values)) if note_values else 0.0
         pitch_range = float(max(note_values) - min(note_values)) if note_values else 0.0
         interval_mean = float(np.mean(intervals)) if intervals else 0.0
         interval_var = float(np.var(intervals)) if intervals else 0.0
+        first_note_offset = float(note_values[0] / self.config.pitch_scale) if note_values else 0.0
+        last_note_offset = float(note_values[-1] / self.config.pitch_scale) if note_values else 0.0
+        pitch_skewness = self._pitch_skewness(note_values)
+        rhythm_centroid = (
+            float(np.mean(note_indices) / max(1, self.config.steps_per_bar - 1))
+            if note_indices
+            else 0.0
+        )
+
+        # Feature order is part of the trained-model contract; keep it aligned with GLOBAL_FEATURE_NAMES.
         return np.asarray([
             float(note_count / count),
             float(rest_count / count),
@@ -153,7 +204,24 @@ class BarTokenCodec:
             float(1.0 / (1.0 + max(0.0, variance))),
             float(pitch_range / self.config.pitch_scale),
             float(interval_var / (self.config.pitch_scale ** 2)),
+            first_note_offset,
+            last_note_offset,
+            pitch_skewness,
+            rhythm_centroid,
         ], dtype=np.float32)
+
+    def _pitch_skewness(self, note_values: Sequence[int]) -> float:
+        if len(note_values) < 3:
+            return 0.0
+        values = np.asarray(note_values, dtype=np.float32)
+        if float(np.max(values) - np.min(values)) <= 1e-6:
+            return 0.0
+        if float(np.var(values)) <= 1e-6:
+            return 0.0
+        value = float(skew(values))
+        if not math.isfinite(value):
+            return 0.0
+        return value
 
 
 class BarNoiseInjector:
@@ -285,7 +353,7 @@ class DenoisingBarVAE:
                 self.pitch_activation = nn.Hardtanh(min_val=-1.0, max_val=1.0)
                 self.onset_head = nn.Linear(config.hidden_dim, config.steps_per_bar)
                 self.sustain_head = nn.Linear(config.hidden_dim, config.steps_per_bar)
-                self.global_head = nn.Linear(config.hidden_dim, 8)
+                self.global_head = nn.Linear(config.hidden_dim, config.global_feature_dim())
 
             def encode(self, x):
                 hidden = self.encoder(x)
@@ -483,6 +551,8 @@ class DenoisingVAETrainer:
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             "config": asdict(self.config),
+            "global_feature_names": list(GLOBAL_FEATURE_NAMES),
+            "global_feature_dim": int(self.config.global_feature_dim()),
             "state_dict": self.model.state_dict(),
             "training_log": self.training_log,
         }, path)

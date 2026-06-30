@@ -19,6 +19,7 @@ from diagnostics.diagnostics import GenerationDiagnostics
 from data.generation_data import CodebookCandidate, GenerationResult, HarmonyBarPlan, SampledBar, SectionPlanItem
 from decoder.latent_token_model import LatentTokenContext
 from decoder.lstm_token_model import LSTMTokenModel
+from encoder.opening_seed import OpeningSeedSelector
 from decoder.temporal_graph import (
     CandidateTokenMask,
     RuntimeThemeGraphConfig,
@@ -50,6 +51,8 @@ class FormDrivenGenerator:
         self.diagnostics = GenerationDiagnostics()
         self.lstm_ranker = self._load_lstm_ranker()
         self.dvae_decoder = self._load_dvae_decoder()
+        self.opening_seed_selector = self._build_opening_seed_selector()
+        self.opening_theme_pipeline: Optional[Dict[str, Any]] = None
         self.theme_graph: Optional[RuntimeThemeGraphController] = None
 
     def generate(self, form_name: str, seed: Optional[int] = None) -> GenerationResult:
@@ -59,6 +62,7 @@ class FormDrivenGenerator:
         plan = SectionPlanBuilder().build(self.bundle, form_name)
         harmony_plan = HarmonyProgressionPlanner.from_style_config(self.config).plan(plan, seed)
         self.theme_graph = self._build_theme_graph(form_name)
+        self.opening_theme_pipeline = self._select_opening_theme_pipeline(rng)
         self.diagnostics.record_stage("decoder_model", {
             "form": form_name,
             "model_type": str(getattr(model, "diagnostics", {}).get("model_type", model.__class__.__name__)),
@@ -66,6 +70,8 @@ class FormDrivenGenerator:
             "observation_count": int(getattr(model, "n_observations", 0)),
             "section_lengths": list(getattr(model, "section_lengths", [])),
         })
+        if self.opening_theme_pipeline is not None:
+            self.diagnostics.record_stage("opening_theme_pipeline", self.opening_theme_pipeline)
         self.diagnostics.record_section_plan([section.to_dict() for section in plan])
         sampled = []
         sampled_by_section: Dict[str, List[SampledBar]] = {}
@@ -154,12 +160,10 @@ class FormDrivenGenerator:
             raise ValueError(
                 f"decoder.backend='temporal_lstm' requires temporal_graph_templates.{form_name}.action_script."
             )
-        token_density = self._theme_graph_token_density()
         controller = RuntimeThemeGraphController(
             template=template,
             vocab_size=int(self.lstm_ranker.metadata.vocab_size),
             config=graph_config,
-            token_density=token_density,
         )
         self.diagnostics.record_stage("temporal_graph", {
             "backend": "temporal_lstm",
@@ -173,8 +177,6 @@ class FormDrivenGenerator:
                 "anchor_span_bars": int(graph_config.anchor_span_bars),
                 "aligned_anchor_bias": float(graph_config.aligned_anchor_bias),
                 "same_theme_memory_bias": float(graph_config.same_theme_memory_bias),
-                "memory_density_filter_enabled": bool(graph_config.memory_density_filter_enabled),
-                "memory_density_note_on_tolerance": int(graph_config.memory_density_note_on_tolerance),
                 "planning_enabled": bool(graph_config.planning_enabled),
                 "planning_window_bars": int(graph_config.planning_window_bars),
                 "planning_beam_width": int(graph_config.planning_beam_width),
@@ -185,30 +187,35 @@ class FormDrivenGenerator:
             },
             "configured_sections": sorted(template.action_script.keys()),
             "theme_memory_config": template.theme_memory_config,
-            "token_density_count": int(len(token_density)),
         })
         return controller
 
-    def _theme_graph_token_density(self) -> Dict[int, Dict[str, Any]]:
-        if self.bundle.encoder_model is None or self.lstm_ranker is None:
-            return {}
-        result: Dict[int, Dict[str, Any]] = {}
-        for symbol_id in range(int(self.lstm_ranker.metadata.vocab_size)):
-            try:
-                entry = self.bundle.encoder_model.codebook_entry_for_symbol(int(symbol_id))
-            except KeyError:
-                continue
-            density = getattr(entry, "density", None)
-            if density is None:
-                continue
-            if hasattr(density, "to_dict"):
-                result[int(symbol_id)] = dict(density.to_dict())
-            else:
-                result[int(symbol_id)] = dict(density)
-        return result
-
     def _uses_temporal_graph_decoder(self) -> bool:
         return str(ConfigView(self.config).section("decoder").get("backend", "temporal_lstm")) == "temporal_lstm"
+
+    def _build_opening_seed_selector(self) -> OpeningSeedSelector:
+        decoder_config = ConfigView(self.config).section("decoder")
+        return OpeningSeedSelector.from_config_dict(decoder_config.get("opening_seed", {}))
+
+    def _opening_seed_config(self) -> Dict[str, Any]:
+        config = ConfigView(self.config).section("decoder").get("opening_seed", {})
+        return config if isinstance(config, dict) else {}
+
+    def _opening_seed_mode(self) -> str:
+        config = self._opening_seed_config()
+        if not bool(config.get("enabled", True)):
+            return "disabled"
+        return str(config.get("mode", "single_bar_pool"))
+
+    def _select_opening_theme_pipeline(self, rng: np.random.Generator) -> Optional[Dict[str, Any]]:
+        if self._opening_seed_mode() != "theme_pipeline":
+            return None
+        if self.bundle.encoder_model is None:
+            return None
+        return self.opening_seed_selector.select_theme_pipeline(
+            self.bundle.encoder_model.metadata,
+            rng,
+        )
 
     def _sample_event(
         self,
@@ -245,6 +252,7 @@ class FormDrivenGenerator:
             sampled_history,
             harmony,
             previous_harmony,
+            output_bar_index,
             rng,
         )
         composite = self.bundle.symbol_vocabulary.descriptor_key_for(observation_id)
@@ -589,6 +597,7 @@ class FormDrivenGenerator:
         sampled_history: Sequence[SampledBar],
         harmony: HarmonyBarPlan,
         previous_harmony: Optional[HarmonyBarPlan],
+        output_bar_index: int,
         rng: np.random.Generator,
     ) -> tuple[int, float, Dict[str, Any]]:
         reranked = self._sample_observation_with_lstm_ranker(
@@ -599,6 +608,7 @@ class FormDrivenGenerator:
             sampled_history,
             harmony,
             previous_harmony,
+            output_bar_index,
             rng,
         )
         if reranked is not None:
@@ -667,6 +677,7 @@ class FormDrivenGenerator:
         sampled_history: Sequence[SampledBar],
         harmony: HarmonyBarPlan,
         previous_harmony: Optional[HarmonyBarPlan],
+        output_bar_index: int,
         rng: np.random.Generator,
     ) -> Optional[tuple[int, float, Dict[str, Any]]]:
         decoder_config = ConfigView(self.config).section("decoder")
@@ -679,7 +690,9 @@ class FormDrivenGenerator:
         if probs.size == 0:
             return None
         context = self._lstm_context(sampled_history, state_id, local_index)
+        context = self._opening_seeded_context(context, int(output_bar_index), rng)
         temporal_action_label: Optional[str] = None
+        action_state = None
         if backend == "temporal_lstm":
             if self.theme_graph is None:
                 raise ValueError("decoder.backend='temporal_lstm' requires temporal graph templates in config.")
@@ -751,6 +764,51 @@ class FormDrivenGenerator:
             decoder_config,
             temporal_action_label,
         )
+        theme_pipeline_selection = self._theme_pipeline_selection(
+            int(output_bar_index),
+            candidates,
+            processed_logits,
+        )
+        if theme_pipeline_selection is not None:
+            observation_id = int(theme_pipeline_selection["selected_symbol_id"])
+            phrase_planning = {
+                "enabled": False,
+                "reason": "opening_theme_pipeline_bootstrap",
+            }
+            rank_rows = self._lstm_rank_rows(
+                candidates,
+                processed_logits,
+                probs,
+                int(decoder_config.get("lstm_diagnostics_top_k", 8)),
+            )
+            selected_rank = next(
+                (int(row["rank"]) for row in rank_rows if int(row["observation_id"]) == observation_id),
+                None,
+            )
+            selected_lstm_probability = self._probability_from_logits(processed_logits, observation_id, candidates)
+            if backend == "temporal_lstm" and self.theme_graph is not None:
+                self.theme_graph.remember_selection(
+                    action_state,
+                    int(observation_id),
+                )
+            return observation_id, float(probs[observation_id]) if observation_id < len(probs) else 0.0, {
+                "strategy": "temporal_lstm_logits" if backend == "temporal_lstm" else "lstm_token_logits",
+                "used_position_conditioning": False,
+                "hidden_state": int(state_id),
+                "context_token_ids": [int(token) for token in context.token_ids],
+                "candidate_source": candidate_source,
+                "candidate_count": int(len(candidates)),
+                "lstm_temperature": float(decoder_config.get("lstm_temperature", 0.9)),
+                "lstm_diagnostics": result.diagnostics,
+                "opening_seed_context": context.metadata.get("opening_seed"),
+                "selected_lstm_rank": selected_rank,
+                "selected_lstm_probability": selected_lstm_probability,
+                "lstm_top_tokens": rank_rows,
+                "boundary_continuity": boundary_diagnostics,
+                "temporal_graph": temporal_diagnostics,
+                "phrase_planning": phrase_planning,
+                "opening_seed": theme_pipeline_selection,
+            }
         candidate_values = processed_logits[candidates]
         finite = np.isfinite(candidate_values)
         if not np.any(finite):
@@ -800,13 +858,8 @@ class FormDrivenGenerator:
         selected_lstm_probability = self._probability_from_logits(processed_logits, observation_id, candidates)
         if backend == "temporal_lstm" and self.theme_graph is not None:
             self.theme_graph.remember_selection(
-                self.theme_graph.action_state(
-                    section=str(harmony.section),
-                    section_local_index=int(local_index),
-                    section_length=int(section_length),
-                    harmony_degree=harmony.degree,
-                ),
-                observation_id,
+                action_state,
+                int(observation_id),
             )
         return observation_id, float(probs[observation_id]), {
             "strategy": "temporal_lstm_logits" if backend == "temporal_lstm" else "lstm_token_logits",
@@ -816,6 +869,8 @@ class FormDrivenGenerator:
             "candidate_source": candidate_source,
             "candidate_count": int(len(candidates)),
             "lstm_temperature": float(temperature),
+            "lstm_diagnostics": result.diagnostics,
+            "opening_seed_context": context.metadata.get("opening_seed"),
             "selected_lstm_rank": selected_rank,
             "selected_lstm_probability": selected_lstm_probability,
             "lstm_top_tokens": rank_rows,
@@ -1105,6 +1160,75 @@ class FormDrivenGenerator:
                 "temporal_action": action_state.action.value,
             },
         )
+
+    def _opening_seeded_context(
+        self,
+        context: LatentTokenContext,
+        output_bar_index: int,
+        rng: np.random.Generator,
+    ) -> LatentTokenContext:
+        config = self._opening_seed_config()
+        if self._opening_seed_mode() != "single_bar_pool":
+            return context
+        if int(output_bar_index) >= max(0, int(config.get("bootstrap_bars", 1))):
+            return context
+        if self.bundle.encoder_model is None:
+            return context
+        selected = self.opening_seed_selector.select_seed_context(
+            self.bundle.encoder_model.metadata,
+            rng,
+        )
+        if selected is None:
+            return context
+        symbol_id = int(selected.get("symbol_id", selected.get("token_id", -1)))
+        latent = self._latent_for_observation(symbol_id)
+        if latent is None:
+            return context
+        return LatentTokenContext(
+            token_ids=list(context.token_ids),
+            latent_sequence=[list(row) for row in context.latent_sequence],
+            action_state=context.action_state,
+            metadata={
+                **context.metadata,
+                "latent_context_seed": [float(value) for value in latent],
+                "latent_context_seed_source": "opening_seed_single_bar_pool",
+                "opening_seed": selected,
+            },
+        )
+
+    def _theme_pipeline_selection(
+        self,
+        output_bar_index: int,
+        candidates: np.ndarray,
+        logits: np.ndarray,
+    ) -> Optional[Dict[str, Any]]:
+        if self._opening_seed_mode() != "theme_pipeline":
+            return None
+        pipeline = self.opening_theme_pipeline
+        if not pipeline:
+            return None
+        symbol_ids = [int(value) for value in pipeline.get("symbol_ids", [])]
+        if int(output_bar_index) < 0 or int(output_bar_index) >= len(symbol_ids):
+            return None
+        selected = int(symbol_ids[int(output_bar_index)])
+        if selected < 0 or selected >= len(logits):
+            return None
+        allowed = {int(value) for value in candidates.tolist()}
+        return {
+            "enabled": True,
+            "strategy": "opening_theme_pipeline",
+            "mode": "theme_pipeline",
+            "selected_symbol_id": int(selected),
+            "pipeline_position": int(output_bar_index),
+            "pipeline_length": int(len(symbol_ids)),
+            "selected_symbol_allowed_by_graph": bool(selected in allowed),
+            "selected_logit_finite_before_force": bool(np.isfinite(logits[selected])),
+            "pipeline": {
+                key: value
+                for key, value in pipeline.items()
+                if key != "bars"
+            },
+        }
 
     def _previous_last_relative_note_pitch(self, sampled_history: Sequence[SampledBar]) -> Optional[int]:
         if not sampled_history:

@@ -379,6 +379,17 @@ class RuntimeThemeGraphConfig:
     same_theme_memory_bias: float = 1.5
     memory_density_filter_enabled: bool = True
     memory_density_note_on_tolerance: int = 4
+    latent_trajectory_enabled: bool = True
+    prototype_blend_weight: Dict[str, float] = field(default_factory=dict)
+    movement_blend_weight: Dict[str, float] = field(default_factory=dict)
+    decode_with_planned_latent: bool = True
+    continuation_rerank_enabled: bool = True
+    continuation_weight: float = 0.20
+    continuation_sigma: float = 3.0
+    prototype_rerank_weight: float = 0.35
+    prototype_rerank_sigma: float = 2.5
+    density_rerank_weight: float = 0.08
+    density_rerank_sigma: float = 4.0
     planning_enabled: bool = True
     planning_window_bars: int = 4
     planning_beam_width: int = 4
@@ -393,6 +404,12 @@ class RuntimeThemeGraphConfig:
         section = section if isinstance(section, dict) else {}
         action_temperature = section.get("action_temperature", {})
         action_temperature = action_temperature if isinstance(action_temperature, Mapping) else {}
+        latent_section = section.get("latent_trajectory", {})
+        latent_section = latent_section if isinstance(latent_section, Mapping) else {}
+        prototype_blend = latent_section.get("prototype_blend_weight", {})
+        prototype_blend = prototype_blend if isinstance(prototype_blend, Mapping) else {}
+        movement_blend = latent_section.get("movement_blend_weight", {})
+        movement_blend = movement_blend if isinstance(movement_blend, Mapping) else {}
         return cls(
             enabled=bool(section.get("enabled", False)),
             candidate_top_k=int(section.get("candidate_top_k", 32)),
@@ -404,6 +421,17 @@ class RuntimeThemeGraphConfig:
             same_theme_memory_bias=float(section.get("same_theme_memory_bias", 1.5)),
             memory_density_filter_enabled=bool(section.get("memory_density_filter_enabled", True)),
             memory_density_note_on_tolerance=int(section.get("memory_density_note_on_tolerance", 4)),
+            latent_trajectory_enabled=bool(latent_section.get("enabled", True)),
+            prototype_blend_weight={str(key): float(value) for key, value in prototype_blend.items()},
+            movement_blend_weight={str(key): float(value) for key, value in movement_blend.items()},
+            decode_with_planned_latent=bool(latent_section.get("decode_with_planned_latent", True)),
+            continuation_rerank_enabled=bool(latent_section.get("continuation_rerank_enabled", True)),
+            continuation_weight=float(latent_section.get("continuation_weight", 0.20)),
+            continuation_sigma=float(latent_section.get("continuation_sigma", 3.0)),
+            prototype_rerank_weight=float(latent_section.get("prototype_rerank_weight", 0.35)),
+            prototype_rerank_sigma=float(latent_section.get("prototype_rerank_sigma", 2.5)),
+            density_rerank_weight=float(latent_section.get("density_rerank_weight", 0.08)),
+            density_rerank_sigma=float(latent_section.get("density_rerank_sigma", 4.0)),
             planning_enabled=bool(section.get("planning_enabled", True)),
             planning_window_bars=int(section.get("planning_window_bars", 4)),
             planning_beam_width=int(section.get("planning_beam_width", 4)),
@@ -420,6 +448,16 @@ class RuntimeThemeGraphConfig:
         action_name = action.value if isinstance(action, TemporalAction) else str(action)
         value = self.action_temperature.get(action_name, self.action_temperature.get("default", fallback))
         return max(1.0e-6, float(value))
+
+    def prototype_weight_for_action(self, action: TemporalAction | str, fallback: float = 0.25) -> float:
+        action_name = action.value if isinstance(action, TemporalAction) else str(action)
+        value = self.prototype_blend_weight.get(action_name, self.prototype_blend_weight.get("default", fallback))
+        return min(1.0, max(0.0, float(value)))
+
+    def movement_weight_for_action(self, action: TemporalAction | str, fallback: float = 0.10) -> float:
+        action_name = action.value if isinstance(action, TemporalAction) else str(action)
+        value = self.movement_blend_weight.get(action_name, self.movement_blend_weight.get("default", fallback))
+        return min(1.0, max(0.0, float(value)))
 
 
 class RuntimeThemeGraphController:
@@ -542,12 +580,19 @@ class RuntimeThemeGraphController:
             )
         return result
 
-    def remember_selection(self, state: TemporalActionState, token_id: SymbolID) -> None:
+    def remember_selection(
+        self,
+        state: TemporalActionState,
+        token_id: SymbolID,
+        latent_vector: Optional[Sequence[float]] = None,
+        token_density: Optional[Dict[str, Any]] = None,
+    ) -> None:
         theme_id = state.target_theme_id
         if not theme_id:
             return
         sequences = self.memory.metadata.setdefault("theme_sequences", {})
         density_profiles = self.memory.metadata.setdefault("theme_density_profiles", {})
+        latent_profiles = self.memory.metadata.setdefault("theme_latent_profiles", {})
         sequence = sequences.setdefault(str(theme_id), [])
         if (
             state.action in self.INTRODUCTION_ACTIONS
@@ -555,6 +600,7 @@ class RuntimeThemeGraphController:
         ) or not sequence:
             sequence.append(int(token_id))
             self._remember_theme_density(density_profiles, str(theme_id), int(token_id))
+            self._remember_theme_latent(latent_profiles, str(theme_id), int(token_id), latent_vector, token_density)
             if len(sequence) > max(1, self.config.memory_window):
                 del sequence[:-max(1, self.config.memory_window)]
             if str(theme_id) not in self.memory.theme_anchors:
@@ -566,6 +612,7 @@ class RuntimeThemeGraphController:
                         "introduced_in": state.section,
                         "section_local_index": int(state.section_local_index),
                         "density_profile": self._theme_density_profile(str(theme_id)),
+                        "latent_profile": self._theme_latent_profile(str(theme_id)),
                     },
                 ))
         self.memory.remember_selection(
@@ -573,6 +620,84 @@ class RuntimeThemeGraphController:
             token_id=int(token_id),
             max_recent=max(1, self.config.memory_window),
         )
+
+    def planned_latent_for_selection(
+        self,
+        state: TemporalActionState,
+        token_id: SymbolID,
+        selected_latent: Optional[Sequence[float]],
+        previous_latent: Optional[Sequence[float]] = None,
+    ) -> Dict[str, Any]:
+        if not self.config.latent_trajectory_enabled or selected_latent is None:
+            return {
+                "enabled": bool(self.config.latent_trajectory_enabled),
+                "used": False,
+                "reason": "disabled_or_missing_selected_latent",
+            }
+        selected = [float(value) for value in selected_latent]
+        prototype = self.prototype_latent_for_state(state)
+        proto_weight = self.config.prototype_weight_for_action(state.action)
+        movement_weight = self.config.movement_weight_for_action(state.action)
+        planned = list(selected)
+        used_sources = ["selected_token_latent"]
+        if state.action in self.MEMORY_ACTIONS and prototype is not None and proto_weight > 0.0:
+            planned = self._blend_vectors(planned, prototype, proto_weight)
+            used_sources.append("theme_prototype")
+        movement = self.prototype_movement_for_state(state)
+        if state.action in self.MEMORY_ACTIONS and previous_latent is not None and movement is not None and movement_weight > 0.0:
+            moved = [
+                float(previous_latent[index]) + float(movement[index])
+                for index in range(min(len(previous_latent), len(movement)))
+            ]
+            planned = self._blend_vectors(planned, moved, movement_weight)
+            used_sources.append("theme_prototype_movement")
+        return {
+            "enabled": True,
+            "used": bool(len(used_sources) > 1 and self.config.decode_with_planned_latent),
+            "decode_with_planned_latent": bool(self.config.decode_with_planned_latent),
+            "token_id": int(token_id),
+            "action": state.action.value,
+            "target_theme_id": state.target_theme_id,
+            "prototype_weight": float(proto_weight),
+            "movement_weight": float(movement_weight),
+            "has_prototype": prototype is not None,
+            "has_movement": movement is not None,
+            "source": "+".join(used_sources),
+            "latent_vector": [float(value) for value in planned],
+            "selected_latent_norm": self._vector_norm(selected),
+            "planned_latent_norm": self._vector_norm(planned),
+            "prototype_distance": self._vector_distance(selected, prototype) if prototype is not None else None,
+        }
+
+    def prototype_latent_for_state(self, state: TemporalActionState) -> Optional[List[float]]:
+        if state.target_theme_id is None:
+            return None
+        profile = self._theme_latent_profile(str(state.target_theme_id))
+        vectors = profile.get("latent_vectors", [])
+        if not isinstance(vectors, list) or not vectors:
+            return None
+        index = self._anchor_index(state, len(vectors))
+        vector = vectors[index]
+        return [float(value) for value in vector] if isinstance(vector, list) else None
+
+    def prototype_movement_for_state(self, state: TemporalActionState) -> Optional[List[float]]:
+        if state.target_theme_id is None:
+            return None
+        profile = self._theme_latent_profile(str(state.target_theme_id))
+        vectors = profile.get("latent_vectors", [])
+        if not isinstance(vectors, list) or len(vectors) < 2:
+            return None
+        index = self._anchor_index(state, len(vectors))
+        previous_index = max(0, index - 1)
+        current = vectors[index]
+        previous = vectors[previous_index]
+        if not isinstance(current, list) or not isinstance(previous, list):
+            return None
+        length = min(len(current), len(previous))
+        return [float(current[i]) - float(previous[i]) for i in range(length)]
+
+    def density_target_for_state(self, state: TemporalActionState) -> Optional[float]:
+        return self._theme_anchor_note_on_count(state)
 
     def _allowed_ids(
         self,
@@ -660,6 +785,35 @@ class RuntimeThemeGraphController:
             del counts[:-max(1, int(self.config.anchor_span_bars))]
         profile["mean_note_on_count"] = float(sum(counts) / max(1, len(counts)))
 
+    def _remember_theme_latent(
+        self,
+        latent_profiles: Dict[str, Any],
+        theme_id: str,
+        token_id: SymbolID,
+        latent_vector: Optional[Sequence[float]],
+        token_density: Optional[Dict[str, Any]],
+    ) -> None:
+        if latent_vector is None:
+            return
+        profile = latent_profiles.setdefault(str(theme_id), {"token_ids": [], "latent_vectors": [], "density": []})
+        token_ids = profile.setdefault("token_ids", [])
+        vectors = profile.setdefault("latent_vectors", [])
+        densities = profile.setdefault("density", [])
+        token_ids.append(int(token_id))
+        vectors.append([float(value) for value in latent_vector])
+        densities.append(dict(token_density or {}))
+        limit = max(1, int(self.config.anchor_span_bars))
+        if len(token_ids) > limit:
+            del token_ids[:-limit]
+            del vectors[:-limit]
+            del densities[:-limit]
+        profile["latent_dim"] = int(len(vectors[-1])) if vectors else 0
+
+    def _theme_latent_profile(self, theme_id: str) -> Dict[str, Any]:
+        profiles = self.memory.metadata.get("theme_latent_profiles", {})
+        profile = profiles.get(str(theme_id), {}) if isinstance(profiles, dict) else {}
+        return dict(profile) if isinstance(profile, dict) else {}
+
     def _theme_density_profile(self, theme_id: str) -> Dict[str, Any]:
         profiles = self.memory.metadata.get("theme_density_profiles", {})
         profile = profiles.get(str(theme_id), {}) if isinstance(profiles, dict) else {}
@@ -675,6 +829,33 @@ class RuntimeThemeGraphController:
         density = self.token_density.get(int(token_id), {})
         value = density.get("note_on_count")
         return int(value) if value is not None else None
+
+    def _blend_vectors(self, base: Sequence[float], target: Sequence[float], weight: float) -> List[float]:
+        length = min(len(base), len(target))
+        if length <= 0:
+            return [float(value) for value in base]
+        blended = [
+            (1.0 - float(weight)) * float(base[index]) + float(weight) * float(target[index])
+            for index in range(length)
+        ]
+        if len(base) > length:
+            blended.extend(float(value) for value in base[length:])
+        return blended
+
+    def _vector_distance(
+        self,
+        left: Optional[Sequence[float]],
+        right: Optional[Sequence[float]],
+    ) -> Optional[float]:
+        if left is None or right is None:
+            return None
+        length = min(len(left), len(right))
+        if length <= 0:
+            return None
+        return sum((float(left[index]) - float(right[index])) ** 2 for index in range(length)) ** 0.5
+
+    def _vector_norm(self, vector: Sequence[float]) -> float:
+        return sum(float(value) ** 2 for value in vector) ** 0.5
 
     def _density_filter_diagnostics(self, state: TemporalActionState) -> Dict[str, Any]:
         raw = self._theme_sequence(state)
