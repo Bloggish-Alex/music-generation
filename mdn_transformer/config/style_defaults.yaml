@@ -1,0 +1,438 @@
+#
+# Runtime style defaults. Stable music-theory knowledge such as form templates
+# and temporal graph scripts is stored in form_knowledge.yaml and included here.
+#
+include:
+  form_knowledge: form_knowledge.yaml
+  trajectory_recurrence: trajectory_recurrence.yaml
+
+grid_tokenizer:
+  steps_per_bar: 16
+  bar_length_ql: 4.0
+
+music_parser:
+  bar_length_ql: 4.0
+  quantize_input: true
+  quantize_divisors: [4, 3]
+  quantize_offsets: true
+  quantize_durations: true
+  max_tracks: 3
+  register_split_low_max: 55
+  register_split_mid_max: 72
+  default_velocity: 64
+
+bar_tensor:
+  backend: semantic_3voice  # legacy_physical / semantic_3voice
+  max_tracks: 3
+  steps_per_bar: 16
+  feature_dim: 18
+  pitch_scale: 24.0
+  velocity_scale: 127.0
+  rest_feature_value: 1.0
+  melody_continuity_tolerance: 7
+  harmony_velocity_mode: max
+
+action_labeler:
+  repeat_similarity_threshold: 0.95
+  return_similarity_threshold: 0.85
+  return_min_consecutive: 2
+  theme_anchor_bars: 4
+  introduce_bars: 8
+  develop_multiplier: 1.3
+  phrase_length_bars: 8
+  cadence_tail_bars: 2
+  cadence_density_multiplier: 0.75
+  cadence_variance_multiplier: 0.75
+  tonic_pitch_classes: [0, 7]
+
+dvae:
+  tracks: 3
+  steps_per_bar: 16
+  feature_dim: 18
+  latent_dim: 48
+  dropout: 0.3
+  beta_kl: 0.003
+  pitch_loss_weight: 1.0
+  state_loss_weight: 1.0
+  velocity_loss_weight: 0.5
+  chord_loss_weight: 0.25
+  physical_chroma_loss_weight: 1.0  # KL(C_gt || C_decoded)
+  chroma_delta_loss_weight: 1.0     # scale-normalized Chroma delta MSE
+  physical_chroma_sigma: 0.35
+  note_drop_prob: 0.15
+  sustain_fill_prob: 0.10
+  drop_to_rest_prob: 0.5
+  ornament_pitch_noise_std: 0.05
+  velocity_noise_std: 0.01
+  weight_decay: 0.0001
+
+dvae_training:
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.001
+  validation_ratio: 0.1
+  random_seed: 42
+  device: cuda
+  transpose_semitones: [0,1,2,3,4,5,6,7,8,9,10,11]
+  save_encoded_artifacts: true
+  diagnostics_top_k: 20
+
+miditok_bar_sequence_encoder:
+  latent_dim: 32
+  max_events: 64
+  pitch_min: -48
+  pitch_max: 48
+  velocity_bins: 8
+  position_vocab_size: 17
+  track_vocab_size: 4
+  duration_vocab_size: 17
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  dropout: 0.1
+  field_embedding_dim: 32
+  cosine_loss_weight: 0.1
+
+base_pitch_motion:
+  latent_dim: 32
+  context_bars: 16
+  d_model: 128
+  n_layers: 2
+  n_heads: 4
+  dropout: 0.1
+  delta_min: -7
+  delta_max: 7
+  base_pitch_scale: 127.0
+
+miditok_bar_sequence_training:
+  epochs: 40
+  batch_size: 256
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  validation_ratio: 0.2
+  random_seed: 42
+  device: cuda
+  early_stopping_patience: 5
+  export_embeddings: true
+  max_rows: null
+
+latent_generation:
+  bars: 32
+  primer_bars: 8
+  backend: hybrid_miditok_retrieval  # hybrid_miditok_retrieval / direct_mdn / retrieval_mdn / memory_latent / anchor_motion_composer
+  model_variant: root  # root / theme_fusion
+  temperature: 0.9
+  sample_std_scale: 0.0
+  default_action: VARY
+  action_plan: source  # source / sections / cycle
+  action_sections: INTRODUCE:8,VARY:8,DEVELOP:8,RETURN:6,CADENCE:2
+  seed: 42
+  device: cuda
+  base_pitch: 60
+  tempo_bpm: 100
+  retrieval_top_k: 24
+  retrieval_temperature: 0.35
+  retrieval_distance_weight: 1.0
+  retrieval_energy_weight: 1.25
+  retrieval_position_weight: 0.25
+  retrieval_recent_penalty: 2.0
+  retrieval_recent_window: 8
+  candidate_transpose_mode: canonical_only
+  base_pitch_mode: learned  # source / fixed / learned
+  base_pitch_delta_min: -7
+  base_pitch_delta_max: 7
+  render_base_pitch_min: 36
+  render_base_pitch_max: 84
+  retrieval_use_retrieved_tensors: null  # null: retrieval_mdn uses tensors, memory_latent decodes selected latents
+  energy_curve: INTRODUCE:0.35,VARY:0.55,DEVELOP:0.9,RETURN:0.7,CADENCE:0.45
+  energy_arc_strength: 0.15
+  memory_scope_enabled: true
+  memory_scope_top_n: 4
+  memory_scope_develop_top_n: 12
+
+# ---------------------------------------------------------------------------
+# The following is only for experiments.
+# ---------------------------------------------------------------------------
+
+remi_motion:
+  architecture: aligned_tristream
+  context_bars: 8
+  max_context_tokens: 1024
+  max_bar_tokens: 192
+  latent_dim: 32
+  d_model: 256
+  n_layers: 4
+  n_heads: 4
+  dropout: 0.1
+  predictor_hidden_dim: 512
+  context_pooling: attention  # last / mean / attention
+  vocab_size: 30000
+  base_pitch: 60
+  tempo_bpm: 100
+  # The aligned REMI route predicts this direct relative register target,
+  # not an increment from the preceding rendered bar.
+  register_offset_min: -24
+  register_offset_max: 24
+  register_offset_scale: 24.0
+
+remi_motion_training:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  validation_ratio: 0.1
+  validation_split_unit: base_song_id
+  random_seed: 42
+  device: cuda
+  max_songs: null
+  force_rebuild_tokens: false
+  decode_aware_state_loss: true
+  decode_aware_density_loss: true
+  latent_loss_weight: 1.0
+  state_loss_weight: 1.0
+  density_loss_weight: 1.0
+  # Numerical floors used when fitting train-set standard-deviation normalizers.
+  latent_std_floor: 0.001
+  density_std_floor: 0.001
+
+remi_motion_generation:
+  bars: 32
+  primer_bars: 4
+  seed: 42
+  device: cuda
+  base_pitch: 60
+  tempo_bpm: 100
+  seed_song_id: null
+  audio_quality_enabled: true
+  feedback_tokenization_enabled: true
+
+# Joint continuous future-state sampling experiment. It is isolated from the
+# direct REMI predictor and retrieval backends under model_dir/trajectory_diffusion.
+trajectory_diffusion:
+  # Must equal trajectory_recurrence.commit_bars. Longer history lives only in
+  # the detached KV cache, whose capacity must equal trajectory_recurrence.memory_bars.
+  context_bars: 1
+  gradient_checkpointing: true
+  trajectory_bars: 4
+  d_model: 256
+  token_layers: 2
+  bar_layers: 2
+  denoiser_layers: 2
+  n_heads: 4
+  dropout: 0.1
+  max_bar_tokens: 192
+  predictor_hidden_dim: 512
+  context_pooling: attention
+  diffusion_steps: 100
+  sampling_steps: 16
+  beta_schedule: cosine
+  prediction_type: v
+  register_offset_scale: 24.0
+  register_offset_min: -24
+  register_offset_max: 24
+  target_std_floor: 0.001
+
+trajectory_diffusion_training:
+  epochs: 40
+  batch_size: 192
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  validation_ratio: 0.1
+  validation_split_unit: base_song_id
+  random_seed: 42
+  device: cuda
+  max_songs: null
+  force_rebuild_tokens: false
+
+trajectory_diffusion_generation:
+  sampling_steps: 16
+
+# Optional post-diffusion conditional transport back to the DVAE latent manifold.
+# It is trained only from actual frozen-diffusion proposals and is disabled by default.
+trajectory_flow_matching:
+  enabled: true
+  d_model: 256
+  layers: 2
+  n_heads: 4
+  hidden_dim: 512
+  dropout: 0.1
+  epochs: 20
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  proposal_sampling_steps: 16 # 与 trajectory_diffusion_generation.sampling_steps 对齐
+  integration_steps: 4
+
+# Retained only to read old experimental configuration. The recurrent trajectory
+# route uses trajectory_recurrence instead of this fixed-window rollout.
+trajectory_short_rollout:
+  enabled: false  # retired by recurrent K/V context; retained only for old checkpoints
+  blocks: 2
+  base_pitch_min: 36
+  base_pitch_max: 84
+
+latent_transformer:
+  context_bars: 32
+  latent_dim: 32
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  dropout: 0.1
+  action_vocab_size: 8
+  action_embedding_dim: 8
+  position_vocab_size: 8
+  position_embedding_dim: 8
+
+memory_latent_transformer:
+  context_bars: 32
+  latent_dim: 32
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  dropout: 0.1
+  action_vocab_size: 8
+  action_embedding_dim: 8
+  position_vocab_size: 8
+  position_embedding_dim: 8
+  query_dim: 32
+
+anchor_motion_composer:
+  context_bars: 32
+  latent_dim: 32
+  feature_dim: 27
+  hidden_dim: 512
+  n_layers: 2
+  dropout: 0.2
+  composer_hidden_dim: 512
+  composer_layers: 2
+  condition_enabled: true
+  form_vocab_size: 2
+  action_vocab_size: 2
+  composer_vocab_size: 2
+  position_vocab_size: 8
+  form_embedding_dim: 8
+  action_embedding_dim: 8
+  composer_embedding_dim: 8
+  position_embedding_dim: 8
+
+mdn_head:
+  n_components: 8
+  min_sigma: 0.01
+  max_sigma: null
+  sigma_parameterization: elu  # elu / exp / bounded_sigmoid
+  pi_entropy_weight: 0.3
+  mu_spread_init_enabled: true
+  mu_spread_weight_std: 0.5
+  mu_spread_bias_std: 1.0
+
+latent_augmentation:
+  enabled: false
+  mixup_ratio: 0.25
+  primary_weight: 0.7
+  same_action: true
+  same_position: true
+  random_seed_offset: 1009
+
+theme_encoder:
+  latent_dim: 32
+  hidden_dim: 64
+  num_layers: 1
+  embedding_dim: 64
+  projection_hidden_dim: 128
+  dropout: 0.1
+
+theme_encoder_training:
+  theme_bars: 8
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  temperature: 0.1
+  jitter_std: 0.02
+  time_mask_ratio: 0.10
+  validation_ratio: 0.20
+  random_seed: 42
+  device: cuda
+  diagnostics_top_k: 5
+
+theme_fusion:
+  enabled: false
+  mode: film_cross_attention_pi  # film_pi / cross_attention_pi / film_cross_attention_pi
+  target: pi  # pi / all
+  theme_encoder_path: ""
+  theme_bars: 8
+  embedding_dim: 64
+  project_dim: 16
+  gate_init: 0.01
+  theme_dropout: 0.3
+  embedding_noise_std: 0.03
+  token_bars: 8
+  cross_attention_heads: 4
+
+latent_transformer_training:
+  epochs: 80
+  batch_size: 64
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  validation_ratio: 0.1
+  validation_split_unit: base_song_id  # base_song_id / sample
+  validation_fold_count: 5
+  validation_fold_index: 0
+  random_seed: 42
+  device: cuda
+  diagnostics_top_k: 20
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+
+memory_latent_training:
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  validation_ratio: 0.1
+  validation_split_unit: base_song_id
+  validation_fold_count: 5
+  validation_fold_index: 0
+  random_seed: 42
+  device: cuda
+  contrastive_temperature: 0.1
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+
+anchor_motion_composer_training:
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  validation_fold_count: 5
+  validation_fold_index: 0
+  random_seed: 42
+  device: cuda
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+
+latent_oracle:
+  bars: 32
+  primer_bars: 8
+  selection_mode: nearest_neighbor  # nearest_neighbor / sequential
+  source_scope: same_base  # same_base / same_song_strict / free
+  top_k: 16
+  temperature: 0.25
+  query_context_bars: 1
+  position_vocab_size: 8
+  default_action: VARY
+  action_plan: sections  # source / sections / cycle
+  action_sections: INTRODUCE:8,VARY:8,DEVELOP:8,RETURN:6,CADENCE:2
+  seed: 42
+  base_pitch: 60
+  tempo_bpm: 120
+
+dvae_reconstruction_generation:
+  bars: 32  # Listening samples must contain at least 16 contiguous source bars.
+  seed: 42
+  device: cuda
+  base_pitch: 60
+  tempo_bpm: 120
+  source_song_id: null
+  start_bar: null
+  use_source_base_pitch: true
+  audio_quality_enabled: false

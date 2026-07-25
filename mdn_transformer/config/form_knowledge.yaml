@@ -1,0 +1,417 @@
+#
+# Stable music-theory knowledge.
+#
+# This file is included by style_defaults.yaml. It contains form templates and
+# temporal graph templates, which should change deliberately and rarely.
+#
+forms:
+  sonata:
+    sections:
+    - name: Expo_Primary
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+    - name: Expo_Transition
+      length: 8
+      pitch_offset: 2
+      cadence: half
+    - name: Expo_Secondary
+      length: 8
+      pitch_offset: 7
+      cadence: perfect
+    - name: Expo_Codetta
+      length: 8
+      pitch_offset: 7
+      cadence: perfect
+    - name: Dev_Core
+      length: 16
+      pitch_offset: 9
+      cadence: open
+    - name: Recap_Primary
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+    - name: Recap_Transition
+      length: 8
+      pitch_offset: 5
+      cadence: half
+    - name: Recap_Secondary
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+    - name: Recap_Coda
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+  ternary:
+    sections:
+    - name: Theme_A
+      length: 16
+      pitch_offset: 0
+      cadence: perfect
+    - name: Theme_B
+      length: 16
+      pitch_offset: 7
+      cadence: open
+    - name: Theme_A_Recap
+      length: 16
+      pitch_offset: 0
+      cadence: perfect
+      source: Theme_A
+  binary:
+    sections:
+    - name: Theme_A
+      length: 16
+      pitch_offset: 0
+      cadence: half
+    - name: Theme_B
+      length: 16
+      pitch_offset: 7
+      cadence: perfect
+  rondo:
+    sections:
+    - name: Theme_A1
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+    - name: Episode_B
+      length: 8
+      pitch_offset: 7
+      cadence: half
+    - name: Theme_A2
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+      source: Theme_A1
+    - name: Episode_C
+      length: 8
+      pitch_offset: 9
+      cadence: open
+    - name: Theme_A3_Final
+      length: 8
+      pitch_offset: 0
+      cadence: perfect
+  pop_standard:
+    sections:
+    - name: Verse
+      length: 16
+      pitch_offset: 0
+      cadence: none
+    - name: Chorus
+      length: 16
+      pitch_offset: 0
+      cadence: perfect
+    - name: Bridge
+      length: 8
+      pitch_offset: 5
+      cadence: none
+    - name: Chorus
+      length: 16
+      pitch_offset: 2
+      cadence: perfect
+temporal_graph_templates:
+  material_policy:
+    INTRODUCE:
+    - THEME_SEED
+    REPEAT:
+    - REPEAT
+    - THEME_SEED
+    VARY:
+    - VARIATION
+    VARY_LIGHTLY:
+    - VARIATION
+    - REPEAT
+    SEQUENCE:
+    - SEQUENCE
+    - DEVELOPMENT
+    CONTRAST:
+    - CONTRAST
+    DEVELOP:
+    - DEVELOPMENT
+    - SEQUENCE
+    RETURN:
+    - RETURN
+    - THEME_SEED
+    CADENCE:
+    - CADENCE
+    CADENCE_STRONG:
+    - CADENCE
+  ternary:
+    theme_memory:
+      anchors:
+        Theme_A:
+          introduce_in: Theme_A
+          return_in: Theme_A_Recap
+        Theme_B:
+          introduce_in: Theme_B
+    action_script:
+      Theme_A:
+      - action: INTRODUCE
+        bars: 4
+        theme: Theme_A
+      - action: REPEAT
+        bars: 4
+        theme: Theme_A
+      - action: VARY
+        bars: 4
+        theme: Theme_A
+      - action: CADENCE
+        bars: 4
+        theme: Theme_A
+      Theme_B:
+      - action: CONTRAST
+        bars: 4
+        theme: Theme_B
+      - action: DEVELOP
+        bars: 4
+        theme: Theme_B
+      - action: SEQUENCE
+        bars: 4
+        theme: Theme_B
+      - action: CADENCE
+        bars: 4
+        theme: Theme_B
+      Theme_A_Recap:
+      - action: RETURN
+        bars: 4
+        theme: Theme_A
+      - action: VARY_LIGHTLY
+        bars: 8
+        theme: Theme_A
+      - action: CADENCE_STRONG
+        bars: 4
+        theme: Theme_A
+  binary:
+    theme_memory:
+      anchors:
+        Theme_A:
+          introduce_in: Theme_A
+        Theme_B:
+          introduce_in: Theme_B
+    action_script:
+      Theme_A:
+      - action: INTRODUCE
+        bars: 4
+        theme: Theme_A
+      - action: REPEAT
+        bars: 4
+        theme: Theme_A
+      - action: VARY
+        bars: 4
+        theme: Theme_A
+      - action: CADENCE
+        bars: 4
+        theme: Theme_A
+      Theme_B:
+      - action: CONTRAST
+        bars: 4
+        theme: Theme_B
+      - action: DEVELOP
+        bars: 4
+        theme: Theme_B
+      - action: VARY
+        bars: 4
+        theme: Theme_B
+      - action: CADENCE_STRONG
+        bars: 4
+        theme: Theme_B
+  sonata:
+    theme_memory:
+      anchors:
+        Theme_A:
+          introduce_in: Expo_Primary
+          return_in: Recap_Primary
+        Theme_B:
+          introduce_in: Expo_Secondary
+          return_in: Recap_Secondary
+    action_script:
+      Expo_Primary:
+      - action: INTRODUCE
+        bars: 2
+        theme: Theme_A
+      - action: REPEAT
+        bars: 2
+        theme: Theme_A
+      - action: VARY
+        bars: 2
+        theme: Theme_A
+      - action: CADENCE
+        bars: 2
+        theme: Theme_A
+      Expo_Transition:
+      - action: SEQUENCE
+        bars: 3
+        theme: Theme_A
+      - action: DEVELOP
+        bars: 3
+        theme: Theme_A
+      - action: CADENCE
+        bars: 2
+      Expo_Secondary:
+      - action: CONTRAST
+        bars: 2
+        theme: Theme_B
+      - action: REPEAT
+        bars: 2
+        theme: Theme_B
+      - action: VARY
+        bars: 2
+        theme: Theme_B
+      - action: CADENCE
+        bars: 2
+        theme: Theme_B
+      Expo_Codetta:
+      - action: CADENCE
+        bars: 4
+        theme: Theme_B
+      - action: CADENCE_STRONG
+        bars: 4
+        theme: Theme_B
+      Dev_Core:
+      - action: DEVELOP
+        bars: 6
+        theme: Theme_A
+      - action: SEQUENCE
+        bars: 6
+        theme: Theme_A
+      - action: CADENCE
+        bars: 4
+      Recap_Primary:
+      - action: RETURN
+        bars: 2
+        theme: Theme_A
+      - action: VARY_LIGHTLY
+        bars: 4
+        theme: Theme_A
+      - action: CADENCE
+        bars: 2
+        theme: Theme_A
+      Recap_Transition:
+      - action: SEQUENCE
+        bars: 4
+        theme: Theme_A
+      - action: CADENCE
+        bars: 4
+      Recap_Secondary:
+      - action: RETURN
+        bars: 2
+        theme: Theme_B
+      - action: VARY_LIGHTLY
+        bars: 4
+        theme: Theme_B
+      - action: CADENCE
+        bars: 2
+        theme: Theme_B
+      Recap_Coda:
+      - action: CADENCE
+        bars: 4
+      - action: CADENCE_STRONG
+        bars: 4
+  rondo:
+    theme_memory:
+      anchors:
+        Theme_A:
+          introduce_in: Theme_A1
+          return_in:
+          - Theme_A2
+          - Theme_A3_Final
+        Episode_B:
+          introduce_in: Episode_B
+        Episode_C:
+          introduce_in: Episode_C
+    action_script:
+      Theme_A1:
+      - action: INTRODUCE
+        bars: 2
+        theme: Theme_A
+      - action: REPEAT
+        bars: 2
+        theme: Theme_A
+      - action: VARY
+        bars: 2
+        theme: Theme_A
+      - action: CADENCE
+        bars: 2
+        theme: Theme_A
+      Episode_B:
+      - action: CONTRAST
+        bars: 3
+        theme: Episode_B
+      - action: DEVELOP
+        bars: 3
+        theme: Episode_B
+      - action: CADENCE
+        bars: 2
+        theme: Episode_B
+      Theme_A2:
+      - action: RETURN
+        bars: 2
+        theme: Theme_A
+      - action: VARY_LIGHTLY
+        bars: 4
+        theme: Theme_A
+      - action: CADENCE
+        bars: 2
+        theme: Theme_A
+      Episode_C:
+      - action: CONTRAST
+        bars: 3
+        theme: Episode_C
+      - action: DEVELOP
+        bars: 3
+        theme: Episode_C
+      - action: CADENCE
+        bars: 2
+        theme: Episode_C
+      Theme_A3_Final:
+      - action: RETURN
+        bars: 2
+        theme: Theme_A
+      - action: VARY_LIGHTLY
+        bars: 2
+        theme: Theme_A
+      - action: CADENCE_STRONG
+        bars: 4
+        theme: Theme_A
+  pop_standard:
+    theme_memory:
+      anchors:
+        Verse:
+          introduce_in: Verse
+        Chorus:
+          introduce_in: Chorus
+          return_in: Chorus
+    action_script:
+      Verse:
+      - action: INTRODUCE
+        bars: 4
+        theme: Verse
+      - action: REPEAT
+        bars: 4
+        theme: Verse
+      - action: VARY
+        bars: 4
+        theme: Verse
+      - action: CADENCE
+        bars: 4
+        theme: Verse
+      Chorus:
+      - action: INTRODUCE
+        bars: 4
+        theme: Chorus
+      - action: REPEAT
+        bars: 4
+        theme: Chorus
+      - action: VARY
+        bars: 4
+        theme: Chorus
+      - action: CADENCE_STRONG
+        bars: 4
+        theme: Chorus
+      Bridge:
+      - action: CONTRAST
+        bars: 3
+      - action: DEVELOP
+        bars: 3
+      - action: CADENCE
+        bars: 2
