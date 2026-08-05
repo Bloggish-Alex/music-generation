@@ -1,0 +1,86 @@
+# Configuration used only by the offline form metadata preparation tool.
+
+grid_tokenizer:
+  steps_per_bar: 16
+  bar_length_ql: 4.0
+  rest_token: -1
+  sustain_token: -2
+  polyphonic_strategy: melody_top
+  # Quantization prevents small performance-timing drift from creating unstable
+  # edit-distance tokens for otherwise equivalent bar events.
+  quantize_input: true
+  quantize_divisors: [4, 3]
+  quantize_offsets: true
+  quantize_durations: true
+  quantize_policy: nearest
+  min_overlap_fraction: 0.05
+
+distance_matrix:
+  backend: autoencoder_edit_distance
+  # Null gamma lets the builder estimate sigma from non-zero pairwise distances.
+  gamma: null
+  gamma_scale: 1.0
+  normalize_distance: true
+  token_offset: 2
+  token_strategy: relative
+  root_pitch_class_token_multiplier: 100
+  multi_channel:
+    rhythm_weight: 0.45
+    contour_weight: 0.35
+    pitch_weight: 0.20
+  context_features:
+    root_pitch_class:
+      enabled: false
+      weight: 0.03
+    position_bucket:
+      enabled: false
+      bucket_count: 8
+      weight: 0.01
+
+bar_autoencoder:
+  enabled: true
+  token_strategy: relative
+  latent_dim: 8
+  epochs: 80
+  batch_size: 128
+  learning_rate: 0.001
+  random_seed: 42
+  device: cpu
+  normalize_latent: true
+  quantization_bins: 32
+  quantization_clip: 3.0
+
+forms:
+  sonata:
+    sections:
+      - {name: Expo_Primary, length: 8, pitch_offset: 0, cadence: perfect}
+      - {name: Expo_Transition, length: 8, pitch_offset: 2, cadence: half}
+      - {name: Expo_Secondary, length: 8, pitch_offset: 7, cadence: perfect}
+      - {name: Expo_Codetta, length: 8, pitch_offset: 7, cadence: perfect}
+      - {name: Dev_Core, length: 16, pitch_offset: 9, cadence: open}
+      - {name: Recap_Primary, length: 8, pitch_offset: 0, cadence: perfect}
+      - {name: Recap_Transition, length: 8, pitch_offset: 5, cadence: half}
+      - {name: Recap_Secondary, length: 8, pitch_offset: 0, cadence: perfect}
+      - {name: Recap_Coda, length: 8, pitch_offset: 0, cadence: perfect}
+  ternary:
+    sections:
+      - {name: Theme_A, length: 16, pitch_offset: 0, cadence: perfect}
+      - {name: Theme_B, length: 16, pitch_offset: 7, cadence: open}
+      - {name: Theme_A_Recap, length: 16, pitch_offset: 0, cadence: perfect, source: Theme_A}
+  binary:
+    sections:
+      - {name: Theme_A, length: 16, pitch_offset: 0, cadence: half}
+      - {name: Theme_B, length: 16, pitch_offset: 7, cadence: perfect}
+  rondo:
+    sections:
+      - {name: Theme_A1, length: 8, pitch_offset: 0, cadence: perfect}
+      - {name: Episode_B, length: 8, pitch_offset: 7, cadence: half}
+      - {name: Theme_A2, length: 8, pitch_offset: 0, cadence: perfect, source: Theme_A1}
+      - {name: Episode_C, length: 8, pitch_offset: 9, cadence: open}
+      - {name: Theme_A3_Final, length: 8, pitch_offset: 0, cadence: perfect}
+  pop_standard:
+    sections:
+      - {name: Verse, length: 16, pitch_offset: 0, cadence: none}
+      - {name: Chorus, length: 16, pitch_offset: 0, cadence: perfect}
+      - {name: Bridge, length: 8, pitch_offset: 5, cadence: none}
+      - {name: Chorus, length: 16, pitch_offset: 2, cadence: perfect}

@@ -1,0 +1,36 @@
+# Runtime configuration required by the migrated encoding path.
+
+music_parser:
+  bar_length_ql: 4.0
+  quantize_input: true
+  quantize_divisors: [4, 3]
+  quantize_offsets: true
+  quantize_durations: true
+  max_tracks: 3
+  register_split_low_max: 55
+  register_split_mid_max: 72
+  default_velocity: 64
+
+bar_tensor:
+  backend: semantic_3voice
+  max_tracks: 3
+  steps_per_bar: 16
+  feature_dim: 18
+  pitch_scale: 24.0
+  velocity_scale: 127.0
+  rest_feature_value: 1.0
+  melody_continuity_tolerance: 7
+  harmony_velocity_mode: max
+
+action_labeler:
+  repeat_similarity_threshold: 0.95
+  return_similarity_threshold: 0.85
+  return_min_consecutive: 2
+  theme_anchor_bars: 4
+  introduce_bars: 8
+  develop_multiplier: 1.3
+  phrase_length_bars: 8
+  cadence_tail_bars: 2
+  cadence_density_multiplier: 0.75
+  cadence_variance_multiplier: 0.75
+  tonic_pitch_classes: [0, 7]
