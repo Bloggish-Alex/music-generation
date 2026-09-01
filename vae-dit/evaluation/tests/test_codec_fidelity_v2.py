@@ -16,8 +16,10 @@ def test_v2_status_dispatches_to_monitor_report(tmp_path) -> None:
     np.savez_compressed(arrays, voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([0], dtype=np.int16), base_pitch_valid=np.asarray([False]))
     import hashlib
     digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    source = public / "dataset_tonality__raw_source__train.v1.json"
+    source.write_text(json.dumps({"songs": [{"song_id": "song", "bars": [{"bar_index": 0, "notes": []}]}]}), encoding="utf-8")
     observation = public / "codec_fidelity__raw_observation__train.v2.json"
-    observation.write_text(json.dumps({"schema_version": "codec_fidelity_raw_observation.v2", "dataset": {"split": "train"}, "arrays": {"path": arrays.name, "sha256": digest(arrays)}, "alignment": [], "availability": {}}), encoding="utf-8")
+    observation.write_text(json.dumps({"schema_version": "codec_fidelity_raw_observation.v2", "dataset": {"split": "train"}, "arrays": {"path": arrays.name, "sha256": digest(arrays)}, "source_raw": {"path": source.name, "sha256": digest(source)}, "alignment": [], "availability": {}}), encoding="utf-8")
     status = public / "codec_fidelity__raw_status__train.v2.json"
     status.write_text(json.dumps({"schema_version": "codec_fidelity_raw_status.v2", "dataset": {"split": "train"}, "status": "AVAILABLE", "artifacts": {"observation": {"path": observation.name, "sha256": digest(observation)}, "arrays": {"path": arrays.name, "sha256": digest(arrays)}}, "unavailable_reasons": []}), encoding="utf-8")
     bundle = CodecFidelityExporter().export(ExportContext("run", public, run))

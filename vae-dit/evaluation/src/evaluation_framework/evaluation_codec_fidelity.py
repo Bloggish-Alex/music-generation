@@ -87,16 +87,33 @@ def _status(x,split):
 
 def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict[str,Any]:
     """Measure V2 lane facts without reconstructing a V1 semantic tensor."""
-    obs=resolver.json(status["artifacts"]["observation"]); archive=resolver.npz(obs["arrays"])
+    obs=resolver.json(status["artifacts"]["observation"]); source=resolver.json(obs["source_raw"]); archive=resolver.npz(obs["arrays"])
     try:
         voices=np.asarray(archive["voice_tensors"],dtype=float); contexts=np.asarray(archive["bar_contexts"],dtype=float); bases=np.asarray(archive["base_pitches"],dtype=float); valid=np.asarray(archive["base_pitch_valid"],dtype=bool)
     finally: archive.close()
+    bars={(str(song["song_id"]),int(bar["bar_index"])):bar for song in source["songs"] for bar in song["bars"]}
     active=(voices[...,2]>.5)|(voices[...,3]>.5); melody=active[:,0]; bass=active[:,17]; harmony=active[:,1:17]
     pitches=np.rint(bases[:,None,None]+voices[...,0]*24.0)
     harmony_counts=harmony.sum(axis=(1,2)); empty=(~active.any(axis=(1,2))).sum()
-    chroma=np.asarray([_norm(row) for row in contexts])
-    cosine=np.sum(chroma*chroma,axis=1)/np.maximum(np.sum(chroma*chroma,axis=1),1e-8)
-    return {"dataset":obs["dataset"],"bar_count":int(len(voices)),"schema_version":"bar_tensor_schema.v2","melody":{"active_slot_count":int(melody.sum())},"bass":{"active_slot_count":int(bass.sum())},"harmony":{"active_event_count":int(harmony.sum()),"cardinality_mean":float(harmony_counts.mean()) if len(harmony_counts) else 0.,"cardinality_max":int(harmony_counts.max()) if len(harmony_counts) else 0.},"context_chroma":{"cosine_mean":float(cosine.mean()) if len(cosine) else "UNAVAILABLE"},"register":{"tensor_median":_median(pitches[active]),"anchorless_row_count":int((~valid).sum())},"counts":{"empty_row_count":int(empty),"unpaired_row_count":0}}
+    source_events=[]; tensor_events=[]; source_register=[]; tensor_register=[]; source_context=[]; tensor_context=[]; unpaired=0
+    for row in obs.get("alignment",[]):
+        index=int(row["tensor_row"]); bar=bars.get((str(row["song_id"]), int(row["source_bar_index"])))
+        if bar is None: unpaired+=1; continue
+        notes=bar.get("notes", []); source_events.extend(int(note["pitch"]) for note in notes)
+        tensor_events.extend(int(value) for value in pitches[index][active[index]])
+        if valid[index]:
+            base=int(bases[index]); expected=np.zeros(12)
+            for note in notes: expected[(int(note["pitch"])-base)%12]+=max(0.,float(note.get("duration_ql",0.)))*float(note.get("velocity",0))/127.
+            source_context.append(_norm(expected)); tensor_context.append(_norm(contexts[index])); source_register.extend(int(note["pitch"]) for note in notes); tensor_register.extend(pitches[index][active[index]].tolist())
+    precision,recall,f1=_multiset_f1(source_events,tensor_events)
+    cosine=[float(np.dot(a,b)/(max(np.linalg.norm(a)*np.linalg.norm(b),1e-8))) for a,b in zip(source_context,tensor_context)]
+    return {"dataset":obs["dataset"],"bar_count":int(len(voices)),"schema_version":"bar_tensor_schema.v2","melody":{"active_slot_count":int(melody.sum())},"bass":{"active_slot_count":int(bass.sum())},"harmony":{"active_event_count":int(harmony.sum()),"cardinality_mean":float(harmony_counts.mean()) if len(harmony_counts) else 0.,"cardinality_max":int(harmony_counts.max()) if len(harmony_counts) else 0.,"pitch_multiset_precision":precision,"pitch_multiset_recall":recall,"pitch_multiset_f1":f1},"context_chroma":{"cosine_mean":float(np.mean(cosine)) if cosine else "UNAVAILABLE"},"register":{"source_median":_median(source_register),"tensor_median":_median(tensor_register),"median_gap_semitones":_median(tensor_register)-_median(source_register),"anchorless_row_count":int((~valid).sum())},"counts":{"empty_row_count":int(empty),"unpaired_row_count":int(unpaired)}}
+
+def _multiset_f1(source, tensor):
+    from collections import Counter
+    left,right=Counter(source),Counter(tensor); matched=sum((left & right).values())
+    precision=matched/max(1,sum(right.values())); recall=matched/max(1,sum(left.values()))
+    return float(precision),float(recall),float(2*precision*recall/max(precision+recall,1e-8))
 def _json(p):return json.loads(Path(p).read_text(encoding="utf-8"))
 def _norm(x):return x/max(float(np.sum(x)),1e-8)
 def _median(x):
@@ -111,7 +128,10 @@ def _markdown(r):
     if r["status"]=="UNAVAILABLE":return "# Codec 保真度\n\n所需 codec 原始观察不可用。\n"
     if any(p.get("schema_version")=="bar_tensor_schema.v2" for p in r["metrics"]["splits"].values()):
         lines=["# Codec Fidelity V2", "", "| Split | Bars | Context chroma cosine | Harmony events | Anchorless rows |", "| --- | ---: | ---: | ---: | ---: |"]
-        for s,p in r["metrics"]["splits"].items(): lines.append(f"| {s} | {p['bar_count']} | {p['context_chroma']['cosine_mean']:.3f} | {p['harmony']['active_event_count']} | {p['register']['anchorless_row_count']} |")
+        for s,p in r["metrics"]["splits"].items():
+            cosine=p["context_chroma"]["cosine_mean"]
+            rendered=f"{cosine:.3f}" if isinstance(cosine,(int,float)) else "UNAVAILABLE"
+            lines.append(f"| {s} | {p['bar_count']} | {rendered} | {p['harmony']['active_event_count']} | {p['register']['anchorless_row_count']} |")
         return "\n".join(lines)+"\n"
     lines=["# Codec Fidelity","","| Split | Bars | Audible chroma cosine | Condition chroma cosine | Register median gap (semitones) |","| --- | ---: | ---: | ---: | ---: |"]
     for s,p in r["metrics"]["splits"].items():lines.append(f"| {s} | {p['bar_count']} | {p['semantic_physical_chroma']['cosine_mean']:.3f} | 不可用 | {p['register']['median_gap_semitones']:.2f} |")

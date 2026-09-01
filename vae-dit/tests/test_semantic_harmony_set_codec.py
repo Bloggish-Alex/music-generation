@@ -28,3 +28,11 @@ def test_v2_rejects_a_pitch_span_above_96_semitones() -> None:
     bar = BarRecord("song", "fixture.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [_note(0, 0), _note(97, 1)])])
     with pytest.raises(ValueError, match="relative_pitch_range_overflow"):
         SemanticHarmonySetCodec.from_config(_config()).encode(bar)
+
+
+def test_v2_uses_bar_local_onset_for_a_later_bar() -> None:
+    note = _note(72, 0); note.source_onset_ql = 4.0
+    bar = BarRecord("song", "fixture.mid", 1, 4.0, tracks=[TrackRecord(0, "track", [note])])
+    record = SemanticHarmonySetCodec.from_config(_config()).encode(bar)
+    assert record.tensor[0, 0, 2] == 1.0
+    assert record.tensor[0, 0, 3] == 0.0

@@ -24,3 +24,6 @@ def test_v2_artifacts_use_canonical_row_aligned_array_names(tmp_path) -> None:
     assert index[0]["row"] == 0 and index[0]["tensor_key"] == "song__bar_000000"
     assert manifest["arrays"]["names"]["bar_contexts"]["shape"] == [1, 12]
     assert summary["feature_count"] == 31
+    EncodingPipeline(_config())._capture_v2_evaluation_raw(tmp_path, [SongRecord("song", "fixture.mid")])
+    assert (tmp_path / "dataset_tonality__raw_source__train.v1.json").is_file()
+    assert (tmp_path / "codec_fidelity__raw_status__train.v2.json").is_file()

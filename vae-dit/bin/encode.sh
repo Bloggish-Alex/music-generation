@@ -4,16 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/init_env.sh"
 
-NAME="${1:-}"
-
-if [ -z "$NAME" ]; then
-    echo "Usage: $0 <dataset-name>"
-    echo "  dataset-name: folder under ./datasets/"
-    exit 1
-fi
-
-DATA_DIR="${ROOT_DIR}/../datasets/${NAME}"
-ENCODE_DIR="${OUTPUT_DIR}/models/${NAME}/encoded"
+NAME=""; DATA_DIR=""; RUN_ID=""; CONFIG_PATH="${CONFIG}"; SCHEMA=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dataset-root) DATA_DIR="$2"; shift 2;; --dataset-name) NAME="$2"; shift 2;; --run-id) RUN_ID="$2"; shift 2;; --config) CONFIG_PATH="$2"; shift 2;; --schema-version) SCHEMA="$2"; shift 2;;
+    *) [ -z "$NAME" ] && NAME="$1" && shift || { echo "Unknown option: $1" >&2; exit 2; };;
+  esac
+done
+[ -n "$NAME" ] || { echo "--dataset-name is required" >&2; exit 2; }
+DATA_DIR="${DATA_DIR:-${ROOT_DIR}/../datasets/${NAME}}"
+SCHEMA="${SCHEMA:-bar_tensor_schema.v1}"
+[ -n "$RUN_ID" ] || RUN_ID="${NAME}-${SCHEMA##*.}-r001"
+VERSION_DIR="v1"; [ "$SCHEMA" = "bar_tensor_schema.v2" ] && VERSION_DIR="v2"
+ENCODE_DIR="${OUTPUT_DIR}/models/${NAME}/encoded/${VERSION_DIR}/${RUN_ID}"
 
 if [ ! -d "$DATA_DIR" ]; then
     echo "Error: dataset '${NAME}' not found at ${DATA_DIR}"
@@ -27,6 +30,6 @@ echo "  output: ${ENCODE_DIR}"
 "${PYTHON_BIN}" "${ROOT_DIR}/bin/encode.py" \
     --music-dir "${DATA_DIR}" \
     --output-dir "${ENCODE_DIR}" \
-    --config "${CONFIG}"
+    --config "${CONFIG_PATH}" --schema-version "${SCHEMA}"
 
 echo "Done. codec saved to ${ENCODE_DIR}"

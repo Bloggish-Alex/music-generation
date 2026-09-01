@@ -8,4 +8,8 @@ export OUTPUT_DIR="${ROOT_DIR}/output/${MUSICAI_STAGE}"
 export CONFIG="${ROOT_DIR}/config/style_defaults.yaml"
 export DEVICE="cuda"
 
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if command -v python >/dev/null 2>&1; then export PYTHON_BIN="python"; else export PYTHON_BIN="python3"; fi
+fi
+
 mkdir -p "$OUTPUT_DIR"

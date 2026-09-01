@@ -24,6 +24,7 @@ class SemanticHarmonySetConfig:
     max_harmony_notes: int = 16
     relative_pitch_max_semitones: float = 96.0
     melody_continuity_tolerance: int = 7
+    slot_time_epsilon_ql: float = 1.0e-6
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "SemanticHarmonySetConfig":
@@ -57,7 +58,8 @@ class SemanticHarmonySetCodec:
         slot_length = float(bar.bar_length_ql) / self.config.steps_per_bar
         for slot in range(self.config.steps_per_bar):
             start, end = slot * slot_length, (slot + 1) * slot_length
-            active = [note for note in notes if note.onset_ql < end and note.onset_ql + note.duration_ql > start]
+            epsilon = self.config.slot_time_epsilon_ql
+            active = [note for note in notes if note.onset_ql < end - epsilon and note.onset_ql + note.duration_ql > start + epsilon]
             if not active:
                 continue
             highest = min(active, key=lambda note: (-int(note.pitch), -int(note.velocity), self._identity(note)))
@@ -82,7 +84,7 @@ class SemanticHarmonySetCodec:
     def _write(self, features: np.ndarray, note: NoteEvent, base_pitch: int | None, slot_start: float, velocity_sum: int) -> None:
         features[:] = 0.0
         features[0] = 0.0 if base_pitch is None else (int(note.pitch) - base_pitch) / self.config.pitch_scale
-        features[2] = 1.0 if abs(float(note.source_onset_ql if note.source_onset_ql is not None else note.onset_ql) - slot_start) < 1e-6 else 0.0
+        features[2] = 1.0 if abs(float(note.onset_ql) - slot_start) <= self.config.slot_time_epsilon_ql else 0.0
         features[3] = 1.0 - features[2]
         velocity = max(0.0, min(float(note.velocity), self.config.velocity_scale))
         features[4] = velocity / self.config.velocity_scale

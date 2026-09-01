@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import unicodedata
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -252,7 +253,7 @@ class MusicDirectoryParser:
         """Return a stable dataset-path and raw-byte identity for one source file."""
         root = Path(dataset_root) if dataset_root is not None else path.parent
         relative = path.resolve().relative_to(root.resolve()).as_posix()
-        normalized = relative.encode("utf-8").decode("utf-8")
+        normalized = unicodedata.normalize("NFC", relative)
         inner = hashlib.sha256(path.read_bytes()).hexdigest()
         return hashlib.sha256(f"{normalized}\0{inner}".encode("utf-8")).hexdigest()
 

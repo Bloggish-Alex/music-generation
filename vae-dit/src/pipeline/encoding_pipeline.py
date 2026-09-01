@@ -17,6 +17,8 @@ from codec.bar_tensor_codec_factory import BarTensorCodecFactory
 from data.core import BarTensorRecord, SongRecord
 from data.music_parser import MusicDirectoryParser
 from diagnostics.diagnostics import DiagnosticsBase
+from diagnostics.codec_fidelity_raw_capture import CodecFidelityV2RawCaptureRequest, JsonNpzCodecFidelityV2RawCapture
+from diagnostics.dataset_tonality_raw_source import DatasetTonalityRawSourceRequest, JsonDatasetTonalityRawSourceWriter
 
 
 @dataclass
@@ -60,10 +62,22 @@ class EncodingPipeline:
         tensors = self._encode_tensors(codec, songs)
         self.diagnostics.record_stage("bar_tensor_encoding", self._tensor_diagnostics(tensors))
         feature_summary = self._write_outputs(output_path, songs, tensors)
+        if self._is_v2():
+            self._capture_v2_evaluation_raw(output_path, songs)
         self.diagnostics.record_stage("bar_feature_encoding", feature_summary)
         diagnostics = self.diagnostics.to_dict()
         self.diagnostics.write(output_path / "encoding_diagnostics.json")
         return EncodingPipelineResult(songs=songs, tensors=tensors, diagnostics=diagnostics)
+
+    def _capture_v2_evaluation_raw(self, output_dir: Path, songs: List[SongRecord]) -> None:
+        """Materialize the source and codec facts consumed by the shared evaluator."""
+        configured = self.config.get("evaluation_splits", {})
+        train_ids = frozenset(str(value) for value in configured.get("train_base_song_ids", [song.song_id for song in songs])) if isinstance(configured, dict) else frozenset(song.song_id for song in songs)
+        validation_ids = frozenset(str(value) for value in configured.get("validation_base_song_ids", [])) if isinstance(configured, dict) else frozenset()
+        groups = {"train": [song for song in songs if song.song_id in train_ids], "validation": [song for song in songs if song.song_id in validation_ids]}
+        groups = {name: values for name, values in groups.items() if values}
+        source_paths = JsonDatasetTonalityRawSourceWriter().write(DatasetTonalityRawSourceRequest(output_dir, output_dir.name, "encoding_run", groups))
+        JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(output_dir, output_dir.name, None, source_paths, train_ids, validation_ids))
 
     def _encode_tensors(self, codec: Any, songs: List[SongRecord]) -> List[BarTensorRecord]:
         """Encode every parsed bar with diagnostics."""
