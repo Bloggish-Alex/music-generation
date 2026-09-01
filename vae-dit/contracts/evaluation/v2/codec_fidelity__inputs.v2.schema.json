@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","splits"],"properties":{"schema_version":{"const":"codec_fidelity_inputs.v2"},"splits":{"type":"object"}}}

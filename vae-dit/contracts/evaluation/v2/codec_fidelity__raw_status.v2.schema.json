@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","dataset","status","artifacts","unavailable_reasons"],"properties":{"schema_version":{"const":"codec_fidelity_raw_status.v2"},"status":{"enum":["AVAILABLE","UNAVAILABLE"]},"dataset":{"type":"object"},"artifacts":{"type":"object"},"unavailable_reasons":{"type":"array"}}}

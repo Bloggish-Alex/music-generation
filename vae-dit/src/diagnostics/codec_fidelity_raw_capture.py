@@ -21,6 +21,8 @@ from data.core import BarTensorRecord, SongRecord
 
 RAW_OBSERVATION_SCHEMA_VERSION = "codec_fidelity_raw_observation.v1"
 RAW_STATUS_SCHEMA_VERSION = "codec_fidelity_raw_status.v1"
+RAW_OBSERVATION_V2_SCHEMA_VERSION = "codec_fidelity_raw_observation.v2"
+RAW_STATUS_V2_SCHEMA_VERSION = "codec_fidelity_raw_status.v2"
 _TRANSPOSE_SUFFIX = re.compile(r"_T[+-]?\d+$")
 
 
@@ -47,6 +49,72 @@ class CodecFidelityRawCaptureResult:
     artifacts: Mapping[str, Path]
     unavailable: Mapping[str, str]
     status_artifacts: Mapping[str, Path]
+
+
+@dataclass(frozen=True)
+class CodecFidelityV2RawCaptureRequest:
+    """Materialized V2 encoding facts for one public fidelity capture."""
+
+    encoded_dir: Path
+    dataset_identity: str
+    dataset_content_sha256: str | None
+    source_raw_paths: Mapping[str, Path]
+    train_base_song_ids: frozenset[str]
+    validation_base_song_ids: frozenset[str]
+
+
+class JsonNpzCodecFidelityV2RawCapture:
+    """Capture split-specific V2 arrays without computing fidelity metrics."""
+
+    def capture(self, request: CodecFidelityV2RawCaptureRequest) -> CodecFidelityRawCaptureResult:
+        encoded_dir = Path(request.encoded_dir)
+        arrays_path, index_path, manifest_path = (encoded_dir / "codec_v2_arrays.npz", encoded_dir / "bar_tensor_index.json", encoded_dir / "encoding_manifest.json")
+        if not all(path.is_file() for path in (arrays_path, index_path, manifest_path)):
+            return self._unavailable_all(request, "V2 canonical encoding artifacts are unavailable")
+        try:
+            rows = json.loads(index_path.read_text(encoding="utf-8")); manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != "bar_tensor_schema.v2" or not isinstance(rows, list):
+                raise ValueError("V2 manifest or index schema is invalid")
+            with np.load(arrays_path, allow_pickle=False) as archive:
+                values = {name: np.asarray(archive[name]) for name in ("voice_tensors", "bar_contexts", "base_pitches", "base_pitch_valid")}
+            count = len(rows)
+            if any(array.shape[0] != count for array in values.values()) or values["voice_tensors"].shape[1:] != (18, 16, 6) or values["bar_contexts"].shape[1:] != (12,) or not np.isfinite(values["voice_tensors"]).all() or not np.isfinite(values["bar_contexts"]).all():
+                raise ValueError("V2 arrays are non-finite or misaligned")
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+            return self._unavailable_all(request, str(error))
+        groups: dict[str, list[int]] = {"train": [], "validation": [], "excluded_unpaired": []}
+        for index, row in enumerate(rows):
+            base = str(row.get("base_song_id", "")); split = "train" if base in request.train_base_song_ids else "validation" if base in request.validation_base_song_ids else "excluded_unpaired"
+            groups[split].append(index)
+        artifacts: dict[str, Path] = {}; statuses: dict[str, Path] = {}; unavailable: dict[str, str] = {}
+        for split, positions in groups.items():
+            status_path = encoded_dir / f"codec_fidelity__raw_status__{split}.v2.json"; observation_path = encoded_dir / f"codec_fidelity__raw_observation__{split}.v2.json"; split_arrays_path = encoded_dir / f"codec_fidelity__raw_arrays__{split}.v2.npz"
+            source_ref = request.source_raw_paths.get(split)
+            if not positions or source_ref is None or not source_ref.is_file():
+                reason = "matching dataset_tonality raw source artifact is unavailable"; unavailable[split] = reason
+                observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
+                self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, reason)); statuses[split] = status_path; continue
+            selected = np.asarray(positions, dtype=np.int64)
+            np.savez_compressed(split_arrays_path, **{name: value[selected] for name, value in values.items()})
+            alignment = [{**rows[position], "tensor_row": local_row} for local_row, position in enumerate(positions)]
+            observation = {"schema_version": RAW_OBSERVATION_V2_SCHEMA_VERSION, "dataset": {"identity": request.dataset_identity, "content_sha256": request.dataset_content_sha256, "split": split, "split_unit": "base_song_id"}, "arrays": {"path": split_arrays_path.name, "sha256": _sha256(split_arrays_path), "names": {name: {"dtype": str(value[selected].dtype), "shape": list(value[selected].shape)} for name, value in values.items()}}, "encoding_manifest": {"path": manifest_path.name, "sha256": _sha256(manifest_path)}, "bar_tensor_index": {"path": index_path.name, "sha256": _sha256(index_path)}, "source_raw": {"path": source_ref.name, "sha256": _sha256(source_ref)}, "tensor_schema": {"schema_version": "bar_tensor_schema.v2", "voice_names": manifest.get("voice_names"), "feature_names": manifest.get("feature_names")}, "alignment": alignment, "availability": {"voice_tensors": True, "bar_contexts": True, "base_pitches": True, "base_pitch_valid": True, "row_alignment": True, "source_raw_reference": True}}
+            self._write_json(observation_path, observation); artifacts[split] = observation_path
+            self._write_json(status_path, self._status(request, split, "AVAILABLE", {"observation": observation_path, "arrays": split_arrays_path}, None)); statuses[split] = status_path
+        return CodecFidelityRawCaptureResult(artifacts, unavailable, statuses)
+
+    def _unavailable_all(self, request: CodecFidelityV2RawCaptureRequest, reason: str) -> CodecFidelityRawCaptureResult:
+        statuses = {}; unavailable = {}
+        for split in ("train", "validation", "excluded_unpaired"):
+            path = Path(request.encoded_dir) / f"codec_fidelity__raw_status__{split}.v2.json"; self._write_json(path, self._status(request, split, "UNAVAILABLE", {}, reason)); statuses[split] = path; unavailable[split] = reason
+        return CodecFidelityRawCaptureResult({}, unavailable, statuses)
+
+    @staticmethod
+    def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _status(request: CodecFidelityV2RawCaptureRequest, split: str, status: str, artifacts: Mapping[str, Path], reason: str | None) -> Mapping[str, Any]:
+        return {"schema_version": RAW_STATUS_V2_SCHEMA_VERSION, "dataset": {"identity": request.dataset_identity, "content_sha256": request.dataset_content_sha256, "split": split, "split_unit": "base_song_id"}, "status": status, "artifacts": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in artifacts.items()}, "unavailable_reasons": [] if reason is None else [{"field": "v2_encoding", "reason": reason}]}
 
 
 class CodecFidelityRawCapture(Protocol):
