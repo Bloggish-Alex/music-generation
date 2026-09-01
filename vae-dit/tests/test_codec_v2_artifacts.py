@@ -8,7 +8,13 @@ from data.core import BarTensorRecord, SongRecord
 
 
 def _config() -> dict:
-    return {"bar_tensor": {"schema_version": "bar_tensor_schema.v2", "backend": "semantic_harmony_set_v2"}}
+    return {
+        "bar_tensor": {"schema_version": "bar_tensor_schema.v2", "backend": "semantic_harmony_set_v2"},
+        "evaluation_splits": {
+            "train_base_song_ids": ["song"],
+            "validation_base_song_ids": ["validation"],
+        },
+    }
 
 
 def test_v2_artifacts_use_canonical_row_aligned_array_names(tmp_path) -> None:
@@ -24,6 +30,9 @@ def test_v2_artifacts_use_canonical_row_aligned_array_names(tmp_path) -> None:
     assert index[0]["row"] == 0 and index[0]["tensor_key"] == "song__bar_000000"
     assert manifest["arrays"]["names"]["bar_contexts"]["shape"] == [1, 12]
     assert summary["feature_count"] == 31
-    EncodingPipeline(_config())._capture_v2_evaluation_raw(tmp_path, [SongRecord("song", "fixture.mid")])
+    EncodingPipeline(_config())._capture_v2_evaluation_raw(
+        tmp_path,
+        [SongRecord("song", "fixture.mid"), SongRecord("validation", "fixture-validation.mid")],
+    )
     assert (tmp_path / "dataset_tonality__raw_source__train.v1.json").is_file()
     assert (tmp_path / "codec_fidelity__raw_status__train.v2.json").is_file()

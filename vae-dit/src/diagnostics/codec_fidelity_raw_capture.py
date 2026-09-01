@@ -94,6 +94,22 @@ class JsonNpzCodecFidelityV2RawCapture:
                 reason = "matching dataset_tonality raw source artifact is unavailable"; unavailable[split] = reason
                 observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
                 self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, reason)); statuses[split] = status_path; continue
+            source_bars, reason = _source_bar_index(source_ref, split)
+            if source_bars is None:
+                unavailable[split] = reason
+                observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
+                self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, reason)); statuses[split] = status_path; continue
+            alignment_error = next((
+                "source raw artifact does not align with canonical V2 index"
+                for position in positions
+                if (str(rows[position].get("song_id")), int(rows[position].get("source_bar_index", -1))) not in source_bars
+                or source_bars[(str(rows[position].get("song_id")), int(rows[position].get("source_bar_index", -1)))]["base_song_id"] != str(rows[position].get("base_song_id"))
+                or source_bars[(str(rows[position].get("song_id")), int(rows[position].get("source_bar_index", -1)))]["applied_transpose_semitones"] != int(rows[position].get("applied_transpose_semitones", 0))
+            ), None)
+            if alignment_error is not None:
+                unavailable[split] = alignment_error
+                observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
+                self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, alignment_error)); statuses[split] = status_path; continue
             selected = np.asarray(positions, dtype=np.int64)
             np.savez_compressed(split_arrays_path, **{name: value[selected] for name, value in values.items()})
             alignment = [{**rows[position], "tensor_row": local_row} for local_row, position in enumerate(positions)]

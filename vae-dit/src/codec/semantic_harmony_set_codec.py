@@ -10,6 +10,7 @@ import numpy as np
 from codec.relative_chroma import bass_anchor_pitch, relative_chromagram
 from common.config_loader import ConfigView
 from data.core import BarRecord, BarTensorRecord, NoteEvent
+from codec.semantic_harmony_assignment import assign
 
 
 VOICE_NAMES = ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"]
@@ -62,12 +63,7 @@ class SemanticHarmonySetCodec:
             active = [note for note in notes if note.onset_ql < end - epsilon and note.onset_ql + note.duration_ql > start + epsilon]
             if not active:
                 continue
-            highest = min(active, key=lambda note: (-int(note.pitch), -int(note.velocity), self._identity(note)))
-            melody = previous if previous in active and int(previous.pitch) >= int(highest.pitch) - self.config.melody_continuity_tolerance else highest
-            bass_candidates = [note for note in active if note is not melody]
-            bass = min(bass_candidates, key=lambda note: (int(note.pitch), -int(note.velocity), self._identity(note))) if bass_candidates else None
-            harmony = [note for note in active if note is not melody and note is not bass]
-            harmony.sort(key=lambda note: (int(note.pitch), int(note.physical_track_index or 0), float(note.duration_ql), float(note.source_onset_ql or note.onset_ql), int(note.velocity), self._identity(note)))
+            melody,bass,harmony = assign(active, previous, self.config.melody_continuity_tolerance)
             if len(harmony) > self.config.max_harmony_notes:
                 raise ValueError(f"harmony_lane_overflow: song={bar.song_id} bar={bar.bar_index} slot={slot} count={len(harmony)}")
             assigned = [(0, melody), *[(index + 1, note) for index, note in enumerate(harmony)]]

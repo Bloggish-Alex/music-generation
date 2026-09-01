@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -44,6 +45,7 @@ class EncodingPipeline:
         output_path.mkdir(parents=True, exist_ok=True)
         parser = MusicDirectoryParser.from_config(self.config)
         songs = parser.parse_directory(music_dir)
+        provenance = self._dataset_provenance(Path(music_dir))
         self.diagnostics.record_stage("input", {
             "music_dir": str(music_dir),
             "parsed_file_count": int(len(songs)),
@@ -61,23 +63,53 @@ class EncodingPipeline:
         codec = BarTensorCodecFactory.create(self.config)
         tensors = self._encode_tensors(codec, songs)
         self.diagnostics.record_stage("bar_tensor_encoding", self._tensor_diagnostics(tensors))
-        feature_summary = self._write_outputs(output_path, songs, tensors)
+        feature_summary = self._write_outputs(output_path, songs, tensors, provenance)
         if self._is_v2():
-            self._capture_v2_evaluation_raw(output_path, songs)
+            self._capture_v2_evaluation_raw(output_path, songs, provenance)
         self.diagnostics.record_stage("bar_feature_encoding", feature_summary)
         diagnostics = self.diagnostics.to_dict()
         self.diagnostics.write(output_path / "encoding_diagnostics.json")
         return EncodingPipelineResult(songs=songs, tensors=tensors, diagnostics=diagnostics)
 
-    def _capture_v2_evaluation_raw(self, output_dir: Path, songs: List[SongRecord]) -> None:
+    def _capture_v2_evaluation_raw(
+        self,
+        output_dir: Path,
+        songs: List[SongRecord],
+        provenance: Dict[str, str] | None = None,
+    ) -> None:
         """Materialize the source and codec facts consumed by the shared evaluator."""
-        configured = self.config.get("evaluation_splits", {})
-        train_ids = frozenset(str(value) for value in configured.get("train_base_song_ids", [song.song_id for song in songs])) if isinstance(configured, dict) else frozenset(song.song_id for song in songs)
-        validation_ids = frozenset(str(value) for value in configured.get("validation_base_song_ids", [])) if isinstance(configured, dict) else frozenset()
-        groups = {"train": [song for song in songs if song.song_id in train_ids], "validation": [song for song in songs if song.song_id in validation_ids]}
+        train_ids, validation_ids = self._resolve_evaluation_splits(songs)
+        groups = {
+            "train": [song for song in songs if self._base_song_id(song) in train_ids],
+            "validation": [song for song in songs if self._base_song_id(song) in validation_ids],
+        }
         groups = {name: values for name, values in groups.items() if values}
-        source_paths = JsonDatasetTonalityRawSourceWriter().write(DatasetTonalityRawSourceRequest(output_dir, output_dir.name, "encoding_run", groups))
-        JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(output_dir, output_dir.name, None, source_paths, train_ids, validation_ids))
+        details = provenance or {
+            "identity": "unverified",
+            "identity_kind": "unverified",
+            "content_sha256": "sha256:" + "0" * 64,
+        }
+        manifest_path = output_dir / "encoding_manifest.json"
+        source_paths = JsonDatasetTonalityRawSourceWriter().write(
+            DatasetTonalityRawSourceRequest(
+                output_dir,
+                details["identity"],
+                details["identity_kind"],
+                groups,
+                details["content_sha256"],
+                self._sha256(manifest_path) if manifest_path.is_file() else None,
+            )
+        )
+        JsonNpzCodecFidelityV2RawCapture().capture(
+            CodecFidelityV2RawCaptureRequest(
+                output_dir,
+                details["identity"],
+                details["content_sha256"],
+                source_paths,
+                train_ids,
+                validation_ids,
+            )
+        )
 
     def _encode_tensors(self, codec: Any, songs: List[SongRecord]) -> List[BarTensorRecord]:
         """Encode every parsed bar with diagnostics."""
@@ -87,14 +119,20 @@ class EncodingPipeline:
                 records.append(codec.encode(bar))
         return records
 
-    def _write_outputs(self, output_dir: Path, songs: List[SongRecord], tensors: List[BarTensorRecord]) -> Dict[str, Any]:
+    def _write_outputs(
+        self,
+        output_dir: Path,
+        songs: List[SongRecord],
+        tensors: List[BarTensorRecord],
+        provenance: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
         """Write JSON metadata and compressed tensor artifacts."""
         (output_dir / "songs.json").write_text(
             json.dumps([song.to_dict() for song in songs], indent=2),
             encoding="utf-8",
         )
         if self._is_v2():
-            return self._write_v2_outputs(output_dir, songs, tensors)
+            return self._write_v2_outputs(output_dir, songs, tensors, provenance)
         arrays = {
             f"{record.song_id}__bar_{record.bar_index:04d}": record.tensor
             for record in tensors
@@ -125,7 +163,13 @@ class EncodingPipeline:
         section = self.config.get("bar_tensor", {})
         return isinstance(section, dict) and section.get("schema_version") == "bar_tensor_schema.v2"
 
-    def _write_v2_outputs(self, output_dir: Path, songs: List[SongRecord], tensors: List[BarTensorRecord]) -> Dict[str, Any]:
+    def _write_v2_outputs(
+        self,
+        output_dir: Path,
+        songs: List[SongRecord],
+        tensors: List[BarTensorRecord],
+        provenance: Dict[str, str] | None,
+    ) -> Dict[str, Any]:
         """Write the V2 row-aligned arrays and manifest declared by the public contract."""
         song_by_id = {song.song_id: song for song in songs}
         ordered = sorted(tensors, key=lambda record: (
@@ -144,7 +188,9 @@ class EncodingPipeline:
             index_rows.append({"row": row, "tensor_key": f"{record.song_id}__bar_{record.bar_index:06d}", "song_id": record.song_id, "base_song_id": song.metadata.get("base_song_id", record.song_id), "source_bar_index": int(record.bar_index), "applied_transpose_semitones": int(song.metadata.get("transpose_semitones", 0)), "schema_version": "bar_tensor_schema.v2", "base_pitch_valid": bool(base_pitch_valid[row]), "voice_tensor_shape": [18, 16, 6], "bar_context_shape": [12]})
         index_path = output_dir / "bar_tensor_index.json"
         index_path.write_text(json.dumps(index_rows, indent=2), encoding="utf-8")
-        manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": len(index_rows), "arrays": {"path": arrays_path.name, "sha256": self._sha256(arrays_path), "names": {"voice_tensors": {"dtype": "float32", "shape": list(voice_tensors.shape)}, "bar_contexts": {"dtype": "float32", "shape": list(bar_contexts.shape)}, "base_pitches": {"dtype": "int16", "shape": list(base_pitches.shape)}, "base_pitch_valid": {"dtype": "bool", "shape": list(base_pitch_valid.shape)}}}, "index": {"path": index_path.name, "sha256": self._sha256(index_path)}, "voice_names": ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"], "feature_names": ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"], "configuration": self.config.get("bar_tensor", {})}
+        details = provenance or {"identity": "unverified", "identity_kind": "unverified", "content_sha256": None}
+        config_json = json.dumps(self.config.get("bar_tensor", {}), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": len(index_rows), "arrays": {"path": arrays_path.name, "sha256": self._sha256(arrays_path), "names": {"voice_tensors": {"dtype": "float32", "shape": list(voice_tensors.shape)}, "bar_contexts": {"dtype": "float32", "shape": list(bar_contexts.shape)}, "base_pitches": {"dtype": "int16", "shape": list(base_pitches.shape)}, "base_pitch_valid": {"dtype": "bool", "shape": list(base_pitch_valid.shape)}}}, "index": {"path": index_path.name, "sha256": self._sha256(index_path)}, "voice_names": ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"], "feature_names": ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"], "configuration": self.config.get("bar_tensor", {}), "configuration_sha256": "sha256:" + hashlib.sha256(config_json).hexdigest(), "dataset_identity": details["identity"], "dataset_identity_kind": details["identity_kind"], "dataset_content_sha256": details["content_sha256"], "source_revision": str(self.config.get("source_revision", "unknown")), "lane_capacity": 16, "overflow_policy": self.config.get("bar_tensor", {}).get("overflow_policy")}
         (output_dir / "encoding_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         extractor = BarFeatureExtractor()
         v2_features = np.stack([extractor.v2_features(voice_tensors[index], bar_contexts[index]) for index in range(len(index_rows))]) if index_rows else np.zeros((0, 31), dtype=np.float32)
@@ -156,6 +202,52 @@ class EncodingPipeline:
     @staticmethod
     def _sha256(path: Path) -> str:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _base_song_id(song: SongRecord) -> str:
+        value = song.metadata.get("base_song_id") if isinstance(song.metadata, dict) else None
+        return str(value) if value else str(song.song_id).split("_T", 1)[0]
+
+    def _resolve_evaluation_splits(self, songs: List[SongRecord]) -> tuple[frozenset[str], frozenset[str]]:
+        configured = self.config.get("evaluation_splits")
+        if not isinstance(configured, dict):
+            raise ValueError("Codec V2 requires an explicit evaluation_splits configuration")
+        observed = {self._base_song_id(song) for song in songs}
+        if configured.get("strategy") == "sha256_modulo":
+            modulus = int(configured.get("validation_modulus", 0))
+            remainder = int(configured.get("validation_remainder", -1))
+            if modulus < 2 or not 0 <= remainder < modulus:
+                raise ValueError("Codec V2 sha256_modulo split requires a valid modulus and remainder")
+            validation = frozenset(
+                base_song_id for base_song_id in observed
+                if int(hashlib.sha256(base_song_id.encode("utf-8")).hexdigest(), 16) % modulus == remainder
+            )
+            train = frozenset(observed - validation)
+        else:
+            train = frozenset(str(value) for value in configured.get("train_base_song_ids", []))
+            validation = frozenset(str(value) for value in configured.get("validation_base_song_ids", []))
+        if not train or not validation:
+            raise ValueError("Codec V2 evaluation_splits must resolve non-empty train and validation base_song_id sets")
+        if train & validation:
+            raise ValueError("Codec V2 evaluation_splits overlap on base_song_id")
+        if observed != train | validation:
+            missing = sorted(observed - (train | validation))
+            unknown = sorted((train | validation) - observed)
+            raise ValueError(f"Codec V2 evaluation_splits must partition parsed base_song_id values; missing={missing}, unknown={unknown}")
+        return train, validation
+
+    @staticmethod
+    def _dataset_provenance(music_dir: Path) -> Dict[str, str]:
+        root = music_dir.resolve()
+        if not root.is_dir():
+            raise ValueError(f"music directory does not exist: {root}")
+        lines: list[str] = []
+        for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: unicodedata.normalize("NFC", item.relative_to(root).as_posix())):
+            relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{relative}\t{digest}\n")
+        content = hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+        return {"identity": f"content-manifest:{content}", "identity_kind": "content_manifest_sha256", "content_sha256": f"sha256:{content}"}
 
     def _tensor_diagnostics(self, tensors: List[BarTensorRecord]) -> Dict[str, Any]:
         """Summarize tensor output shapes and density."""

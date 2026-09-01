@@ -37,14 +37,14 @@ def _song(
                     track_index=1,
                     name="harmony",
                     notes=[
-                        NoteEvent(pitch=67, onset_ql=1.0, duration_ql=0.5, velocity=70),
-                        NoteEvent(pitch=64, onset_ql=0.0, duration_ql=1.0, velocity=80),
+                        NoteEvent(pitch=67, onset_ql=1.0, duration_ql=0.5, velocity=70, source_file_identity="source-a", physical_track_index=4, source_note_ordinal=2, source_onset_ql=5.0),
+                        NoteEvent(pitch=64, onset_ql=0.0, duration_ql=1.0, velocity=80, source_file_identity="source-a", physical_track_index=4, source_note_ordinal=1, source_onset_ql=4.0),
                     ],
                 ),
                 TrackRecord(
                     track_index=0,
                     name="melody",
-                    notes=[NoteEvent(pitch=72, onset_ql=0.0, duration_ql=0.5, velocity=90)],
+                    notes=[NoteEvent(pitch=72, onset_ql=0.0, duration_ql=0.5, velocity=90, source_file_identity="source-a", physical_track_index=3, source_note_ordinal=0, source_onset_ql=4.0)],
                 ),
             ],
         ),
@@ -101,6 +101,11 @@ def test_writer_emits_schema_valid_path_free_split_artifacts(tmp_path: Path) -> 
     assert validation["songs"][0]["base_song_id"] == "source_b"
     assert validation["songs"][0]["applied_transpose_semitones"] == -2
     assert [note["track_index"] for note in validation["songs"][0]["bars"][0]["notes"]] == [0, 1, 1]
+    note = validation["songs"][0]["bars"][0]["notes"][0]
+    assert note["physical_track_index"] == 3
+    assert note["source_note_ordinal"] == 0
+    assert note["source_note_id"] == "source-a:3:0"
+    assert note["source_onset_ql"] == 4.0
     artifact_text = paths["train"].read_text(encoding="utf-8") + paths["validation"].read_text(encoding="utf-8")
     assert absolute_path not in artifact_text
     assert r"C:\private_music\source_b.mid" not in artifact_text

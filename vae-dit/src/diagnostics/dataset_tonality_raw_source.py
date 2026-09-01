@@ -131,6 +131,10 @@ class JsonDatasetTonalityRawSourceWriter:
         notes = [
             {
                 "track_index": int(track.track_index),
+                "physical_track_index": int(note.physical_track_index if note.physical_track_index is not None else track.track_index),
+                "source_note_ordinal": int(note.source_note_ordinal if note.source_note_ordinal is not None else 0),
+                "source_note_id": f"{note.source_file_identity or ''}:{note.physical_track_index if note.physical_track_index is not None else track.track_index}:{note.source_note_ordinal if note.source_note_ordinal is not None else 0}",
+                "source_onset_ql": float(note.source_onset_ql if note.source_onset_ql is not None else note.onset_ql),
                 "pitch": int(note.pitch),
                 "onset_ql": float(note.onset_ql),
                 "duration_ql": float(note.duration_ql),
@@ -163,6 +167,7 @@ class JsonDatasetTonalityRawSourceWriter:
                     item["pitch"],
                     item["duration_ql"],
                     item["velocity"],
+                    item["source_note_id"],
                 ),
             ),
         }

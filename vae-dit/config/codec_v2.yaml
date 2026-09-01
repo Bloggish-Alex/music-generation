@@ -10,3 +10,10 @@ bar_tensor:
   relative_pitch_max_semitones: 96.0
   overflow_policy: error
   slot_time_epsilon_ql: 0.000001
+
+# Stable, content-independent split assignment. The base_song_id hash makes the
+# partition reproducible across machines and stable under transpose variants.
+evaluation_splits:
+  strategy: sha256_modulo
+  validation_modulus: 5
+  validation_remainder: 0
