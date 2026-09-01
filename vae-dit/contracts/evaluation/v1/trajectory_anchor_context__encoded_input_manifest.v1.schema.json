@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_anchor_context__encoded_input_manifest.v1",
+  "title": "Encoded Input Parent Manifest",
+  "description": "Stable model-preparation provenance for encoded artifacts later consumed by trajectory training.",
+  "type": "object",
+  "required": ["schema_version", "run", "dataset", "encoded_artifacts", "tensor_identity", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "encoded_input_manifest.v1"},
+    "run": {"$ref": "#/$defs/run"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "encoded_artifacts": {
+      "type": "object",
+      "required": ["bar_tensor_index", "bar_tensors", "songs"],
+      "properties": {
+        "bar_tensor_index": {"$ref": "#/$defs/artifact_or_null"},
+        "bar_tensors": {"$ref": "#/$defs/artifact_or_null"},
+        "songs": {"$ref": "#/$defs/artifact_or_null"}
+      },
+      "additionalProperties": false
+    },
+    "tensor_identity": {"$ref": "#/$defs/tensor_identity"},
+    "availability": {"$ref": "#/$defs/availability"},
+    "unavailable_reasons": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "run": {
+      "type": "object", "required": ["identity", "identity_kind"],
+      "properties": {"identity": {"type": "string", "minLength": 1}, "identity_kind": {"const": "model_preparation_run"}},
+      "additionalProperties": false
+    },
+    "dataset": {
+      "type": "object", "required": ["identity", "identity_kind", "content_sha256"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1}, "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+      }, "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object", "required": ["filename", "sha256", "schema_version"],
+      "properties": {
+        "filename": {"type": "string", "pattern": "^[^\\\\/:]+(?:/[^\\\\/:]+)*$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "schema_version": {"type": "string", "minLength": 1}
+      }, "additionalProperties": false
+    },
+    "artifact_or_null": {"anyOf": [{"$ref": "#/$defs/artifact"}, {"type": "null"}]},
+    "tensor_identity": {
+      "type": "object", "required": ["key_field", "song_id_field", "source_bar_index_field", "transpose_field", "base_pitch_field", "tensor_schema_version"],
+      "properties": {
+        "key_field": {"const": "tensor_key"}, "song_id_field": {"const": "song_id"},
+        "source_bar_index_field": {"const": "bar_index"}, "transpose_field": {"const": "applied_transpose_semitones"},
+        "base_pitch_field": {"const": "diagnostics.base_pitch"}, "tensor_schema_version": {"const": "bar_tensor_schema.v1"}
+      }, "additionalProperties": false
+    },
+    "availability": {
+      "type": "object", "required": ["bar_tensor_index", "bar_tensors", "songs", "stable_row_identity"],
+      "properties": {
+        "bar_tensor_index": {"type": "boolean"}, "bar_tensors": {"type": "boolean"},
+        "songs": {"type": "boolean"}, "stable_row_identity": {"type": "boolean"}
+      }, "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

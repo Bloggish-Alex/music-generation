@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/common__report.v1",
+  "type": "object",
+  "required": ["schema_version", "status", "metrics", "findings", "provenance", "missing_inputs"],
+  "properties": {
+    "schema_version": {"const": "assessment_report.v1"},
+    "status": {"enum": ["PASS", "WARN", "FAIL", "UNAVAILABLE", "MONITOR"]},
+    "metrics": {"type": "object"},
+    "findings": {"type": "array", "items": {"type": "object"}},
+    "provenance": {"type": "object"},
+    "missing_inputs": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

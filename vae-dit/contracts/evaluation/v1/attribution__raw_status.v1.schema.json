@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trajectory attribution raw status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "experiment", "artifacts", "unavailable_reasons"],
+  "properties": {"schema_version": {"const": "attribution_raw_status.v1"}, "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]}, "experiment": {"$ref": "#/$defs/experiment"}, "artifacts": {"type": "object", "additionalProperties": false, "properties": {"observation": {"$ref": "#/$defs/reference"}}}, "unavailable_reasons": {"$ref": "#/$defs/reasons"}},
+  "$defs": {"experiment": {"type": "object", "additionalProperties": false, "required": ["pairing_group_id", "checkpoint_sha256", "dataset_identity", "dataset_split", "seed", "primer_bars", "bars", "sampling_identity"], "properties": {"pairing_group_id": {"type": "string", "minLength": 1}, "checkpoint_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "dataset_identity": {"type": "string", "minLength": 1}, "dataset_split": {"type": "string", "minLength": 1}, "seed": {"type": ["integer", "null"]}, "primer_bars": {"type": "integer", "minimum": 0}, "bars": {"type": "integer", "minimum": 1}, "sampling_identity": {"type": "object"}}}, "reference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "pattern": "^[^\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}, "reasons": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["field", "reason"], "properties": {"field": {"type": "string"}, "reason": {"type": "string"}}}}}
+}

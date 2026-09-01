@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_anchor_context__training_lineage_raw.v1",
+  "title": "Trajectory Training Anchor Context Raw Lineage",
+  "description": "Raw training-input facts connecting encoded bar anchors to trajectory base pitches, song anchors and register offsets.",
+  "type": "object",
+  "required": ["schema_version", "parent_encoded_input_manifest", "availability", "unavailable_reasons", "row_summary", "register_parameterization", "observations"],
+  "properties": {
+    "schema_version": {"const": "trajectory_training_input_lineage_raw.v1"},
+    "parent_encoded_input_manifest": {"$ref": "#/$defs/parent_manifest"},
+    "availability": {"$ref": "#/$defs/availability"},
+    "unavailable_reasons": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "row_summary": {"$ref": "#/$defs/row_summary"},
+    "register_parameterization": {"$ref": "#/$defs/register_parameterization"},
+    "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "parent_manifest": {
+      "type": "object", "required": ["filename", "sha256", "run_identity", "bar_tensor_index_sha256", "bar_tensors_sha256", "tensor_schema_version"],
+      "properties": {
+        "filename": {"type": ["string", "null"], "pattern": "^[^\\\\/:]+$"}, "sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "run_identity": {"type": ["string", "null"], "minLength": 1}, "bar_tensor_index_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "bar_tensors_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}, "tensor_schema_version": {"type": ["string", "null"], "const": "bar_tensor_schema.v1"}
+      }, "additionalProperties": false
+    },
+    "availability": {
+      "type": "object", "required": ["parent_manifest", "encoded_index_hash_match", "encoded_tensor_hash_match", "row_identity_alignment", "base_pitch_alignment"],
+      "properties": {"parent_manifest": {"type": "boolean"}, "encoded_index_hash_match": {"type": "boolean"}, "encoded_tensor_hash_match": {"type": "boolean"}, "row_identity_alignment": {"type": "boolean"}, "base_pitch_alignment": {"type": "boolean"}},
+      "additionalProperties": false
+    },
+    "row_summary": {"type": "object", "required": ["loaded_row_count", "unique_tensor_key_count", "song_count"], "properties": {"loaded_row_count": {"type": "integer", "minimum": 0}, "unique_tensor_key_count": {"type": "integer", "minimum": 0}, "song_count": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
+    "register_parameterization": {"type": "object", "required": ["base_pitch_definition", "song_anchor_definition", "register_offset_definition", "unit"], "properties": {"base_pitch_definition": {"const": "encoded_index.diagnostics.base_pitch"}, "song_anchor_definition": {"const": "round(median(base_pitch) within song_id)"}, "register_offset_definition": {"const": "base_pitch - song_anchor"}, "unit": {"const": "midi_semitone"}}, "additionalProperties": false},
+    "observation": {"type": "object", "required": ["tensor_key", "song_id", "base_song_id", "source_bar_index", "applied_transpose_semitones", "encoded_base_pitch", "trajectory_input_base_pitch", "song_anchor", "register_offset"], "properties": {"tensor_key": {"type": "string", "minLength": 1}, "song_id": {"type": "string", "minLength": 1}, "base_song_id": {"type": "string", "minLength": 1}, "source_bar_index": {"type": "integer", "minimum": 0}, "applied_transpose_semitones": {"type": "integer"}, "encoded_base_pitch": {"type": "integer"}, "trajectory_input_base_pitch": {"type": "integer"}, "song_anchor": {"type": "integer"}, "register_offset": {"type": "integer"}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

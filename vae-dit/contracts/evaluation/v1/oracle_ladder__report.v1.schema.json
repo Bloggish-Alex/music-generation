@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/oracle_ladder__report.v1",
+  "type": "object",
+  "required": ["schema_version", "boundaries", "gaps", "provenance"],
+  "properties": {
+    "schema_version": {"const": "oracle_ladder_report.v1"},
+    "boundaries": {"type": "array", "items": {"type": "object"}},
+    "gaps": {"type": "array", "items": {"type": "object"}},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": true
+}

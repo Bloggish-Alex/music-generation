@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trajectory attribution raw observation v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment", "arms", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "attribution_raw_observation.v3"},
+    "experiment": {"$ref": "attribution__raw_status.v3.schema.json#/$defs/complete_experiment"},
+    "arms": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["arm_id", "role", "ablation", "generation_diagnostics", "bar_tensors", "generated_midi"], "properties": {"arm_id": {"type": "string", "minLength": 1}, "role": {"enum": ["baseline", "ablated"]}, "ablation": {"type": "object", "additionalProperties": false, "required": ["stream", "type"], "properties": {"stream": {"enum": ["theme_memory", "remi", "latent", "register", "physical_trajectory"]}, "type": {"enum": ["natural", "masked", "zero"]}}}, "generation_diagnostics": {"$ref": "attribution__raw_status.v3.schema.json#/$defs/reference"}, "bar_tensors": {"$ref": "attribution__raw_status.v3.schema.json#/$defs/reference"}, "generated_midi": {"$ref": "attribution__raw_status.v3.schema.json#/$defs/reference"}}}},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["paired_arms", "generation_diagnostics", "bar_tensors", "generated_midi"], "properties": {"paired_arms": {"const": true}, "generation_diagnostics": {"const": true}, "bar_tensors": {"const": true}, "generated_midi": {"const": true}}},
+    "unavailable_reasons": {"type": "array", "maxItems": 0}
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dvae_pitch_supervision_audit__raw_observation.v1",
+  "title": "DVAE Relative-Pitch Supervision Raw Audit",
+  "description": "Runtime facts describing the relative-pitch reconstruction path. It contains no quality metric or conclusion.",
+  "type": "object",
+  "required": ["schema_version", "run", "tensor_contract", "supervision", "decoder_parameter_groups", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "dvae_pitch_supervision_audit_raw.v1"},
+    "run": {"$ref": "#/$defs/run"},
+    "tensor_contract": {"$ref": "#/$defs/tensor_contract"},
+    "supervision": {"$ref": "#/$defs/supervision"},
+    "decoder_parameter_groups": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/parameter_group"}},
+    "availability": {"$ref": "#/$defs/availability"},
+    "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": ["identity", "dataset_identity", "dataset_identity_kind", "seed"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "dataset_identity": {"type": "string", "minLength": 1},
+        "dataset_identity_kind": {"type": "string", "minLength": 1},
+        "seed": {"type": ["integer", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "tensor_contract": {
+      "type": "object",
+      "required": ["schema_version", "axis_order", "relative_pitch_feature_name", "relative_pitch_feature_index", "pitch_scale_semitones", "relative_pitch_target_representation", "relative_pitch_target_units"],
+      "properties": {
+        "schema_version": {"const": "bar_tensor_schema.v1"},
+        "axis_order": {"const": ["bar", "track", "step", "feature"]},
+        "relative_pitch_feature_name": {"const": "relative_pitch"},
+        "relative_pitch_feature_index": {"type": "integer", "minimum": 0},
+        "pitch_scale_semitones": {"type": "number", "exclusiveMinimum": 0},
+        "relative_pitch_target_representation": {"type": "string", "minLength": 1},
+        "relative_pitch_target_units": {"const": "normalized_by_pitch_scale"}
+      },
+      "additionalProperties": false
+    },
+    "supervision": {
+      "type": "object",
+      "required": ["loss_term_id", "loss_enabled", "loss_weight", "reduction", "target_tensor_shape", "decoder_pitch_output_shape", "target_decoder_shape_match", "active_mask_definition", "active_mask_shape", "active_mask_applied_to_pitch_loss", "normalization", "gradient_path_declared"],
+      "properties": {
+        "loss_term_id": {"const": "relative_pitch_reconstruction"},
+        "loss_enabled": {"type": "boolean"},
+        "loss_weight": {"type": "number", "minimum": 0},
+        "reduction": {"type": "string", "minLength": 1},
+        "target_tensor_shape": {"$ref": "#/$defs/shape"},
+        "decoder_pitch_output_shape": {"$ref": "#/$defs/shape"},
+        "target_decoder_shape_match": {"type": "boolean"},
+        "active_mask_definition": {"type": "string", "minLength": 1},
+        "active_mask_shape": {"$ref": "#/$defs/shape"},
+        "active_mask_applied_to_pitch_loss": {"type": "boolean"},
+        "normalization": {"$ref": "#/$defs/normalization"},
+        "gradient_path_declared": {"$ref": "#/$defs/gradient_path"}
+      },
+      "additionalProperties": false
+    },
+    "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}},
+    "normalization": {
+      "type": "object",
+      "required": ["target_scale_semitones", "decoder_output_scale_semitones", "decoder_output_activation", "decoder_output_clamp_range"],
+      "properties": {
+        "target_scale_semitones": {"type": "number", "exclusiveMinimum": 0},
+        "decoder_output_scale_semitones": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "decoder_output_activation": {"enum": ["none", "sigmoid", "tanh", "clamp", "other"]},
+        "decoder_output_clamp_range": {"anyOf": [{"type": "null"}, {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}]}
+      },
+      "additionalProperties": false
+    },
+    "gradient_path": {
+      "type": "object",
+      "required": ["target_detached", "decoder_output_detached_before_pitch_loss", "pitch_loss_requires_grad"],
+      "properties": {
+        "target_detached": {"type": "boolean"},
+        "decoder_output_detached_before_pitch_loss": {"type": "boolean"},
+        "pitch_loss_requires_grad": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "parameter_group": {
+      "type": "object",
+      "required": ["group_id", "parameter_tensor_count", "parameter_element_count", "available", "unavailable_reason"],
+      "properties": {
+        "group_id": {"enum": ["decoder_input", "decoder_hidden", "decoder_pitch_output"]},
+        "parameter_tensor_count": {"type": "integer", "minimum": 0},
+        "parameter_element_count": {"type": "integer", "minimum": 0},
+        "available": {"type": "boolean"},
+        "unavailable_reason": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "required": ["resolved_feature_index", "resolved_loss_term", "resolved_active_mask", "resolved_normalization", "resolved_decoder_output", "resolved_parameter_groups"],
+      "properties": {
+        "resolved_feature_index": {"type": "boolean"},
+        "resolved_loss_term": {"type": "boolean"},
+        "resolved_active_mask": {"type": "boolean"},
+        "resolved_normalization": {"type": "boolean"},
+        "resolved_decoder_output": {"type": "boolean"},
+        "resolved_parameter_groups": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "reasons": {"type": "array", "items": {"type": "object", "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}, "additionalProperties": false}}
+  },
+  "additionalProperties": false
+}

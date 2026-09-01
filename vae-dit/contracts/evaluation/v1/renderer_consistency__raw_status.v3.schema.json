@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Renderer consistency raw status v3",
+  "description": "A status may identify unavailable runtime provenance without inventing it. AVAILABLE requires complete provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "status", "availability", "artifacts", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "renderer_consistency_raw_status.v3"},
+    "run": {"$ref": "#/$defs/run_partial"},
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["observation"], "properties": {"observation": {"type": "boolean"}}},
+    "artifacts": {"type": "object", "additionalProperties": false, "properties": {"observation": {"$ref": "#/$defs/reference"}}},
+    "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "AVAILABLE"}}},
+      "then": {
+        "properties": {
+          "run": {"$ref": "#/$defs/run_complete"},
+          "availability": {"properties": {"observation": {"const": true}}},
+          "artifacts": {"required": ["observation"]},
+          "unavailable_reasons": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "UNAVAILABLE"}}},
+      "then": {
+        "properties": {
+          "availability": {"properties": {"observation": {"const": false}}},
+          "artifacts": {"maxProperties": 0},
+          "unavailable_reasons": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "run_partial": {"type": "object", "additionalProperties": false, "required": ["run_id", "arm", "checkpoint_sha256", "dataset_identity", "dataset_split", "seed", "primer_bars"], "properties": {"run_id": {"type": ["string", "null"], "minLength": 1}, "arm": {"enum": ["free_running", "teacher_forced", null]}, "checkpoint_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}, "dataset_identity": {"type": ["string", "null"], "minLength": 1}, "dataset_split": {"type": ["string", "null"], "minLength": 1}, "seed": {"type": ["integer", "null"]}, "primer_bars": {"type": ["integer", "null"], "minimum": 0}}},
+    "run_complete": {"type": "object", "additionalProperties": false, "required": ["run_id", "arm", "checkpoint_sha256", "dataset_identity", "dataset_split", "seed", "primer_bars"], "properties": {"run_id": {"type": "string", "minLength": 1}, "arm": {"enum": ["free_running", "teacher_forced"]}, "checkpoint_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "dataset_identity": {"type": "string", "minLength": 1}, "dataset_split": {"type": "string", "minLength": 1}, "seed": {"type": ["integer", "null"]}, "primer_bars": {"type": "integer", "minimum": 0}}},
+    "reference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "pattern": "^[^\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+    "reasons": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}}
+  }
+}

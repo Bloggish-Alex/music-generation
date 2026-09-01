@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Physical trajectory objective public inputs v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status"],
+  "properties": {
+    "schema_version": {"const": "physical_trajectory_objective_inputs.v1"},
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "schema_version"],
+      "properties": {
+        "path": {"const": "physical_trajectory_objective__raw_status.v2.json"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "schema_version": {"const": "physical_trajectory_objective_raw_status.v2"}
+      }
+    }
+  }
+}

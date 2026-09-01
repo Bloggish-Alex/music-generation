@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Renderer consistency raw observation v1",
+  "description": "Renderer input and realized MIDI facts. Evaluation derives all fidelity metrics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "tensor_schema", "midi", "arrays", "bar_alignment", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "renderer_consistency_raw_observation.v1"},
+    "run": {"$ref": "renderer_consistency__raw_status.v1.schema.json#/$defs/run"},
+    "tensor_schema": {"type": "object", "additionalProperties": false, "required": ["schema_version", "axis_order", "feature_names", "track_names", "pitch_scale_semitones"], "properties": {"schema_version": {"const": "bar_tensor_schema.v1"}, "axis_order": {"const": ["bar", "track", "step", "feature"]}, "feature_names": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "track_names": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "pitch_scale_semitones": {"type": "number", "exclusiveMinimum": 0}}},
+    "midi": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "ticks_per_beat"], "properties": {"path": {"type": "string", "pattern": "^[^\\/]+\\.mid$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "ticks_per_beat": {"type": "integer", "minimum": 1}}},
+    "arrays": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "items"], "properties": {"path": {"type": "string", "pattern": "^[^\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "items": {"type": "object", "required": ["bar_tensors", "render_base_pitches"], "properties": {"bar_tensors": {"$ref": "#/$defs/array"}, "render_base_pitches": {"$ref": "#/$defs/array"}}}}},
+    "bar_alignment": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["bar_index", "source_bar_index", "start_tick", "end_tick", "track_to_midi_track"], "properties": {"bar_index": {"type": "integer", "minimum": 0}, "source_bar_index": {"type": ["integer", "null"], "minimum": 0}, "start_tick": {"type": "integer", "minimum": 0}, "end_tick": {"type": "integer", "minimum": 1}, "track_to_midi_track": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}}}},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["render_input_tensor", "render_base_pitch", "rendered_midi", "bar_alignment"], "properties": {"render_input_tensor": {"type": "boolean"}, "render_base_pitch": {"type": "boolean"}, "rendered_midi": {"type": "boolean"}, "bar_alignment": {"type": "boolean"}}},
+    "unavailable_reasons": {"$ref": "renderer_consistency__raw_status.v1.schema.json#/$defs/reasons"}
+  },
+  "$defs": {"array": {"type": "object", "additionalProperties": false, "required": ["dtype", "shape"], "properties": {"dtype": {"enum": ["float32", "int64"]}, "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}}}}
+}

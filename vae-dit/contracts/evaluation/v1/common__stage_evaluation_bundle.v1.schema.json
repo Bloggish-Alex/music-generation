@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/common__stage_evaluation_bundle.v1",
+  "type": "object",
+  "required": ["schema_version", "stage", "inputs", "observations", "alignment", "provenance", "availability"],
+  "properties": {
+    "schema_version": {"const": "stage_evaluation_bundle.v1"},
+    "stage": {"type": "string"},
+    "inputs": {"type": "array", "items": {"type": "object"}},
+    "observations": {"type": "array", "items": {"type": "object"}},
+    "alignment": {"type": "object"},
+    "provenance": {"type": "object"},
+    "availability": {"type": "object"}
+  },
+  "additionalProperties": true
+}

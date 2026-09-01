@@ -1,0 +1,24 @@
+{
+  "schema_version": "evaluation_contract_registry.v1",
+  "policy": {
+    "published_contracts_are_immutable": true,
+    "new_writers_use_latest_active_version": true,
+    "deprecated_readers_require_an_explicit_retirement_commit": true
+  },
+  "families": {
+    "renderer_consistency_raw_status": {"active": "v3", "deprecated": ["v1", "v2"]},
+    "renderer_consistency_raw_observation": {"active": "v3", "deprecated": ["v1", "v2"]},
+    "attribution_raw_status": {"active": "v3", "deprecated": ["v1", "v2"]},
+    "attribution_raw_observation": {"active": "v3", "deprecated": ["v1", "v2"]},
+    "trajectory_training_input_lineage_raw": {"active": "v2", "deprecated": ["v1"]}
+  },
+  "oracle_ladder": {
+    "boundaries": [
+      {"id": "source_to_codec", "module": "codec_fidelity", "label": "source MIDI -> codec tensor"},
+      {"id": "codec_to_dvae", "module": "dvae_fidelity", "label": "codec tensor -> DVAE latent/reconstruction"},
+      {"id": "teacher_forced_trajectory", "module": "trajectory_teacher_forced", "label": "DVAE latent -> teacher-forced trajectory"},
+      {"id": "free_running_trajectory", "module": "trajectory_rollout", "label": "teacher-forced context -> free-running trajectory"},
+      {"id": "renderer", "module": "renderer_consistency", "label": "renderer input -> rendered MIDI"}
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/codec_fidelity__raw_observation.v1",
+  "title": "Codec Fidelity Raw Observations",
+  "type": "object",
+  "required": ["schema_version", "dataset", "tensor", "tensor_schema", "alignment", "availability"],
+  "properties": {
+    "schema_version": {"const": "codec_fidelity_raw_observation.v1"},
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "split", "split_unit"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"]},
+        "split": {"type": "string", "minLength": 1},
+        "split_unit": {"const": "base_song_id"}
+      },
+      "additionalProperties": false
+    },
+    "source_raw": {"type": "object"},
+    "tensor": {
+      "type": "object",
+      "required": ["path", "array_name", "sha256", "dtype", "shape"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "array_name": {"const": "bar_tensors"},
+        "sha256": {"type": ["string", "null"]},
+        "dtype": {"const": "float32"},
+        "shape": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 1}}
+      },
+      "additionalProperties": false
+    },
+    "tensor_schema": {
+      "type": "object",
+      "required": ["axis_order", "feature_names", "pitch_scale_semitones", "track_names"],
+      "properties": {
+        "axis_order": {"const": ["bar", "track", "step", "feature"]},
+        "feature_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "pitch_scale_semitones": {"type": "number", "exclusiveMinimum": 0},
+        "track_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "feature_units": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "alignment": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["tensor_row", "song_id", "base_song_id", "bar_index", "applied_transpose_semitones", "source_bar_index", "base_pitch_semitones"],
+        "properties": {
+          "tensor_row": {"type": "integer", "minimum": 0},
+          "song_id": {"type": "string", "minLength": 1},
+          "base_song_id": {"type": "string", "minLength": 1},
+          "bar_index": {"type": "integer", "minimum": 0},
+          "source_bar_index": {"type": "integer", "minimum": 0},
+          "applied_transpose_semitones": {"type": "integer"},
+          "base_pitch_semitones": {"type": "number"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "availability": {"type": "object"}
+  },
+  "additionalProperties": false
+}

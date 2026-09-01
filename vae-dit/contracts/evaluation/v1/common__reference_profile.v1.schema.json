@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/common__reference_profile.v1",
+  "type": "object",
+  "required": ["schema_version", "source", "metrics"],
+  "properties": {
+    "schema_version": {"const": "generation_reference_profile.v1"},
+    "source": {"type": "object"},
+    "metrics": {"type": "object"}
+  },
+  "additionalProperties": true
+}

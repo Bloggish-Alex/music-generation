@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dvae_fidelity__raw_observation.v1",
+  "title": "DVAE Fidelity Raw Observations",
+  "description": "Aligned source tensor, deterministic latent mean and decoded tensor facts. It contains no quality metric or conclusion.",
+  "type": "object",
+  "required": ["schema_version", "dataset", "parent_encoded_input_manifest", "checkpoint", "arrays", "tensor_schema", "decoder_projection", "alignment", "availability"],
+  "properties": {
+    "schema_version": {"const": "dvae_fidelity_raw_observation.v1"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "parent_encoded_input_manifest": {"$ref": "#/$defs/parent"},
+    "checkpoint": {"$ref": "#/$defs/checkpoint"},
+    "arrays": {
+      "type": "object",
+      "required": ["path", "sha256", "source_tensor", "latent_mu", "decoded_tensor"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[^\\/:]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "source_tensor": {"$ref": "#/$defs/array"},
+        "latent_mu": {"$ref": "#/$defs/array"},
+        "decoded_tensor": {"$ref": "#/$defs/array"}
+      },
+      "additionalProperties": false
+    },
+    "tensor_schema": {"$ref": "#/$defs/tensor_schema"},
+    "decoder_projection": {
+      "type": "object",
+      "required": ["latent_path", "state_projection", "feature_projection"],
+      "properties": {
+        "latent_path": {"const": "deterministic_mu"},
+        "state_projection": {"const": "argmax_state_logits_to_one_hot"},
+        "feature_projection": {"const": "pitch_state_velocity_chord_into_bar_tensor_schema.v1"}
+      },
+      "additionalProperties": false
+    },
+    "alignment": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/alignment"}
+    },
+    "availability": {"$ref": "#/$defs/availability"}
+  },
+  "$defs": {
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "content_sha256", "split", "split_unit"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "split": {"enum": ["train", "validation", "excluded_unpaired"]},
+        "split_unit": {"const": "base_song_id"}
+      },
+      "additionalProperties": false
+    },
+    "parent": {
+      "type": "object",
+      "required": ["sha256", "run_identity", "bar_tensor_index_sha256", "bar_tensors_sha256", "tensor_schema_version"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "run_identity": {"type": "string", "minLength": 1},
+        "bar_tensor_index_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "bar_tensors_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tensor_schema_version": {"const": "bar_tensor_schema.v1"}
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "required": ["role", "sha256"],
+      "properties": {
+        "role": {"const": "dvae"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "array": {
+      "type": "object",
+      "required": ["array_name", "dtype", "shape"],
+      "properties": {
+        "array_name": {"type": "string", "minLength": 1},
+        "dtype": {"const": "float32"},
+        "shape": {"type": "array", "minItems": 2, "items": {"type": "integer", "minimum": 1}}
+      },
+      "additionalProperties": false
+    },
+    "tensor_schema": {
+      "type": "object",
+      "required": ["schema_version", "axis_order", "feature_names", "feature_units", "pitch_scale_semitones", "track_names"],
+      "properties": {
+        "schema_version": {"const": "bar_tensor_schema.v1"},
+        "axis_order": {"const": ["bar", "track", "step", "feature"]},
+        "feature_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "feature_units": {"type": "object"},
+        "pitch_scale_semitones": {"type": "number", "exclusiveMinimum": 0},
+        "track_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "alignment": {
+      "type": "object",
+      "required": ["row", "song_id", "base_song_id", "source_bar_index", "applied_transpose_semitones", "base_pitch_semitones"],
+      "properties": {
+        "row": {"type": "integer", "minimum": 0},
+        "song_id": {"type": "string", "minLength": 1},
+        "base_song_id": {"type": "string", "minLength": 1},
+        "source_bar_index": {"type": "integer", "minimum": 0},
+        "applied_transpose_semitones": {"type": "integer"},
+        "base_pitch_semitones": {"type": ["integer", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "required": ["source_tensor", "latent_mu", "decoded_tensor", "row_alignment", "tensor_schema", "deterministic_mu"],
+      "properties": {
+        "source_tensor": {"const": true},
+        "latent_mu": {"const": true},
+        "decoded_tensor": {"const": true},
+        "row_alignment": {"const": true},
+        "tensor_schema": {"const": true},
+        "deterministic_mu": {"const": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

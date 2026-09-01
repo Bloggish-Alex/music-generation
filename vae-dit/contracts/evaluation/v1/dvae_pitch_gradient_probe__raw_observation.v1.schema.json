@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dvae_pitch_gradient_probe__raw_observation.v1",
+  "title": "DVAE Relative-Pitch Gradient Probe Raw Observations",
+  "description": "Opt-in pitch-only autograd observations. Gradient values are raw engineering facts, not quality judgments.",
+  "type": "object",
+  "required": ["schema_version", "run", "split", "probe", "batches", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "dvae_pitch_gradient_probe_raw.v1"},
+    "run": {"$ref": "#/$defs/run"},
+    "split": {"enum": ["train", "validation"]},
+    "probe": {"$ref": "#/$defs/probe"},
+    "batches": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/batch"}},
+    "availability": {"$ref": "#/$defs/availability"},
+    "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": ["identity", "dataset_identity", "dataset_identity_kind", "seed", "parent_encoded_input_manifest_sha256"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "dataset_identity": {"type": "string", "minLength": 1},
+        "dataset_identity_kind": {"type": "string", "minLength": 1},
+        "seed": {"type": ["integer", "null"]},
+        "parent_encoded_input_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "required": ["selection_policy", "requested_batch_count", "captured_batch_count", "loss_term_id", "loss_reuses_training_implementation", "autograd_method"],
+      "properties": {
+        "selection_policy": {"const": "first_available_batches"},
+        "requested_batch_count": {"type": "integer", "minimum": 1},
+        "captured_batch_count": {"type": "integer", "minimum": 0},
+        "loss_term_id": {"const": "relative_pitch_reconstruction"},
+        "loss_reuses_training_implementation": {"const": true},
+        "autograd_method": {"const": "autograd_grad_without_parameter_grad_mutation"}
+      },
+      "additionalProperties": false
+    },
+    "batch": {
+      "type": "object",
+      "required": ["batch_ordinal", "global_step", "sample_identity_sha256", "tensor_shape", "active_pitch_slot_count", "pitch_loss", "pitch_loss_requires_grad", "decoder_parameter_groups"],
+      "properties": {
+        "batch_ordinal": {"type": "integer", "minimum": 0},
+        "global_step": {"type": ["integer", "null"], "minimum": 0},
+        "sample_identity_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tensor_shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}},
+        "active_pitch_slot_count": {"type": "integer", "minimum": 0},
+        "pitch_loss": {"type": "number"},
+        "pitch_loss_requires_grad": {"type": "boolean"},
+        "decoder_parameter_groups": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/parameter_group"}},
+        "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+      },
+      "additionalProperties": false
+    },
+    "parameter_group": {
+      "type": "object",
+      "required": ["group_id", "available", "gradient_available", "gradient_l2_norm", "gradient_max_abs", "gradient_nonzero_element_count", "parameter_element_count", "unavailable_reason"],
+      "properties": {
+        "group_id": {"enum": ["decoder_input", "decoder_hidden", "decoder_pitch_output"]},
+        "available": {"type": "boolean"},
+        "gradient_available": {"type": "boolean"},
+        "gradient_l2_norm": {"type": ["number", "null"], "minimum": 0},
+        "gradient_max_abs": {"type": ["number", "null"], "minimum": 0},
+        "gradient_nonzero_element_count": {"type": ["integer", "null"], "minimum": 0},
+        "parameter_element_count": {"type": "integer", "minimum": 0},
+        "unavailable_reason": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "required": ["pitch_loss", "active_mask", "decoder_parameter_groups", "autograd_gradient"],
+      "properties": {
+        "pitch_loss": {"type": "boolean"},
+        "active_mask": {"type": "boolean"},
+        "decoder_parameter_groups": {"type": "boolean"},
+        "autograd_gradient": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "reasons": {"type": "array", "items": {"type": "object", "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}, "additionalProperties": false}}
+  },
+  "additionalProperties": false
+}

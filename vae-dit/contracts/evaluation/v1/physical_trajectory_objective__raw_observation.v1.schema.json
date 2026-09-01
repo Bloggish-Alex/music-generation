@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Physical trajectory objective raw observation v1",
+  "description": "References raw validation facts produced by the Stage 1 runtime. The evaluator computes metrics, thresholds and conclusions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "trajectory_schema", "validation", "probe", "equivariance", "arrays", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "physical_trajectory_objective_raw_observation.v1"},
+    "run": {"$ref": "physical_trajectory_objective__raw_status.v1.schema.json#/$defs/run"},
+    "trajectory_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_names", "feature_groups", "plan_bars", "normalizer"],
+      "properties": {
+        "feature_names": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "feature_groups": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}},
+        "plan_bars": {"type": "integer", "minimum": 1},
+        "normalizer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mean", "std", "degenerate"],
+          "properties": {
+            "mean": {"type": "array", "items": {"type": "number"}},
+            "std": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}},
+            "degenerate": {"type": "array", "items": {"type": "boolean"}}
+          }
+        }
+      }
+    },
+    "validation": {"type": "object", "additionalProperties": false, "required": ["window_count", "train_window_count", "validation_window_count", "rows", "corruption"], "properties": {"window_count": {"type": "integer", "minimum": 1}, "train_window_count": {"type": "integer", "minimum": 1}, "validation_window_count": {"type": "integer", "minimum": 1}, "rows": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["row", "base_song_id", "form"], "properties": {"row": {"type": "integer", "minimum": 0}, "base_song_id": {"type": "string", "minLength": 1}, "form": {"type": ["string", "null"]}}}}, "corruption": {"type": "object", "additionalProperties": false, "required": ["seed", "mask_probability", "noise_std"], "properties": {"seed": {"type": "integer"}, "mask_probability": {"type": "number", "minimum": 0, "maximum": 1}, "noise_std": {"type": "number", "minimum": 0}}}}},
+    "probe": {"type": "object", "additionalProperties": false, "required": ["sample_count", "variants"], "properties": {"sample_count": {"type": "integer", "minimum": 1}, "variants": {"type": "array", "minItems": 5, "items": {"enum": ["clean", "coherent_control", "octave_displacement", "track_swap", "boundary_shuffle"]}}}},
+    "equivariance": {"type": "object", "additionalProperties": false, "required": ["octave_shift_semitones", "chroma_feature_indices", "density_feature_indices", "pitch_translation_feature_indices"], "properties": {"octave_shift_semitones": {"const": 12.0}, "chroma_feature_indices": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}, "density_feature_indices": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}, "pitch_translation_feature_indices": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}}},
+    "arrays": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "items"], "properties": {"path": {"type": "string", "pattern": "^[^\\\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "items": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "additionalProperties": false, "required": ["dtype", "shape"], "properties": {"dtype": {"enum": ["float32", "bool"]}, "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}}}}}},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["validation_reconstruction", "embedding_health", "probe_embeddings", "equivariance"], "properties": {"validation_reconstruction": {"type": "boolean"}, "embedding_health": {"type": "boolean"}, "probe_embeddings": {"type": "boolean"}, "equivariance": {"type": "boolean"}}},
+    "unavailable_reasons": {"$ref": "physical_trajectory_objective__raw_status.v1.schema.json#/$defs/reasons"}
+  }
+}

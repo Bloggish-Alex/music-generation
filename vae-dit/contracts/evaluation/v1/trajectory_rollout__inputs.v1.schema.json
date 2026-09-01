@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_rollout__inputs.v1",
+  "type": "object",
+  "required": ["schema_version", "generation_manifest", "bar_tensor", "render_register", "trace", "provenance", "availability"],
+  "properties": {
+    "schema_version": {"const": "trajectory_rollout_inputs.v1"},
+    "generation_manifest": {"type": "string"},
+    "bar_tensor": {"type": "object"},
+    "render_register": {"type": "object"},
+    "trace": {"type": "object"}
+  },
+  "additionalProperties": true
+}

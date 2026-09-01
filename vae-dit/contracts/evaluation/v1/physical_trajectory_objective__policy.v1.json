@@ -1,0 +1,31 @@
+{
+  "schema_version": "physical_trajectory_objective_policy.v1",
+  "test_point": "physical_trajectory_objective",
+  "policy_version": 1,
+  "data_contract": {
+    "max_degenerate_dimensions": 0,
+    "min_feature_valid_ratio": 0.01,
+    "max_missing_base_pitch_ratio": 0.01,
+    "validation_base_song_warn_below": 5,
+    "form_dominance_warn_above": 0.8,
+    "equivariance_absolute_tolerance": 0.0001
+  },
+  "reconstruction": {
+    "r2_fail_below": 0.0,
+    "r2_warn_below": 0.5
+  },
+  "probe_separation": {
+    "quantile_gap_fail_at_or_below": 0.0,
+    "triplet_accuracy_fail_below": 0.8,
+    "triplet_accuracy_warn_below": 0.95
+  },
+  "embedding_health": {
+    "effective_rank_ratio_fail_below": 0.02,
+    "effective_rank_ratio_warn_below": 0.1,
+    "top_pc_ratio_fail_above": 0.9,
+    "top_pc_ratio_warn_above": 0.5,
+    "active_dimension_epsilon": 0.00001,
+    "near_zero_distance_epsilon": 0.000001,
+    "pair_sample_count": 50000
+  }
+}

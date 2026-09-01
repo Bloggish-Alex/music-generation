@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dvae_fidelity__raw_status.v1",
+  "title": "DVAE Fidelity Raw Split Status",
+  "type": "object",
+  "required": ["schema_version", "dataset", "status", "availability", "unavailable_reasons", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "dvae_fidelity_raw_status.v1"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "availability": {"$ref": "#/$defs/availability"},
+    "unavailable_reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+          "field": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/reference"}
+    }
+  },
+  "$defs": {
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "content_sha256", "split", "split_unit"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "split": {"enum": ["train", "validation", "excluded_unpaired"]},
+        "split_unit": {"const": "base_song_id"}
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "required": ["source_tensor", "latent_mu", "decoded_tensor", "row_alignment", "tensor_schema", "deterministic_mu"],
+      "properties": {
+        "source_tensor": {"type": "boolean"},
+        "latent_mu": {"type": "boolean"},
+        "decoded_tensor": {"type": "boolean"},
+        "row_alignment": {"type": "boolean"},
+        "tensor_schema": {"type": "boolean"},
+        "deterministic_mu": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "reference": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[^\\/:]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

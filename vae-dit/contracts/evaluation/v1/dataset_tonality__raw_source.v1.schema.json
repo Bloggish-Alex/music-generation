@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dataset_tonality__raw_source.v1",
+  "title": "Dataset Tonality Raw Source Observations",
+  "type": "object",
+  "required": ["schema_version", "dataset", "songs", "availability"],
+  "properties": {
+    "schema_version": {"const": "dataset_tonality_raw_source.v1"},
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "split"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"]},
+        "split": {"type": "string", "minLength": 1},
+        "split_unit": {"const": "base_song_id"}
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "encoding_artifact_sha256": {"type": ["string", "null"]},
+        "note_representation": {"const": "bar_note_events"},
+        "bar_index_semantics": {"const": "zero_based_within_song"}
+      },
+      "additionalProperties": false
+    },
+    "songs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["song_id", "base_song_id", "applied_transpose_semitones", "bars"],
+        "properties": {
+          "song_id": {"type": "string", "minLength": 1},
+          "base_song_id": {"type": "string", "minLength": 1},
+          "source_content_sha256": {"type": ["string", "null"]},
+          "applied_transpose_semitones": {"type": "integer"},
+          "bars": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["bar_index", "bar_length_ql", "time_signature", "notes"],
+              "properties": {
+                "bar_index": {"type": "integer", "minimum": 0},
+                "bar_length_ql": {"type": "number", "exclusiveMinimum": 0},
+                "time_signature": {"type": "string", "pattern": "^[0-9]+/[0-9]+$"},
+                "tempo_bpm": {"type": ["number", "null"], "exclusiveMinimum": 0},
+                "notes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["track_index", "pitch", "onset_ql", "duration_ql", "velocity"],
+                    "properties": {
+                      "track_index": {"type": "integer", "minimum": 0},
+                      "pitch": {"type": "integer", "minimum": 0, "maximum": 127},
+                      "onset_ql": {"type": "number", "minimum": 0},
+                      "duration_ql": {"type": "number", "exclusiveMinimum": 0},
+                      "velocity": {"type": "integer", "minimum": 0, "maximum": 127}
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["bar_note_events", "split_membership"],
+      "properties": {
+        "bar_note_events": {"type": "boolean"},
+        "split_membership": {"type": "boolean"},
+        "source_content_hashes": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

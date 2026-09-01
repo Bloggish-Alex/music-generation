@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/attribution__pair.v2",
+  "type": "object",
+  "required": ["schema_version", "pairing_group_id", "shared_identity", "arms"],
+  "properties": {
+    "schema_version": {"const": "paired_experiment_manifest.v2"},
+    "pairing_group_id": {"type": "string", "minLength": 1},
+    "shared_identity": {"type": "object"},
+    "arms": {"type": "array", "minItems": 2, "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

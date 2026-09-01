@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Oracle ladder inputs v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "reports"],
+  "properties": {"schema_version": {"const": "oracle_ladder_inputs.v1"}, "run": {"type": "object", "required": ["dataset_identity"], "properties": {"dataset_identity": {"type": "string"}, "checkpoint_sha256": {"type": ["string", "null"]}, "generation_manifest_sha256": {"type": ["string", "null"]}}}, "reports": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["test_point", "path", "sha256"], "properties": {"test_point": {"enum": ["codec_fidelity", "dvae_fidelity", "trajectory_teacher_forced", "trajectory_rollout", "renderer_consistency"]}, "path": {"type": "string", "pattern": "^[^\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}}}
+}

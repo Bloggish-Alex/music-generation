@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Physical trajectory objective raw status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "status", "availability", "artifacts", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "physical_trajectory_objective_raw_status.v1"},
+    "run": {"$ref": "#/$defs/run"},
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["observation"], "properties": {"observation": {"type": "boolean"}}},
+    "artifacts": {"type": "object", "additionalProperties": false, "properties": {"observation": {"$ref": "#/$defs/reference"}}},
+    "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "AVAILABLE"}}}, "then": {"properties": {"availability": {"properties": {"observation": {"const": true}}}, "artifacts": {"required": ["observation"]}, "unavailable_reasons": {"maxItems": 0}}}},
+    {"if": {"properties": {"status": {"const": "UNAVAILABLE"}}}, "then": {"properties": {"availability": {"properties": {"observation": {"const": false}}}, "artifacts": {"maxProperties": 0}, "unavailable_reasons": {"minItems": 1}}}}
+  ],
+  "$defs": {
+    "run": {"type": "object", "additionalProperties": false, "required": ["identity", "dataset_identity", "dataset_identity_kind", "seed", "checkpoint_sha256"], "properties": {"identity": {"type": "string", "minLength": 1}, "dataset_identity": {"type": "string", "minLength": 1}, "dataset_identity_kind": {"type": "string", "minLength": 1}, "seed": {"type": ["integer", "null"]}, "checkpoint_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+    "reference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "pattern": "^[^\\\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+    "reasons": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}}
+  }
+}

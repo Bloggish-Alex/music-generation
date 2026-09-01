@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dvae_fidelity__inputs.v1",
+  "title": "DVAE Fidelity Public Inputs",
+  "description": "References only raw deterministic DVAE reconstruction observations. The evaluator never loads a DVAE checkpoint.",
+  "type": "object",
+  "required": ["schema_version", "splits", "availability"],
+  "properties": {
+    "schema_version": {"const": "dvae_fidelity_inputs.v1"},
+    "splits": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/reference"}
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": {"enum": ["available", "not_provided", "unavailable"]}
+    }
+  },
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "required": ["path", "sha256", "schema_version"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[^\\/:]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "schema_version": {"const": "dvae_fidelity_raw_status.v1"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trajectory attribution raw status v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "experiment", "artifacts", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "attribution_raw_status.v3"},
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "experiment": {"$ref": "#/$defs/partial_experiment"},
+    "artifacts": {"type": "object", "additionalProperties": false, "properties": {"observation": {"$ref": "#/$defs/reference"}}},
+    "unavailable_reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "AVAILABLE"}}},
+      "then": {
+        "properties": {
+          "experiment": {"$ref": "#/$defs/complete_experiment"},
+          "artifacts": {"required": ["observation"]},
+          "unavailable_reasons": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "UNAVAILABLE"}}},
+      "then": {"properties": {"unavailable_reasons": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "partial_experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "pairing_group_id", "checkpoint_sha256", "dataset_identity", "dataset_identity_kind", "dataset_split", "source_song_id", "seed", "primer_bars", "bars", "sampling_identity", "teacher_forced", "history_source"],
+      "properties": {
+        "run_id": {"type": ["string", "null"]},
+        "pairing_group_id": {"type": ["string", "null"]},
+        "checkpoint_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "dataset_identity": {"type": ["string", "null"]},
+        "dataset_identity_kind": {"type": ["string", "null"]},
+        "dataset_split": {"type": ["string", "null"]},
+        "source_song_id": {"type": ["string", "null"]},
+        "seed": {"type": ["integer", "null"]},
+        "primer_bars": {"type": ["integer", "null"], "minimum": 0},
+        "bars": {"type": ["integer", "null"], "minimum": 1},
+        "sampling_identity": {"type": ["object", "null"]},
+        "teacher_forced": {"type": ["boolean", "null"]},
+        "history_source": {"enum": ["generated", "real_dataset", null]}
+      }
+    },
+    "complete_experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "pairing_group_id", "checkpoint_sha256", "dataset_identity", "dataset_identity_kind", "dataset_split", "source_song_id", "seed", "primer_bars", "bars", "sampling_identity", "teacher_forced", "history_source"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "pairing_group_id": {"type": "string", "minLength": 1},
+        "checkpoint_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "dataset_identity": {"type": "string", "minLength": 1},
+        "dataset_identity_kind": {"type": "string", "minLength": 1},
+        "dataset_split": {"type": "string", "minLength": 1},
+        "source_song_id": {"type": "string", "minLength": 1},
+        "seed": {"type": ["integer", "null"]},
+        "primer_bars": {"type": "integer", "minimum": 0},
+        "bars": {"type": "integer", "minimum": 1},
+        "sampling_identity": {"type": "object", "minProperties": 1},
+        "teacher_forced": {"type": "boolean"},
+        "history_source": {"enum": ["generated", "real_dataset"]}
+      }
+    },
+    "reference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "pattern": "^[^\\/]+$"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+    "reasons": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}}
+  }
+}

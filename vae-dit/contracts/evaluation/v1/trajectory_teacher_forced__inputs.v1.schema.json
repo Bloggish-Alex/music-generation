@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_teacher_forced__inputs.v1",
+  "type": "object",
+  "required": ["schema_version", "pairing_group_id", "shared_identity", "history_source", "arms", "future_positions", "availability", "provenance"],
+  "properties": {
+    "schema_version": {"const": "trajectory_teacher_forced_inputs.v1"},
+    "pairing_group_id": {"type": "string"},
+    "shared_identity": {"type": "object"},
+    "history_source": {"type": "object"},
+    "arms": {"type": "object"},
+    "future_positions": {"type": "array", "items": {"type": "integer"}},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": true
+}

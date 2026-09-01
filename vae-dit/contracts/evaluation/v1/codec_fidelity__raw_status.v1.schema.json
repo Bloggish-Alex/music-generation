@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/codec_fidelity__raw_status.v1",
+  "title": "Codec Fidelity Raw Split Status",
+  "type": "object",
+  "required": ["schema_version", "dataset", "status", "availability", "unavailable_reasons", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "codec_fidelity_raw_status.v1"},
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "split", "split_unit"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"]},
+        "split": {"type": "string", "minLength": 1},
+        "split_unit": {"const": "base_song_id"}
+      },
+      "additionalProperties": false
+    },
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "availability": {
+      "type": "object",
+      "required": ["source_bar_notes", "source_raw_reference", "bar_tensors", "tensor_schema", "row_alignment", "base_pitch"],
+      "properties": {
+        "source_bar_notes": {"type": "boolean"},
+        "source_raw_reference": {"type": "boolean"},
+        "bar_tensors": {"type": "boolean"},
+        "tensor_schema": {"type": "boolean"},
+        "row_alignment": {"type": "boolean"},
+        "base_pitch": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "unavailable_reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+          "field": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "observation": {"$ref": "#/$defs/reference"},
+        "tensors": {"$ref": "#/$defs/reference"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "AVAILABLE"}}},
+      "then": {
+        "properties": {"unavailable_reasons": {"maxItems": 0}, "artifacts": {"required": ["observation", "tensors"]}}
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "UNAVAILABLE"}}},
+      "then": {
+        "properties": {"unavailable_reasons": {"minItems": 1}, "artifacts": {"maxProperties": 0}}
+      }
+    }
+  ],
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

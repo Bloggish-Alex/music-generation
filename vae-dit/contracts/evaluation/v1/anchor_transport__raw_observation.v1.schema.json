@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/anchor_transport__raw_observation.v1",
+  "title": "Anchor Transport Raw Observations",
+  "description": "Raw deterministic anchor facts. Learned future-anchor predictions are excluded.",
+  "type": "object",
+  "required": ["schema_version", "dataset", "anchor_spec", "boundaries", "observations", "availability"],
+  "properties": {
+    "schema_version": {"const": "anchor_transport_raw_observation.v1"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "anchor_spec": {"$ref": "#/$defs/anchor_spec"},
+    "boundaries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/boundary"}},
+    "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+    "availability": {"$ref": "#/$defs/availability"}
+  },
+  "$defs": {
+    "dataset": {
+      "type": "object", "required": ["identity", "identity_kind", "split", "split_unit"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1}, "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"]}, "split": {"type": "string", "minLength": 1}, "split_unit": {"const": "base_song_id"}
+      }, "additionalProperties": false
+    },
+    "anchor_spec": {
+      "type": "object", "required": ["policy_id", "definition", "unit", "integer_policy", "missing_behavior"],
+      "properties": {
+        "policy_id": {"const": "canonical_bar_anchor_v1"},
+        "definition": {"const": "lowest sounding MIDI pitch in a nonempty bar after source quantization and declared transpose normalization"},
+        "unit": {"const": "midi_semitone"}, "integer_policy": {"const": "integer_exact"}, "missing_behavior": {"const": "null"}
+      }, "additionalProperties": false
+    },
+    "boundary": {
+      "type": "object", "required": ["name", "from_stage", "to_stage", "expected_relation"],
+      "properties": {
+        "name": {"enum": ["source_to_encoding", "encoding_to_export", "export_to_trajectory_input", "trajectory_input_to_renderer_input"]},
+        "from_stage": {"type": "string", "minLength": 1}, "to_stage": {"type": "string", "minLength": 1}, "expected_relation": {"const": "exact_identity"}
+      }, "additionalProperties": false
+    },
+    "observation": {
+      "type": "object", "required": ["song_id", "base_song_id", "source_bar_index", "applied_transpose_semitones", "anchors"],
+      "properties": {
+        "song_id": {"type": "string", "minLength": 1}, "base_song_id": {"type": "string", "minLength": 1},
+        "source_bar_index": {"type": "integer", "minimum": 0}, "applied_transpose_semitones": {"type": "integer"},
+        "anchors": {
+          "type": "object", "required": ["source", "encoding", "exported", "trajectory_input", "renderer_input"],
+          "properties": {"source": {"$ref": "#/$defs/anchor_value"}, "encoding": {"$ref": "#/$defs/anchor_value"}, "exported": {"$ref": "#/$defs/anchor_value"}, "trajectory_input": {"$ref": "#/$defs/anchor_value"}, "renderer_input": {"$ref": "#/$defs/anchor_value"}},
+          "additionalProperties": false
+        }
+      }, "additionalProperties": false
+    },
+    "anchor_value": {
+      "type": "object", "required": ["value", "coordinate_frame", "transpose_applied", "clipping_stage"],
+      "properties": {
+        "value": {"type": ["integer", "null"]}, "coordinate_frame": {"const": "transposed_model"},
+        "transpose_applied": {"const": true}, "clipping_stage": {"const": "none"}
+      }, "additionalProperties": false
+    },
+    "availability": {
+      "type": "object", "required": ["source", "encoding", "exported", "trajectory_input", "renderer_input", "reasons"],
+      "properties": {
+        "source": {"type": "boolean"}, "encoding": {"type": "boolean"}, "exported": {"type": "boolean"}, "trajectory_input": {"type": "boolean"}, "renderer_input": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }, "additionalProperties": false
+    }
+  }, "additionalProperties": false
+}

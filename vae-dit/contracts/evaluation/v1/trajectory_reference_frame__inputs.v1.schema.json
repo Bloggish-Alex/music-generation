@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trajectory reference-frame diagnostic inputs",
+  "type": "object",
+  "required": ["schema_version", "pairing_group_id", "shared_identity", "arms", "provenance"],
+  "properties": {
+    "schema_version": {"const": "trajectory_reference_frame_inputs.v1"},
+    "pairing_group_id": {"type": "string"},
+    "shared_identity": {"type": "object"},
+    "arms": {
+      "type": "object",
+      "required": ["free_running", "teacher_forced"],
+      "additionalProperties": false,
+      "properties": {
+        "free_running": {"$ref": "#/$defs/reference"},
+        "teacher_forced": {"$ref": "#/$defs/reference"}
+      }
+    },
+    "provenance": {"type": "object"}
+  },
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^sha256:"}
+      }
+    }
+  }
+}

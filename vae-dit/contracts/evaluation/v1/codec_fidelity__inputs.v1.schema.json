@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/codec_fidelity__inputs.v1",
+  "type": "object",
+  "required": ["schema_version", "splits"],
+  "properties": {
+    "schema_version": {"const": "codec_fidelity_inputs.v1"},
+    "splits": {
+      "type": "object",
+      "properties": {
+        "train": {"$ref": "#/$defs/status_reference"},
+        "validation": {"$ref": "#/$defs/status_reference"},
+        "excluded_unpaired": {"$ref": "#/$defs/status_reference"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "status_reference": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

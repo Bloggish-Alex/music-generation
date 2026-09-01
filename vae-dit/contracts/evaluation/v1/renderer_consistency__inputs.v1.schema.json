@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/renderer_consistency__inputs.v1",
+  "type": "object",
+  "required": ["schema_version", "midi", "tensor", "alignment"],
+  "properties": {
+    "schema_version": {"const": "renderer_consistency_inputs.v1"},
+    "midi": {"type": "object"},
+    "tensor": {"type": "object"},
+    "wav": {"type": ["object", "null"]},
+    "alignment": {"type": "object"}
+  },
+  "additionalProperties": true
+}

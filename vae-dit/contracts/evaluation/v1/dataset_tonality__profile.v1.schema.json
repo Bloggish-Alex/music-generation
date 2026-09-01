@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/dataset_tonality__profile.v1",
+  "type": "object",
+  "required": ["schema_version", "source", "songs", "aggregate"],
+  "properties": {
+    "schema_version": {"const": "dataset_tonality_profile.v1"},
+    "source": {"type": "object"},
+    "songs": {"type": "array", "items": {"type": "object"}},
+    "aggregate": {"type": "object"}
+  },
+  "additionalProperties": true
+}

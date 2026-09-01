@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trajectory attribution raw observation v2",
+  "description": "Raw paired-generation references. The exporter, not diagnostics, creates public generation manifests.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "experiment", "arms", "availability", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "attribution_raw_observation.v2"}, "experiment": {"$ref": "attribution__raw_status.v2.schema.json#/$defs/experiment"},
+    "arms": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["arm_id", "role", "ablation", "generation_diagnostics", "bar_tensors", "generated_midi"], "properties": {"arm_id": {"type": "string", "minLength": 1}, "role": {"enum": ["baseline", "ablated"]}, "ablation": {"type": "object", "additionalProperties": false, "required": ["stream", "type"], "properties": {"stream": {"enum": ["theme_memory", "remi", "latent", "register", "physical_trajectory"]}, "type": {"enum": ["natural", "masked", "zero"]}}}, "generation_diagnostics": {"$ref": "attribution__raw_status.v2.schema.json#/$defs/reference"}, "bar_tensors": {"$ref": "attribution__raw_status.v2.schema.json#/$defs/reference"}, "generated_midi": {"$ref": "attribution__raw_status.v2.schema.json#/$defs/reference"}}}},
+    "availability": {"type": "object", "additionalProperties": false, "required": ["paired_arms", "generation_diagnostics", "bar_tensors", "generated_midi"], "properties": {"paired_arms": {"type": "boolean"}, "generation_diagnostics": {"type": "boolean"}, "bar_tensors": {"type": "boolean"}, "generated_midi": {"type": "boolean"}}}, "unavailable_reasons": {"$ref": "attribution__raw_status.v2.schema.json#/$defs/reasons"}
+  }
+}

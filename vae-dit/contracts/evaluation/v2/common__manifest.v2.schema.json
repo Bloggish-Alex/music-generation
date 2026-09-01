@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/common__manifest.v2",
+  "type": "object",
+  "required": ["schema_version", "dataset", "run", "checkpoint_refs", "artifacts", "availability"],
+  "properties": {
+    "schema_version": {"const": "evaluation_manifest.v2"},
+    "dataset": {
+      "type": "object",
+      "required": ["identity", "identity_kind", "split", "song_id"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "identity_kind": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": ["string", "null"]},
+        "split": {"type": "string", "minLength": 1},
+        "song_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "run": {"type": "object"},
+    "checkpoint_refs": {"type": "array", "items": {"type": "object"}},
+    "artifacts": {"type": "object"},
+    "availability": {"type": "object"}
+  },
+  "additionalProperties": true
+}

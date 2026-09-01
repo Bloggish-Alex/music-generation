@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_teacher_forced__future_position.v1",
+  "title": "Public future-position trajectory observation",
+  "description": "Metadata contract for the NPZ referenced by generation_metric_inputs.future_position_path.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "target",
+    "prediction",
+    "future_positions",
+    "valid_mask",
+    "state_schema",
+    "units",
+    "feature_names",
+    "dtype",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "trajectory_teacher_forced_future_position.v1"},
+    "target": {"description": "float32 [sample, position, feature] reference trajectory"},
+    "prediction": {"description": "float32 [sample, position, feature] planned trajectory"},
+    "future_positions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "valid_mask": {"description": "bool [sample, position]; false when the source song has no corresponding future bar"},
+    "state_schema": {"enum": ["latent_mu_plus_register_offset", "latent_mu_plus_delta_register"]},
+    "units": {"type": "string"},
+    "feature_names": {"type": "array", "items": {"type": "string"}},
+    "dtype": {"const": "float32"},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": true
+}

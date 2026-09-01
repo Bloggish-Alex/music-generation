@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_anchor_context__inputs.v1",
+  "title": "Trajectory Anchor Context Inputs",
+  "type": "object",
+  "required": ["schema_version", "artifacts", "availability"],
+  "properties": {
+    "schema_version": {"const": "trajectory_anchor_context_inputs.v1"},
+    "artifacts": {
+      "type": "object", "required": ["encoded_input_manifest", "training_lineage_raw"],
+      "properties": {
+        "encoded_input_manifest": {"$ref": "#/$defs/reference_or_null"},
+        "training_lineage_raw": {"$ref": "#/$defs/reference_or_null"}
+      }, "additionalProperties": false
+    },
+    "availability": {
+      "type": "object", "required": ["model_preparation", "trajectory_training", "generation_runtime"],
+      "properties": {
+        "model_preparation": {"enum": ["available", "not_provided", "unavailable"]},
+        "trajectory_training": {"enum": ["available", "not_provided", "unavailable"]},
+        "generation_runtime": {"enum": ["available", "not_provided", "unavailable"]}
+      }, "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "reference": {
+      "type": "object", "required": ["path", "sha256", "schema_version"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[^\\\\/:]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "schema_version": {"type": "string", "minLength": 1}
+      }, "additionalProperties": false
+    },
+    "reference_or_null": {"anyOf": [{"$ref": "#/$defs/reference"}, {"type": "null"}]}
+  },
+  "additionalProperties": false
+}

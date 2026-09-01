@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_anchor_context__checkpoint_lineage.v1",
+  "title": "Trajectory Checkpoint Input Lineage",
+  "description": "Checkpoint provenance linking a trajectory model to one encoded-input parent manifest.",
+  "type": "object",
+  "required": ["schema_version", "availability", "parent_encoded_input_manifest_sha256", "parent_encoded_run_identity", "bar_tensor_index_sha256", "bar_tensors_sha256", "tensor_schema_version", "unavailable_reasons"],
+  "properties": {
+    "schema_version": {"const": "trajectory_checkpoint_lineage.v1"},
+    "availability": {"enum": ["available", "unavailable"]},
+    "parent_encoded_input_manifest_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "parent_encoded_run_identity": {"type": ["string", "null"], "minLength": 1},
+    "bar_tensor_index_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "bar_tensors_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "tensor_schema_version": {"type": ["string", "null"], "const": "bar_tensor_schema.v1"},
+    "unavailable_reasons": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "allOf": [{
+    "if": {"properties": {"availability": {"const": "available"}}},
+    "then": {"properties": {
+      "parent_encoded_input_manifest_sha256": {"type": "string"}, "parent_encoded_run_identity": {"type": "string"},
+      "bar_tensor_index_sha256": {"type": "string"}, "bar_tensors_sha256": {"type": "string"},
+      "tensor_schema_version": {"const": "bar_tensor_schema.v1"}, "unavailable_reasons": {"maxItems": 0}
+    }}
+  }],
+  "additionalProperties": false
+}

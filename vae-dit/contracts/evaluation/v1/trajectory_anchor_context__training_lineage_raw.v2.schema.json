@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/trajectory_anchor_context__training_lineage_raw.v2",
+  "title": "Trajectory Training Anchor Context Raw Lineage v2",
+  "description": "Raw lineage distinguishing serialized codec anchors from the configured runtime fallback used for empty bars.",
+  "type": "object",
+  "required": ["schema_version", "parent_encoded_input_manifest", "availability", "unavailable_reasons", "row_summary", "register_parameterization", "observations"],
+  "properties": {
+    "schema_version": {"const": "trajectory_training_input_lineage_raw.v2"},
+    "parent_encoded_input_manifest": {"$ref": "trajectory_anchor_context__training_lineage_raw.v1.schema.json#/$defs/parent_manifest"},
+    "availability": {"$ref": "trajectory_anchor_context__training_lineage_raw.v1.schema.json#/$defs/availability"},
+    "unavailable_reasons": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "row_summary": {"$ref": "trajectory_anchor_context__training_lineage_raw.v1.schema.json#/$defs/row_summary"},
+    "register_parameterization": {
+      "type": "object",
+      "required": ["base_pitch_definition", "song_anchor_definition", "register_offset_definition", "unit", "fallback_base_pitch"],
+      "properties": {
+        "base_pitch_definition": {"const": "serialized encoded_index.diagnostics.base_pitch; otherwise configured runtime fallback"},
+        "song_anchor_definition": {"const": "round(median(base_pitch) within song_id)"},
+        "register_offset_definition": {"const": "base_pitch - song_anchor"},
+        "unit": {"const": "midi_semitone"},
+        "fallback_base_pitch": {"type": "integer"}
+      },
+      "additionalProperties": false
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tensor_key", "song_id", "base_song_id", "source_bar_index", "applied_transpose_semitones", "encoded_base_pitch", "trajectory_input_base_pitch", "song_anchor", "register_offset", "base_pitch_origin"],
+        "properties": {
+          "tensor_key": {"type": "string", "minLength": 1},
+          "song_id": {"type": "string", "minLength": 1},
+          "base_song_id": {"type": "string", "minLength": 1},
+          "source_bar_index": {"type": "integer", "minimum": 0},
+          "applied_transpose_semitones": {"type": "integer"},
+          "encoded_base_pitch": {"type": ["integer", "null"]},
+          "trajectory_input_base_pitch": {"type": "integer"},
+          "song_anchor": {"type": "integer"},
+          "register_offset": {"type": "integer"},
+          "base_pitch_origin": {"enum": ["serialized_anchor", "runtime_fallback"]}
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {"if": {"properties": {"base_pitch_origin": {"const": "serialized_anchor"}}}, "then": {"properties": {"encoded_base_pitch": {"type": "integer"}}}},
+          {"if": {"properties": {"base_pitch_origin": {"const": "runtime_fallback"}}}, "then": {"properties": {"encoded_base_pitch": {"type": "null"}}}}
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

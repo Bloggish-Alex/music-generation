@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One-step teacher-forced oracle inputs",
+  "type": "object",
+  "required": ["schema_version", "semantic_future", "provenance"],
+  "properties": {
+    "schema_version": {"const": "trajectory_one_step_oracle_inputs.v1"},
+    "semantic_future": {"$ref": "#/$defs/reference"},
+    "provenance": {"type": "object"}
+  },
+  "$defs": {"reference": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^sha256:"}}}}
+}

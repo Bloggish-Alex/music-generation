@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/latent_probe__inputs.v1",
+  "title": "Latent Probe Inputs",
+  "description": "Frozen DVAE latent means and source-tensor facts. Probe fitting belongs only to evaluation.",
+  "type": "object",
+  "required": ["schema_version", "representation_sources", "split_policy", "target_definitions", "availability"],
+  "properties": {
+    "schema_version": {"const": "latent_probe_inputs.v1"},
+    "representation_sources": {
+      "type": "object",
+      "required": ["train", "validation"],
+      "properties": {
+        "train": {"$ref": "#/$defs/source_or_null"},
+        "validation": {"$ref": "#/$defs/source_or_null"}
+      },
+      "additionalProperties": false
+    },
+    "split_policy": {
+      "type": "object",
+      "required": ["split_unit", "train_validation_overlap", "fitting_split", "reporting_split"],
+      "properties": {
+        "split_unit": {"const": "base_song_id"},
+        "train_validation_overlap": {"const": false},
+        "fitting_split": {"const": "train"},
+        "reporting_split": {"const": "validation"}
+      },
+      "additionalProperties": false
+    },
+    "target_definitions": {
+      "type": "object",
+      "required": ["relative_chroma", "absolute_chroma", "relative_register_center", "absolute_register_center", "state_ratio", "density_per_track"],
+      "properties": {
+        "relative_chroma": {"const": "duration_or_active_slot_weighted_pitch_class_from_source_tensor_relative_pitch"},
+        "absolute_chroma": {"const": "relative_pitch_plus_base_pitch_pitch_class_when_base_pitch_available"},
+        "relative_register_center": {"const": "median_relative_pitch_semitones_over_active_slots"},
+        "absolute_register_center": {"const": "relative_register_center_plus_base_pitch_when_base_pitch_available"},
+        "state_ratio": {"const": "per_bar_rest_onset_hold_slot_ratio"},
+        "density_per_track": {"const": "per_track_active_slot_ratio"}
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "required": ["latent_mu", "source_tensor", "row_alignment", "tensor_schema", "train", "validation"],
+      "properties": {
+        "latent_mu": {"type": "boolean"},
+        "source_tensor": {"type": "boolean"},
+        "row_alignment": {"type": "boolean"},
+        "tensor_schema": {"type": "boolean"},
+        "train": {"enum": ["available", "unavailable", "not_provided"]},
+        "validation": {"enum": ["available", "unavailable", "not_provided"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["path", "sha256", "schema_version", "representation", "dataset"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[^\\/:]+$"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "schema_version": {"const": "dvae_fidelity_raw_observation.v1"},
+        "representation": {"const": "latent_mu"},
+        "dataset": {
+          "type": "object",
+          "required": ["identity", "identity_kind", "split"],
+          "properties": {
+            "identity": {"type": "string", "minLength": 1},
+            "identity_kind": {"type": "string", "minLength": 1},
+            "split": {"enum": ["train", "validation"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "source_or_null": {"anyOf": [{"$ref": "#/$defs/source"}, {"type": "null"}]}
+  },
+  "additionalProperties": false
+}

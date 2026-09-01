@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation/anchor_transport__inputs.v1",
+  "title": "Anchor Transport Evaluation Inputs",
+  "type": "object",
+  "required": ["schema_version", "dataset", "raw_observation", "provenance"],
+  "properties": {
+    "schema_version": {"const": "anchor_transport_inputs.v1"}, "dataset": {"type": "object"},
+    "raw_observation": {
+      "type": "object", "required": ["path", "sha256", "schema_version"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": ["string", "null"]}, "schema_version": {"const": "anchor_transport_raw_observation.v1"}},
+      "additionalProperties": false
+    }, "provenance": {"type": "object"}
+  }, "additionalProperties": false
+}
