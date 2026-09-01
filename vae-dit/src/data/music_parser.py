@@ -146,17 +146,17 @@ class MusicDirectoryParser:
             inPlace=False,
         )
 
-    def _collect_tracks(self, score: stream.Score) -> List[List[tuple[float, float, int, int]]]:
+    def _collect_tracks(self, score: stream.Score) -> List[tuple[int, List[tuple[float, float, int, int]]]]:
         """Collect note events per music21 part, with register splitting fallback."""
         parts = list(score.parts) if getattr(score, "parts", None) else []
         if len(parts) > 1:
-            tracks = [self._collect_events(part) for part in parts]
-            tracks = [track for track in tracks if track]
+            tracks = [(index, self._collect_events(part)) for index, part in enumerate(parts)]
+            tracks = [track for track in tracks if track[1]]
             return self._select_tracks(tracks)
         events = self._collect_events(score)
         if not events:
             return []
-        return self._split_by_register(events)
+        return list(enumerate(self._split_by_register(events)))
 
     def _collect_events(self, container: Any) -> List[tuple[float, float, int, int]]:
         """Collect flat note events from one part or score."""
@@ -184,10 +184,10 @@ class MusicDirectoryParser:
             return [int(pitch.midi) for pitch in element.pitches]
         return []
 
-    def _select_tracks(self, tracks: Sequence[List[tuple[float, float, int, int]]]) -> List[List[tuple[float, float, int, int]]]:
+    def _select_tracks(self, tracks: Sequence[tuple[int, List[tuple[float, float, int, int]]]]) -> List[tuple[int, List[tuple[float, float, int, int]]]]:
         """Keep the most active tracks when the source has more than max_tracks."""
-        ranked = sorted(tracks, key=lambda track: len(track), reverse=True)
-        return [list(track) for track in ranked[: max(1, self.config.max_tracks)]]
+        ranked = sorted(tracks, key=lambda item: (-len(item[1]), item[0]))
+        return [(physical_index, list(track)) for physical_index, track in ranked[: max(1, self.config.max_tracks)]]
 
     def _split_by_register(self, events: Sequence[tuple[float, float, int, int]]) -> List[List[tuple[float, float, int, int]]]:
         """Split a single stream into high, middle, and low register tracks."""
@@ -204,15 +204,15 @@ class MusicDirectoryParser:
                 low.append(event)
         return [track for track in [high, middle, low] if track]
 
-    def _bar_count(self, tracks: Sequence[Sequence[tuple[float, float, int, int]]]) -> int:
+    def _bar_count(self, tracks: Sequence[tuple[int, Sequence[tuple[float, float, int, int]]]]) -> int:
         """Compute the number of bars needed to cover all track events."""
-        max_end = max(float(event[1]) for track in tracks for event in track)
+        max_end = max(float(event[1]) for _, track in tracks for event in track)
         return max(1, int(math.ceil(max_end / self.config.bar_length_ql)))
 
     def _build_bar(
         self,
         song: SongRecord,
-        tracks: Sequence[Sequence[tuple[float, float, int, int]]],
+        tracks: Sequence[tuple[int, Sequence[tuple[float, float, int, int]]]],
         bar_index: int,
         bar_count: int,
     ) -> BarRecord:
@@ -220,7 +220,7 @@ class MusicDirectoryParser:
         bar_start = float(bar_index) * self.config.bar_length_ql
         bar_end = bar_start + self.config.bar_length_ql
         bar_tracks: List[TrackRecord] = []
-        for track_index, track_events in enumerate(tracks[: self.config.max_tracks]):
+        for track_index, (physical_track_index, track_events) in enumerate(tracks[: self.config.max_tracks]):
             notes = []
             for source_note_ordinal, (start, end, pitch, velocity) in enumerate(track_events):
                 if end <= bar_start or start >= bar_end:
@@ -233,7 +233,7 @@ class MusicDirectoryParser:
                     duration_ql=max(0.0, local_end - local_start),
                     velocity=int(velocity),
                     source_file_identity=str(song.metadata["source_file_identity"]),
-                    physical_track_index=int(track_index),
+                    physical_track_index=int(physical_track_index),
                     source_note_ordinal=int(source_note_ordinal),
                     source_onset_ql=float(start),
                 ))

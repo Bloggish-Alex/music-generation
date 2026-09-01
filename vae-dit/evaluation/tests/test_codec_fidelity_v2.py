@@ -7,6 +7,7 @@ from evaluation_framework.evaluation_api import ArtifactBundle
 from evaluation_framework.evaluation_artifact_store import EvaluationArtifactStore
 from evaluation_framework.evaluation_codec_fidelity import CodecFidelityEvaluator, CodecFidelityExporter
 from evaluation_framework.evaluation_context import EvaluationContext, ExportContext
+from evaluation_framework.evaluation_codec_fidelity import _multiset_f1
 
 
 def test_v2_status_dispatches_to_monitor_report(tmp_path) -> None:
@@ -27,3 +28,8 @@ def test_v2_status_dispatches_to_monitor_report(tmp_path) -> None:
     assert result.report["status"] == "MONITOR"
     assert result.report["metrics"]["splits"]["train"]["schema_version"] == "bar_tensor_schema.v2"
     assert "Codec Fidelity V2" in result.markdown
+
+
+def test_v2_harmony_pitch_state_multiset_detects_a_mismatch() -> None:
+    precision, recall, f1 = _multiset_f1([(60, "onset")], [(61, "onset")])
+    assert (precision, recall, f1) == (0.0, 0.0, 0.0)
