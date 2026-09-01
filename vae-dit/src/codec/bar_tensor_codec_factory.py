@@ -8,6 +8,7 @@ from typing import Any, Dict
 from common.config_loader import ConfigView
 from codec.bar_tensor_codec import BarTensorCodec
 from codec.semantic_bar_tensor_codec import SemanticBarTensorCodec
+from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
 
 
 class BarTensorCodecFactory:
@@ -22,4 +23,6 @@ class BarTensorCodecFactory:
             return BarTensorCodec.from_config(config)
         if backend in {"semantic_3voice", "semantic", "melody_harmony_bass"}:
             return SemanticBarTensorCodec.from_config(config)
+        if backend == "semantic_harmony_set_v2":
+            return SemanticHarmonySetCodec.from_config(config)
         raise ValueError(f"Unsupported bar_tensor.backend: {backend}")

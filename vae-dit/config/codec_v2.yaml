@@ -1,0 +1,12 @@
+include: style_defaults.yaml
+
+bar_tensor:
+  backend: semantic_harmony_set_v2
+  schema_version: bar_tensor_schema.v2
+  steps_per_bar: 16
+  pitch_scale: 24.0
+  velocity_scale: 127.0
+  max_harmony_notes: 16
+  relative_pitch_max_semitones: 96.0
+  overflow_policy: error
+  slot_time_epsilon_ql: 0.000001

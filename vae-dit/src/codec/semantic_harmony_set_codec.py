@@ -1,0 +1,93 @@
+"""Lossless slot-local melody, harmony-set, and bass bar codec."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+import numpy as np
+
+from codec.relative_chroma import bass_anchor_pitch, relative_chromagram
+from common.config_loader import ConfigView
+from data.core import BarRecord, BarTensorRecord, NoteEvent
+
+
+VOICE_NAMES = ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"]
+FEATURE_NAMES = ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"]
+
+
+@dataclass(frozen=True)
+class SemanticHarmonySetConfig:
+    steps_per_bar: int = 16
+    pitch_scale: float = 24.0
+    velocity_scale: float = 127.0
+    max_harmony_notes: int = 16
+    relative_pitch_max_semitones: float = 96.0
+    melody_continuity_tolerance: int = 7
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "SemanticHarmonySetConfig":
+        section = ConfigView(dict(config)).section("bar_tensor")
+        if section.get("schema_version") != "bar_tensor_schema.v2" or section.get("overflow_policy") != "error":
+            raise ValueError("semantic_harmony_set_v2 requires bar_tensor_schema.v2 and overflow_policy=error")
+        result = cls(**{name: section.get(name, getattr(cls(), name)) for name in cls.__dataclass_fields__})
+        if result.max_harmony_notes != 16 or result.steps_per_bar != 16 or result.pitch_scale <= 0:
+            raise ValueError("semantic_harmony_set_v2 configuration is invalid")
+        return result
+
+
+class SemanticHarmonySetCodec:
+    """Encode every active source note into deterministic V2 semantic lanes."""
+
+    def __init__(self, config: SemanticHarmonySetConfig) -> None:
+        self.config = config
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "SemanticHarmonySetCodec":
+        return cls(SemanticHarmonySetConfig.from_config(config))
+
+    def encode(self, bar: BarRecord) -> BarTensorRecord:
+        notes = [note for track in bar.tracks for note in track.notes]
+        base_pitch = bass_anchor_pitch(notes)
+        tensor = np.zeros((18, self.config.steps_per_bar, 6), dtype=np.float32)
+        tensor[:, :, 1] = 1.0
+        if base_pitch is not None and max(int(note.pitch) for note in notes) - base_pitch > self.config.relative_pitch_max_semitones:
+            raise ValueError("relative_pitch_range_overflow")
+        previous: NoteEvent | None = None
+        slot_length = float(bar.bar_length_ql) / self.config.steps_per_bar
+        for slot in range(self.config.steps_per_bar):
+            start, end = slot * slot_length, (slot + 1) * slot_length
+            active = [note for note in notes if note.onset_ql < end and note.onset_ql + note.duration_ql > start]
+            if not active:
+                continue
+            highest = min(active, key=lambda note: (-int(note.pitch), -int(note.velocity), self._identity(note)))
+            melody = previous if previous in active and int(previous.pitch) >= int(highest.pitch) - self.config.melody_continuity_tolerance else highest
+            bass_candidates = [note for note in active if note is not melody]
+            bass = min(bass_candidates, key=lambda note: (int(note.pitch), -int(note.velocity), self._identity(note))) if bass_candidates else None
+            harmony = [note for note in active if note is not melody and note is not bass]
+            harmony.sort(key=lambda note: (int(note.pitch), int(note.physical_track_index or 0), float(note.duration_ql), float(note.source_onset_ql or note.onset_ql), int(note.velocity), self._identity(note)))
+            if len(harmony) > self.config.max_harmony_notes:
+                raise ValueError(f"harmony_lane_overflow: song={bar.song_id} bar={bar.bar_index} slot={slot} count={len(harmony)}")
+            assigned = [(0, melody), *[(index + 1, note) for index, note in enumerate(harmony)]]
+            if bass is not None:
+                assigned.append((17, bass))
+            denominator = sum(max(0, int(note.velocity)) for _, note in assigned)
+            for lane, note in assigned:
+                self._write(tensor[lane, slot], note, base_pitch, start, denominator)
+            previous = melody
+        context = relative_chromagram(notes, base_pitch, velocity_scale=self.config.velocity_scale)
+        diagnostics = {"codec_backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "base_pitch": base_pitch, "base_pitch_valid": base_pitch is not None, "bar_context": context.tolist(), "voice_names": VOICE_NAMES, "feature_names": FEATURE_NAMES}
+        return BarTensorRecord(bar.song_id, int(bar.bar_index), list(tensor.shape), tensor, diagnostics)
+
+    def _write(self, features: np.ndarray, note: NoteEvent, base_pitch: int | None, slot_start: float, velocity_sum: int) -> None:
+        features[:] = 0.0
+        features[0] = 0.0 if base_pitch is None else (int(note.pitch) - base_pitch) / self.config.pitch_scale
+        features[2] = 1.0 if abs(float(note.source_onset_ql if note.source_onset_ql is not None else note.onset_ql) - slot_start) < 1e-6 else 0.0
+        features[3] = 1.0 - features[2]
+        velocity = max(0.0, min(float(note.velocity), self.config.velocity_scale))
+        features[4] = velocity / self.config.velocity_scale
+        features[5] = velocity / velocity_sum if velocity_sum else 0.0
+
+    @staticmethod
+    def _identity(note: NoteEvent) -> str:
+        return f"{note.source_file_identity or ''}:{note.physical_track_index or 0}:{note.source_note_ordinal or 0}"

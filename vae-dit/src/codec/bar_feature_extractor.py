@@ -40,6 +40,14 @@ BAR_FEATURE_NAMES = [
     "interval_std",
 ]
 
+V2_BAR_FEATURE_NAMES = [
+    "global_note_on_density", "global_active_density", "global_rest_density", "global_hold_density",
+    "active_pitch_mean", "active_pitch_std", "active_pitch_min", "active_pitch_max", "active_pitch_range", "active_pitch_first", "active_pitch_last", "active_pitch_delta",
+    "active_velocity_mean", "active_velocity_std", "onset_centroid", "onset_spread", "onset_entropy", "occupied_slot_ratio",
+    "melody_note_on_density", "harmony_set_note_on_density", "bass_note_on_density", "melody_active_density", "harmony_set_active_density", "bass_active_density",
+    "onset_interval_mean", "onset_interval_max", "onset_interval_std", "mean_active_harmony_cardinality", "maximum_harmony_cardinality", "non_empty_harmony_slot_ratio", "relative_chroma_entropy",
+]
+
 
 class BarFeatureExtractor:
     """Compute explicit 27D music features for a [tracks, steps, features] bar tensor."""
@@ -113,6 +121,26 @@ class BarFeatureExtractor:
             interval_max,
             interval_std,
         ], dtype=np.float32)
+
+    def v2_features(self, tensor: np.ndarray, bar_context: np.ndarray) -> np.ndarray:
+        """Return the contract-defined 31D V2 diagnostic vector."""
+        values = np.asarray(tensor, dtype=np.float32); context = np.asarray(bar_context, dtype=np.float32)
+        note, hold, rest = values[..., 2] > .5, values[..., 3] > .5, values[..., 1] > .5
+        active = note | hold; pitches = values[..., 0][active]; velocities = values[..., 4][active]
+        by_slot = note.sum(axis=0); occupied = active.any(axis=0); onset_slots = np.flatnonzero(by_slot)
+        ordered = self._ordered_note_pitches(values, note)
+        intervals = np.diff(onset_slots).astype(np.float32) if len(onset_slots) > 1 else np.zeros(0, dtype=np.float32)
+        harmony = active[1:17].sum(axis=0).astype(np.float32)
+        probs = by_slot / max(1.0, float(by_slot.sum()))
+        chroma = context / max(1.0e-8, float(context.sum()))
+        pitch_values = [float(np.mean(pitches)) if pitches.size else 0., float(np.std(pitches)) if pitches.size else 0., float(np.min(pitches)) if pitches.size else 0., float(np.max(pitches)) if pitches.size else 0., float(np.ptp(pitches)) if pitches.size else 0., float(ordered[0]) if ordered.size else 0., float(ordered[-1]) if ordered.size else 0., float(ordered[-1] - ordered[0]) if ordered.size else 0.]
+        steps = max(1, values.shape[1] - 1)
+        onset_centroid = float(np.dot(np.arange(values.shape[1]), by_slot) / max(1.0, float(by_slot.sum())) / steps)
+        onset_spread = float(np.std(np.repeat(np.arange(values.shape[1]), by_slot.astype(int))) / steps) if by_slot.sum() else 0.0
+        onset_entropy = float(-(probs * np.log(np.clip(probs, 1e-8, 1))).sum() / np.log(max(2, values.shape[1])))
+        chroma_entropy = float(-(chroma * np.log(np.clip(chroma, 1e-8, 1))).sum())
+        result = [float(note.mean()), float(active.mean()), float(rest.mean()), float(hold.mean()), *pitch_values, float(np.mean(velocities)) if velocities.size else 0.0, float(np.std(velocities)) if velocities.size else 0.0, onset_centroid, onset_spread, onset_entropy, float(occupied.mean()), float(note[0].mean()), float(note[1:17].sum() / (16 * values.shape[1])), float(note[17].mean()), float(active[0].mean()), float(active[1:17].sum() / (16 * values.shape[1])), float(active[17].mean()), float(intervals.mean()) if intervals.size else 0.0, float(intervals.max()) if intervals.size else 0.0, float(intervals.std()) if intervals.size else 0.0, float(harmony.mean()), float(harmony.max()), float((harmony > 0).mean()), chroma_entropy]
+        return np.asarray(result, dtype=np.float32)
 
     def _first_last_pitch(self, tensor: np.ndarray, note: np.ndarray) -> tuple[float, float]:
         """Return first and last normalized note-on pitch."""

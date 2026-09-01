@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -11,7 +12,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from codec.action_labeler import ActionLabeler
-from codec.bar_feature_extractor import EncodedBarFeatureStore
+from codec.bar_feature_extractor import BarFeatureExtractor, EncodedBarFeatureStore, V2_BAR_FEATURE_NAMES
 from codec.bar_tensor_codec_factory import BarTensorCodecFactory
 from data.core import BarTensorRecord, SongRecord
 from data.music_parser import MusicDirectoryParser
@@ -78,6 +79,8 @@ class EncodingPipeline:
             json.dumps([song.to_dict() for song in songs], indent=2),
             encoding="utf-8",
         )
+        if self._is_v2():
+            return self._write_v2_outputs(output_dir, songs, tensors)
         arrays = {
             f"{record.song_id}__bar_{record.bar_index:04d}": record.tensor
             for record in tensors
@@ -103,6 +106,42 @@ class EncodingPipeline:
             encoding="utf-8",
         )
         return feature_summary
+
+    def _is_v2(self) -> bool:
+        section = self.config.get("bar_tensor", {})
+        return isinstance(section, dict) and section.get("schema_version") == "bar_tensor_schema.v2"
+
+    def _write_v2_outputs(self, output_dir: Path, songs: List[SongRecord], tensors: List[BarTensorRecord]) -> Dict[str, Any]:
+        """Write the V2 row-aligned arrays and manifest declared by the public contract."""
+        song_by_id = {song.song_id: song for song in songs}
+        ordered = sorted(tensors, key=lambda record: (
+            str(song_by_id[record.song_id].metadata.get("base_song_id", record.song_id)),
+            int(song_by_id[record.song_id].metadata.get("transpose_semitones", 0)), str(record.song_id), int(record.bar_index),
+        ))
+        voice_tensors = np.stack([np.asarray(record.tensor, dtype=np.float32) for record in ordered]) if ordered else np.zeros((0, 18, 16, 6), dtype=np.float32)
+        bar_contexts = np.asarray([record.diagnostics["bar_context"] for record in ordered], dtype=np.float32) if ordered else np.zeros((0, 12), dtype=np.float32)
+        base_pitches = np.asarray([record.diagnostics.get("base_pitch") or 0 for record in ordered], dtype=np.int16)
+        base_pitch_valid = np.asarray([bool(record.diagnostics.get("base_pitch_valid")) for record in ordered], dtype=bool)
+        arrays_path = output_dir / "codec_v2_arrays.npz"
+        np.savez_compressed(arrays_path, voice_tensors=voice_tensors, bar_contexts=bar_contexts, base_pitches=base_pitches, base_pitch_valid=base_pitch_valid)
+        index_rows = []
+        for row, record in enumerate(ordered):
+            song = song_by_id[record.song_id]
+            index_rows.append({"row": row, "tensor_key": f"{record.song_id}__bar_{record.bar_index:06d}", "song_id": record.song_id, "base_song_id": song.metadata.get("base_song_id", record.song_id), "source_bar_index": int(record.bar_index), "applied_transpose_semitones": int(song.metadata.get("transpose_semitones", 0)), "schema_version": "bar_tensor_schema.v2", "base_pitch_valid": bool(base_pitch_valid[row]), "voice_tensor_shape": [18, 16, 6], "bar_context_shape": [12]})
+        index_path = output_dir / "bar_tensor_index.json"
+        index_path.write_text(json.dumps(index_rows, indent=2), encoding="utf-8")
+        manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": len(index_rows), "arrays": {"path": arrays_path.name, "sha256": self._sha256(arrays_path), "names": {"voice_tensors": {"dtype": "float32", "shape": list(voice_tensors.shape)}, "bar_contexts": {"dtype": "float32", "shape": list(bar_contexts.shape)}, "base_pitches": {"dtype": "int16", "shape": list(base_pitches.shape)}, "base_pitch_valid": {"dtype": "bool", "shape": list(base_pitch_valid.shape)}}}, "index": {"path": index_path.name, "sha256": self._sha256(index_path)}, "voice_names": ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"], "feature_names": ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"], "configuration": self.config.get("bar_tensor", {})}
+        (output_dir / "encoding_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        extractor = BarFeatureExtractor()
+        v2_features = np.stack([extractor.v2_features(voice_tensors[index], bar_contexts[index]) for index in range(len(index_rows))]) if index_rows else np.zeros((0, 31), dtype=np.float32)
+        np.savez_compressed(output_dir / "bar_features.npz", features=v2_features)
+        summary = {"source": "codec_v2", "feature_count": 31, "feature_names": V2_BAR_FEATURE_NAMES, "row_count": len(index_rows), "shape": list(v2_features.shape)}
+        (output_dir / "bar_feature_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        return summary
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _tensor_diagnostics(self, tensors: List[BarTensorRecord]) -> Dict[str, Any]:
         """Summarize tensor output shapes and density."""

@@ -1,0 +1,5 @@
+include: style_defaults.yaml
+
+bar_tensor:
+  backend: semantic_3voice
+  schema_version: bar_tensor_schema.v1

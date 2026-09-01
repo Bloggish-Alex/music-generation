@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +86,7 @@ class MusicDirectoryParser:
                     file_path,
                     form_map.get(file_path.name, {}),
                     transpose_semitones=transpose_semitones,
+                    dataset_root=root,
                 ))
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
@@ -103,6 +105,7 @@ class MusicDirectoryParser:
         file_path: str | Path,
         metadata: Dict[str, Any],
         transpose_semitones: int = 0,
+        dataset_root: str | Path | None = None,
     ) -> SongRecord:
         """Parse one file into a song record with bar-local tracks."""
         from music21 import converter
@@ -121,7 +124,7 @@ class MusicDirectoryParser:
             song_id=f"{path.stem}{suffix}",
             file_path=str(path),
             form=metadata.get("form"),
-            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones)},
+            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root)},
         )
         for bar_index in range(bar_count):
             bar = self._build_bar(song, raw_tracks, bar_index, bar_count)
@@ -218,7 +221,7 @@ class MusicDirectoryParser:
         bar_tracks: List[TrackRecord] = []
         for track_index, track_events in enumerate(tracks[: self.config.max_tracks]):
             notes = []
-            for start, end, pitch, velocity in track_events:
+            for source_note_ordinal, (start, end, pitch, velocity) in enumerate(track_events):
                 if end <= bar_start or start >= bar_end:
                     continue
                 local_start = max(0.0, float(start) - bar_start)
@@ -228,6 +231,10 @@ class MusicDirectoryParser:
                     onset_ql=local_start,
                     duration_ql=max(0.0, local_end - local_start),
                     velocity=int(velocity),
+                    source_file_identity=str(song.metadata["source_file_identity"]),
+                    physical_track_index=int(track_index),
+                    source_note_ordinal=int(source_note_ordinal),
+                    source_onset_ql=float(start),
                 ))
             bar_tracks.append(TrackRecord(track_index=track_index, name=f"track_{track_index}", notes=notes))
         return BarRecord(
@@ -239,6 +246,15 @@ class MusicDirectoryParser:
             form=song.form,
             tracks=bar_tracks,
         )
+
+    @staticmethod
+    def _source_file_identity(path: Path, dataset_root: str | Path | None) -> str:
+        """Return a stable dataset-path and raw-byte identity for one source file."""
+        root = Path(dataset_root) if dataset_root is not None else path.parent
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+        normalized = relative.encode("utf-8").decode("utf-8")
+        inner = hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(f"{normalized}\0{inner}".encode("utf-8")).hexdigest()
 
     def _assign_form_section(self, bar: BarRecord, metadata: Dict[str, Any]) -> None:
         """Attach section metadata from form.json without inferring it."""

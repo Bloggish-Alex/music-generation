@@ -15,6 +15,10 @@ class NoteEvent:
     onset_ql: float
     duration_ql: float
     velocity: int = 64
+    source_file_identity: str | None = None
+    physical_track_index: int | None = None
+    source_note_ordinal: int | None = None
+    source_onset_ql: float | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the note event to a JSON-safe dictionary."""
