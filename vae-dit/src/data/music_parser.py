@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from common.config_loader import ConfigView
-from data.core import BarRecord, NoteEvent, SongRecord, TrackRecord
+from data.core import BarRecord, MeasureSpan, NoteEvent, SongRecord, TrackRecord
+from data.measure_map import extract_measure_spans, split_tunes
+from data.performance_controls import collect_controls
 
 
 MUSIC_SUFFIXES = {".mid", ".midi", ".abc", ".krn"}
@@ -22,12 +24,12 @@ MUSIC_SUFFIXES = {".mid", ".midi", ".abc", ".krn"}
 class MusicParserConfig:
     """Configuration for symbolic music parsing."""
 
-    bar_length_ql: float = 4.0
     quantize_input: bool = True
     quantize_divisors: tuple[int, ...] = (4, 3)
     quantize_offsets: bool = True
     quantize_durations: bool = True
-    max_tracks: int = 3
+    hard_safety_limit: int = 48
+    track_retention_policy: str = "error"
     register_split_low_max: int = 55
     register_split_mid_max: int = 72
     default_velocity: int = 64
@@ -37,12 +39,12 @@ class MusicParserConfig:
         """Build parser configuration from the style configuration."""
         section = ConfigView(config).section("music_parser")
         return cls(
-            bar_length_ql=float(section.get("bar_length_ql", 4.0)),
             quantize_input=bool(section.get("quantize_input", True)),
             quantize_divisors=tuple(int(x) for x in section.get("quantize_divisors", [4, 3])),
             quantize_offsets=bool(section.get("quantize_offsets", True)),
             quantize_durations=bool(section.get("quantize_durations", True)),
-            max_tracks=int(section.get("max_tracks", 3)),
+            hard_safety_limit=int(section.get("hard_safety_limit", 48)),
+            track_retention_policy=str(section.get("track_retention_policy", "error")),
             register_split_low_max=int(section.get("register_split_low_max", 55)),
             register_split_mid_max=int(section.get("register_split_mid_max", 72)),
             default_velocity=int(section.get("default_velocity", 64)),
@@ -70,6 +72,7 @@ class MusicDirectoryParser:
         """Store parser policy and initialize the recoverable failure list."""
         self.config = config
         self.failed_files: List[Dict[str, str]] = []
+        self.track_retention_events: List[Dict[str, Any]] = []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MusicDirectoryParser":
@@ -83,7 +86,7 @@ class MusicDirectoryParser:
         songs: List[SongRecord] = []
         for file_path in self.discover_files(root):
             try:
-                songs.append(self.parse_file(
+                songs.extend(self.parse_file(
                     file_path,
                     form_map.get(file_path.name, {}),
                     transpose_semitones=transpose_semitones,
@@ -93,6 +96,8 @@ class MusicDirectoryParser:
                 message = f"{type(exc).__name__}: {exc}"
                 print(f"Skipping {file_path}: {message}")
                 self.failed_files.append({"file_path": str(file_path), "error": message})
+        if self.failed_files:
+            raise ValueError(f"parser_failures: {len(self.failed_files)}")
         return songs
 
     def discover_files(self, music_dir: str | Path) -> List[Path]:
@@ -107,31 +112,39 @@ class MusicDirectoryParser:
         metadata: Dict[str, Any],
         transpose_semitones: int = 0,
         dataset_root: str | Path | None = None,
-    ) -> SongRecord:
-        """Parse one file into a song record with bar-local tracks."""
+    ) -> List[SongRecord]:
+        """Parse one file into one independent SongRecord per Opus tune."""
         from music21 import converter
 
         path = Path(file_path)
-        score = converter.parse(str(path))
-        if int(transpose_semitones) != 0:
-            score = score.transpose(int(transpose_semitones), inPlace=False)
-        score = self._quantize_score(score)
-        raw_tracks = self._collect_tracks(score)
-        if not raw_tracks:
-            raise ValueError("No note events found.")
-        bar_count = self._bar_count(raw_tracks)
-        suffix = f"_T{int(transpose_semitones):+d}" if int(transpose_semitones) != 0 else ""
-        song = SongRecord(
-            song_id=f"{path.stem}{suffix}",
+        parsed = converter.parse(str(path))
+        records: List[SongRecord] = []
+        tunes = split_tunes(parsed)
+        for tune_index, tune in enumerate(tunes):
+            score = tune.transpose(int(transpose_semitones), inPlace=False) if int(transpose_semitones) != 0 else tune
+            controls = collect_controls(score, path)
+            self._tag_source_events(score)
+            source_events = self._all_event_boundaries(score)
+            score = self._quantize_score(score)
+            quantization_audit = self._quantization_audit(source_events, self._all_event_boundaries(score))
+            spans = extract_measure_spans(score)
+            raw_tracks = self._collect_tracks(score)
+            if not raw_tracks:
+                raise ValueError("No note events found.")
+            suffix = f"_T{int(transpose_semitones):+d}" if int(transpose_semitones) != 0 else ""
+            tune_suffix = f"__tune_{tune_index:03d}" if len(tunes) > 1 else ""
+            song = SongRecord(
+            song_id=f"{path.stem}{tune_suffix}{suffix}",
             file_path=str(path),
             form=metadata.get("form"),
-            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root)},
-        )
-        for bar_index in range(bar_count):
-            bar = self._build_bar(song, raw_tracks, bar_index, bar_count)
-            self._assign_form_section(bar, metadata)
-            song.bars.append(bar)
-        return song
+            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root), "tune_index": tune_index, "parser_measure_count": len(spans), "track_retention": dict(self.track_retention_events[-1]), "performance_controls": {"tempo_bpm": list(controls.tempo_bpm), "key_signature": controls.key_signature, "key_confidence": controls.key_confidence, "cc64_available": controls.cc64.cc64_available, "cc64_intervals_ql": [list(interval) for interval in controls.cc64.cc64_intervals], "cc64_unavailable_reason": controls.cc64.unavailable_reason}, "quantization_audit": quantization_audit},
+            )
+            for bar_index, span in enumerate(spans):
+                bar = self._build_bar(song, raw_tracks, bar_index, span, len(spans))
+                self._assign_form_section(bar, metadata)
+                song.bars.append(bar)
+            records.append(song)
+        return records
 
     def _quantize_score(self, score: Any) -> Any:
         """Quantize symbolic timing so grid encoding is stable."""
@@ -146,7 +159,7 @@ class MusicDirectoryParser:
             inPlace=False,
         )
 
-    def _collect_tracks(self, score: stream.Score) -> List[tuple[int, List[tuple[float, float, int, int]]]]:
+    def _collect_tracks(self, score: stream.Score) -> List[tuple[int, List[tuple[float, float, int, int, int]]]]:
         """Collect note events per music21 part, with register splitting fallback."""
         parts = list(score.parts) if getattr(score, "parts", None) else []
         if len(parts) > 1:
@@ -156,12 +169,13 @@ class MusicDirectoryParser:
         events = self._collect_events(score)
         if not events:
             return []
-        return list(enumerate(self._split_by_register(events)))
+        self.track_retention_events.append({"physical_part_count": 1, "policy": "retain_all", "retained_physical_track_indexes": [0], "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0})
+        return [(0, events)]
 
-    def _collect_events(self, container: Any) -> List[tuple[float, float, int, int]]:
+    def _collect_events(self, container: Any) -> List[tuple[float, float, int, int, int]]:
         """Collect flat note events from one part or score."""
-        events: List[tuple[float, float, int, int]] = []
-        for element in container.flatten().notes:
+        events: List[tuple[float, float, int, int, int]] = []
+        for element_ordinal, element in enumerate(container.flatten().notes):
             pitches = self._element_pitches(element)
             if not pitches:
                 continue
@@ -170,9 +184,46 @@ class MusicDirectoryParser:
             if duration <= 0:
                 continue
             velocity = int(getattr(getattr(element, "volume", None), "velocity", None) or self.config.default_velocity)
-            for pitch in pitches:
-                events.append((start, start + duration, int(pitch), velocity))
+            tagged = element.editorial.get("codec_source_event_id")
+            source_ordinal = int(str(tagged).split(":")[-1]) if isinstance(tagged, str) else element_ordinal
+            for pitch_index, pitch in enumerate(pitches):
+                events.append((start, start + duration, int(pitch), velocity, source_ordinal * 128 + pitch_index))
         return sorted(events, key=lambda item: (item[0], item[2]))
+
+    def _tag_source_events(self, score: Any) -> None:
+        """Attach stable pre-quantization identities that music21 copies retain."""
+        parts = list(score.parts) if getattr(score, "parts", None) else [score]
+        for physical, part in enumerate(parts):
+            for ordinal, element in enumerate(part.flatten().notes):
+                element.editorial["codec_source_event_id"] = f"{physical}:{ordinal}"
+
+    def _all_event_boundaries(self, score: Any) -> Dict[tuple[str, int], tuple[float, float]]:
+        """Read source identities attached before quantization, never sort positions."""
+        result = {}
+        parts = list(score.parts) if getattr(score, "parts", None) else [score]
+        for part in parts:
+            for element in part.flatten().notes:
+                event_id = element.editorial.get("codec_source_event_id")
+                if not isinstance(event_id, str):
+                    raise ValueError("quantization_event_identity_mismatch")
+                for pitch_index, _ in enumerate(self._element_pitches(element)):
+                    result[(event_id, pitch_index)] = (float(element.offset), float(element.offset + element.quarterLength))
+        return result
+
+    def _collect_tracks_for_audit(self, score: Any) -> List[tuple[int, List[tuple[float, float, int, int, int]]]]:
+        parts = list(score.parts) if getattr(score, "parts", None) else []
+        return [(index, self._collect_events(part)) for index, part in enumerate(parts)] if parts else [(0, self._collect_events(score))]
+
+    @staticmethod
+    def _quantization_audit(source: Dict[tuple[str, int], tuple[float, float]], quantized: Dict[tuple[str, int], tuple[float, float]]) -> Dict[str, Any]:
+        if set(source) != set(quantized):
+            raise ValueError("quantization_event_identity_mismatch")
+        onset = [abs(quantized[key][0] - source[key][0]) for key in sorted(source)]
+        end = [abs(quantized[key][1] - source[key][1]) for key in sorted(source)]
+        def summary(values: List[float]) -> Dict[str, float]:
+            ordered = sorted(values)
+            return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
+        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "event_count": len(onset), "nonzero_residual_count": sum(value > 1e-9 for value in onset + end), "onset_residual_ql": summary(onset), "end_residual_ql": summary(end)}
 
     def _element_pitches(self, element: Any) -> List[int]:
         """Extract MIDI pitches from a note or chord element."""
@@ -185,9 +236,19 @@ class MusicDirectoryParser:
         return []
 
     def _select_tracks(self, tracks: Sequence[tuple[int, List[tuple[float, float, int, int]]]]) -> List[tuple[int, List[tuple[float, float, int, int]]]]:
-        """Keep the most active tracks when the source has more than max_tracks."""
+        """Retain every source part or fail unless explicit truncation is selected."""
         ranked = sorted(tracks, key=lambda item: (-len(item[1]), item[0]))
-        return [(physical_index, list(track)) for physical_index, track in ranked[: max(1, self.config.max_tracks)]]
+        if len(ranked) <= self.config.hard_safety_limit:
+            self.track_retention_events.append({"physical_part_count": len(ranked), "policy": "retain_all", "retained_physical_track_indexes": [index for index, _ in ranked], "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0})
+            return [(physical_index, list(track)) for physical_index, track in ranked]
+        if self.config.track_retention_policy != "truncate":
+            self.track_retention_events.append({"physical_part_count": len(ranked), "policy": "error", "hard_safety_limit": self.config.hard_safety_limit})
+            raise ValueError("track_limit_exceeded")
+        retained, dropped = ranked[: self.config.hard_safety_limit], ranked[self.config.hard_safety_limit:]
+        dropped_notes = sum(len(events) for _, events in dropped)
+        total_notes = sum(len(events) for _, events in ranked)
+        self.track_retention_events.append({"physical_part_count": len(ranked), "policy": "truncate", "retained_physical_track_indexes": [index for index, _ in retained], "dropped_part_count": len(dropped), "dropped_note_count": dropped_notes, "dropped_note_ratio": dropped_notes / max(1, total_notes)})
+        return [(physical_index, list(track)) for physical_index, track in retained]
 
     def _split_by_register(self, events: Sequence[tuple[float, float, int, int]]) -> List[List[tuple[float, float, int, int]]]:
         """Split a single stream into high, middle, and low register tracks."""
@@ -204,29 +265,24 @@ class MusicDirectoryParser:
                 low.append(event)
         return [track for track in [high, middle, low] if track]
 
-    def _bar_count(self, tracks: Sequence[tuple[int, Sequence[tuple[float, float, int, int]]]]) -> int:
-        """Compute the number of bars needed to cover all track events."""
-        max_end = max(float(event[1]) for _, track in tracks for event in track)
-        return max(1, int(math.ceil(max_end / self.config.bar_length_ql)))
-
     def _build_bar(
         self,
         song: SongRecord,
         tracks: Sequence[tuple[int, Sequence[tuple[float, float, int, int]]]],
-        bar_index: int,
+        bar_index: int, span: MeasureSpan,
         bar_count: int,
     ) -> BarRecord:
         """Build one bar record from global note events."""
-        bar_start = float(bar_index) * self.config.bar_length_ql
-        bar_end = bar_start + self.config.bar_length_ql
+        bar_start, bar_end = span.start_ql, span.end_ql
+        bar_length = bar_end - bar_start
         bar_tracks: List[TrackRecord] = []
-        for track_index, (physical_track_index, track_events) in enumerate(tracks[: self.config.max_tracks]):
+        for track_index, (physical_track_index, track_events) in enumerate(tracks):
             notes = []
-            for source_note_ordinal, (start, end, pitch, velocity) in enumerate(track_events):
+            for start, end, pitch, velocity, source_note_ordinal in track_events:
                 if end <= bar_start or start >= bar_end:
                     continue
                 local_start = max(0.0, float(start) - bar_start)
-                local_end = min(self.config.bar_length_ql, float(end) - bar_start)
+                local_end = min(bar_length, float(end) - bar_start)
                 notes.append(NoteEvent(
                     pitch=int(pitch),
                     onset_ql=local_start,
@@ -236,13 +292,20 @@ class MusicDirectoryParser:
                     physical_track_index=int(physical_track_index),
                     source_note_ordinal=int(source_note_ordinal),
                     source_onset_ql=float(start),
+                    continues_from_previous_bar=bool(start < bar_start),
+                    continues_into_next_bar=bool(end > bar_end),
                 ))
             bar_tracks.append(TrackRecord(track_index=track_index, name=f"track_{track_index}", notes=notes))
         return BarRecord(
             song_id=song.song_id,
             file_path=song.file_path,
             bar_index=int(bar_index),
-            bar_length_ql=self.config.bar_length_ql,
+            bar_length_ql=bar_length,
+            time_signature=span.time_signature,
+            source_measure_index=span.source_measure_index,
+            meter_numerator=span.numerator,
+            meter_denominator=span.denominator,
+            is_pickup=span.is_pickup,
             source_bar_count=int(bar_count),
             form=song.form,
             tracks=bar_tracks,

@@ -7,6 +7,19 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+@dataclass(frozen=True)
+class MeasureSpan:
+    """One validated source-measure interval in quarter lengths."""
+
+    source_measure_index: int
+    start_ql: float
+    end_ql: float
+    time_signature: str
+    numerator: int
+    denominator: int
+    is_pickup: bool = False
+
+
 @dataclass
 class NoteEvent:
     """One note event in bar-local quarter-length time."""
@@ -19,6 +32,8 @@ class NoteEvent:
     physical_track_index: int | None = None
     source_note_ordinal: int | None = None
     source_onset_ql: float | None = None
+    continues_from_previous_bar: bool = False
+    continues_into_next_bar: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the note event to a JSON-safe dictionary."""
@@ -51,6 +66,10 @@ class BarRecord:
     bar_index: int
     bar_length_ql: float
     time_signature: str = "4/4"
+    source_measure_index: int | None = None
+    meter_numerator: int | None = None
+    meter_denominator: int | None = None
+    is_pickup: bool = False
     source_bar_count: Optional[int] = None
     form: Optional[str] = None
     section_label: Optional[str] = None
@@ -72,6 +91,10 @@ class BarRecord:
             "bar_index": int(self.bar_index),
             "bar_length_ql": float(self.bar_length_ql),
             "time_signature": self.time_signature,
+            "source_measure_index": self.source_measure_index,
+            "meter_numerator": self.meter_numerator,
+            "meter_denominator": self.meter_denominator,
+            "is_pickup": self.is_pickup,
             "source_bar_count": self.source_bar_count,
             "form": self.form,
             "section_label": self.section_label,
