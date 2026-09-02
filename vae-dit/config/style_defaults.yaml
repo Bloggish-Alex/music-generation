@@ -2,7 +2,8 @@
 
 music_parser:
   quantize_input: true
-  quantize_divisors: [4, 3]
+  # Final V2 slot boundaries are the single canonical 0.25-QL grid.
+  quantize_divisors: [4]
   quantize_offsets: true
   quantize_durations: true
   hard_safety_limit: 48

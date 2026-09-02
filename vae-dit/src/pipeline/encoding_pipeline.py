@@ -20,6 +20,7 @@ from data.music_parser import MusicDirectoryParser
 from diagnostics.diagnostics import DiagnosticsBase
 from diagnostics.codec_fidelity_raw_capture import CodecFidelityV2RawCaptureRequest, JsonNpzCodecFidelityV2RawCapture
 from diagnostics.dataset_tonality_raw_source import DatasetTonalityRawSourceRequest, JsonDatasetTonalityRawSourceWriter
+from diagnostics.final_v2_evaluation_raw_capture import FinalV2EvaluationRawCapture
 
 
 @dataclass
@@ -66,6 +67,7 @@ class EncodingPipeline:
         feature_summary = self._write_outputs(output_path, songs, tensors, provenance)
         if self._is_v2():
             self._capture_v2_evaluation_raw(output_path, songs, provenance)
+            FinalV2EvaluationRawCapture().capture(output_path, songs, provenance or {}, parser.failed_files)
         self.diagnostics.record_stage("bar_feature_encoding", feature_summary)
         diagnostics = self.diagnostics.to_dict()
         self.diagnostics.write(output_path / "encoding_diagnostics.json")
@@ -115,8 +117,7 @@ class EncodingPipeline:
         """Encode every parsed bar with diagnostics."""
         records: List[BarTensorRecord] = []
         for song in songs:
-            for bar in song.bars:
-                records.append(codec.encode(bar))
+            records.extend(codec.encode_song(song) if hasattr(codec, "encode_song") else [codec.encode(bar) for bar in song.bars])
         return records
 
     def _write_outputs(
@@ -176,24 +177,26 @@ class EncodingPipeline:
             str(song_by_id[record.song_id].metadata.get("base_song_id", record.song_id)),
             int(song_by_id[record.song_id].metadata.get("transpose_semitones", 0)), str(record.song_id), int(record.bar_index),
         ))
-        voice_tensors = np.stack([np.asarray(record.tensor, dtype=np.float32) for record in ordered]) if ordered else np.zeros((0, 18, 16, 6), dtype=np.float32)
+        voice_tensors = np.stack([np.asarray(record.tensor, dtype=np.float32) for record in ordered]) if ordered else np.zeros((0, 18, 48, 6), dtype=np.float32)
+        slot_valid_mask = np.asarray([record.diagnostics["slot_valid_mask"] for record in ordered], dtype=bool) if ordered else np.zeros((0, 48), dtype=bool)
+        slot_durations_ql = np.asarray([record.diagnostics["slot_durations_ql"] for record in ordered], dtype=np.float32) if ordered else np.zeros((0, 48), dtype=np.float32)
         bar_contexts = np.asarray([record.diagnostics["bar_context"] for record in ordered], dtype=np.float32) if ordered else np.zeros((0, 12), dtype=np.float32)
         base_pitches = np.asarray([record.diagnostics.get("base_pitch") or 0 for record in ordered], dtype=np.int16)
         base_pitch_valid = np.asarray([bool(record.diagnostics.get("base_pitch_valid")) for record in ordered], dtype=bool)
-        arrays_path = output_dir / "codec_v2_arrays.npz"
-        np.savez_compressed(arrays_path, voice_tensors=voice_tensors, bar_contexts=bar_contexts, base_pitches=base_pitches, base_pitch_valid=base_pitch_valid)
+        arrays_path = output_dir / "voice_tensors.npz"
+        np.savez_compressed(arrays_path, voice_tensors=voice_tensors, slot_valid_mask=slot_valid_mask, slot_durations_ql=slot_durations_ql, bar_contexts=bar_contexts, base_pitches=base_pitches, base_pitch_valid=base_pitch_valid)
         index_rows = []
         for row, record in enumerate(ordered):
             song = song_by_id[record.song_id]
-            index_rows.append({"row": row, "tensor_key": f"{record.song_id}__bar_{record.bar_index:06d}", "song_id": record.song_id, "base_song_id": song.metadata.get("base_song_id", record.song_id), "source_bar_index": int(record.bar_index), "applied_transpose_semitones": int(song.metadata.get("transpose_semitones", 0)), "schema_version": "bar_tensor_schema.v2", "base_pitch_valid": bool(base_pitch_valid[row]), "voice_tensor_shape": [18, 16, 6], "bar_context_shape": [12]})
+            index_rows.append({"row": row, "tensor_key": f"{record.song_id}__bar_{record.bar_index:06d}", "song_id": record.song_id, "base_song_id": song.metadata.get("base_song_id", record.song_id), "source_bar_index": int(record.bar_index), "source_measure_index": song.bars[record.bar_index].source_measure_index, "applied_transpose_semitones": int(song.metadata.get("transpose_semitones", 0)), "schema_version": "bar_tensor_schema.v2", "base_pitch_valid": bool(base_pitch_valid[row]), "voice_tensor_shape": [18, 48, 6], "slot_valid_count": int(slot_valid_mask[row].sum()), "bar_context_shape": [12]})
         index_path = output_dir / "bar_tensor_index.json"
         index_path.write_text(json.dumps(index_rows, indent=2), encoding="utf-8")
         details = provenance or {"identity": "unverified", "identity_kind": "unverified", "content_sha256": None}
         config_json = json.dumps(self.config.get("bar_tensor", {}), sort_keys=True, separators=(",", ":")).encode("utf-8")
-        manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": len(index_rows), "arrays": {"path": arrays_path.name, "sha256": self._sha256(arrays_path), "names": {"voice_tensors": {"dtype": "float32", "shape": list(voice_tensors.shape)}, "bar_contexts": {"dtype": "float32", "shape": list(bar_contexts.shape)}, "base_pitches": {"dtype": "int16", "shape": list(base_pitches.shape)}, "base_pitch_valid": {"dtype": "bool", "shape": list(base_pitch_valid.shape)}}}, "index": {"path": index_path.name, "sha256": self._sha256(index_path)}, "voice_names": ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"], "feature_names": ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"], "configuration": self.config.get("bar_tensor", {}), "configuration_sha256": "sha256:" + hashlib.sha256(config_json).hexdigest(), "dataset_identity": details["identity"], "dataset_identity_kind": details["identity_kind"], "dataset_content_sha256": details["content_sha256"], "source_revision": str(self.config.get("source_revision", "unknown")), "lane_capacity": 16, "overflow_policy": self.config.get("bar_tensor", {}).get("overflow_policy")}
+        manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": len(index_rows), "arrays": {"path": arrays_path.name, "sha256": self._sha256(arrays_path), "names": {"voice_tensors": {"dtype": "float32", "shape": list(voice_tensors.shape)}, "slot_valid_mask": {"dtype": "bool", "shape": list(slot_valid_mask.shape)}, "slot_durations_ql": {"dtype": "float32", "shape": list(slot_durations_ql.shape)}, "bar_contexts": {"dtype": "float32", "shape": list(bar_contexts.shape)}, "base_pitches": {"dtype": "int16", "shape": list(base_pitches.shape)}, "base_pitch_valid": {"dtype": "bool", "shape": list(base_pitch_valid.shape)}}}, "index": {"path": index_path.name, "sha256": self._sha256(index_path)}, "voice_names": ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"], "feature_names": ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"], "configuration": self.config.get("bar_tensor", {}), "configuration_sha256": "sha256:" + hashlib.sha256(config_json).hexdigest(), "dataset_identity": details["identity"], "dataset_identity_kind": details["identity_kind"], "dataset_content_sha256": details["content_sha256"], "source_revision": str(self.config.get("source_revision", "unknown")), "lane_capacity": 16, "overflow_policy": self.config.get("bar_tensor", {}).get("overflow_policy"), "slot_grid_policy": {"quantum_ql": 0.25, "capacity": 48, "epsilon_ql": 1e-6}}
         (output_dir / "encoding_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         extractor = BarFeatureExtractor()
-        v2_features = np.stack([extractor.v2_features(voice_tensors[index], bar_contexts[index]) for index in range(len(index_rows))]) if index_rows else np.zeros((0, 31), dtype=np.float32)
+        v2_features = np.stack([extractor.v2_features(voice_tensors[index], bar_contexts[index], slot_valid_mask[index]) for index in range(len(index_rows))]) if index_rows else np.zeros((0, 31), dtype=np.float32)
         np.savez_compressed(output_dir / "bar_features.npz", features=v2_features)
         summary = {"source": "codec_v2", "feature_count": 31, "feature_names": V2_BAR_FEATURE_NAMES, "row_count": len(index_rows), "shape": list(v2_features.shape)}
         (output_dir / "bar_feature_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

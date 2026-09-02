@@ -122,24 +122,28 @@ class BarFeatureExtractor:
             interval_std,
         ], dtype=np.float32)
 
-    def v2_features(self, tensor: np.ndarray, bar_context: np.ndarray) -> np.ndarray:
+    def v2_features(self, tensor: np.ndarray, bar_context: np.ndarray, slot_valid_mask: np.ndarray | None = None) -> np.ndarray:
         """Return the contract-defined 31D V2 diagnostic vector."""
         values = np.asarray(tensor, dtype=np.float32); context = np.asarray(bar_context, dtype=np.float32)
+        valid = np.ones(values.shape[1], dtype=bool) if slot_valid_mask is None else np.asarray(slot_valid_mask, dtype=bool)
+        if valid.shape != (values.shape[1],): raise ValueError("slot_valid_mask shape does not match V2 tensor slots")
         note, hold, rest = values[..., 2] > .5, values[..., 3] > .5, values[..., 1] > .5
-        active = note | hold; pitches = values[..., 0][active]; velocities = values[..., 4][active]
-        by_slot = note.sum(axis=0); occupied = active.any(axis=0); onset_slots = np.flatnonzero(by_slot)
-        ordered = self._ordered_note_pitches(values, note)
+        active = note | hold; pitches = values[..., 0][:, valid][active[:, valid]]; velocities = values[..., 4][:, valid][active[:, valid]]
+        by_slot = note[:, valid].sum(axis=0); occupied = active[:, valid].any(axis=0); onset_slots = np.flatnonzero(by_slot)
+        ordered = self._ordered_note_pitches(values[:, valid], note[:, valid])
         intervals = np.diff(onset_slots).astype(np.float32) if len(onset_slots) > 1 else np.zeros(0, dtype=np.float32)
-        harmony = active[1:17].sum(axis=0).astype(np.float32)
+        harmony = active[1:17, valid].sum(axis=0).astype(np.float32)
         probs = by_slot / max(1.0, float(by_slot.sum()))
         chroma = context / max(1.0e-8, float(context.sum()))
         pitch_values = [float(np.mean(pitches)) if pitches.size else 0., float(np.std(pitches)) if pitches.size else 0., float(np.min(pitches)) if pitches.size else 0., float(np.max(pitches)) if pitches.size else 0., float(np.ptp(pitches)) if pitches.size else 0., float(ordered[0]) if ordered.size else 0., float(ordered[-1]) if ordered.size else 0., float(ordered[-1] - ordered[0]) if ordered.size else 0.]
-        steps = max(1, values.shape[1] - 1)
-        onset_centroid = float(np.dot(np.arange(values.shape[1]), by_slot) / max(1.0, float(by_slot.sum())) / steps)
-        onset_spread = float(np.std(np.repeat(np.arange(values.shape[1]), by_slot.astype(int))) / steps) if by_slot.sum() else 0.0
-        onset_entropy = float(-(probs * np.log(np.clip(probs, 1e-8, 1))).sum() / np.log(max(2, values.shape[1])))
+        steps = max(1, int(valid.sum()) - 1)
+        onset_centroid = float(np.dot(np.flatnonzero(valid), by_slot) / max(1.0, float(by_slot.sum())) / steps)
+        onset_spread = float(np.std(np.repeat(np.flatnonzero(valid), by_slot.astype(int))) / steps) if by_slot.sum() else 0.0
+        onset_entropy = float(-(probs * np.log(np.clip(probs, 1e-8, 1))).sum() / np.log(max(2, int(valid.sum()))))
         chroma_entropy = float(-(chroma * np.log(np.clip(chroma, 1e-8, 1))).sum())
-        result = [float(note.mean()), float(active.mean()), float(rest.mean()), float(hold.mean()), *pitch_values, float(np.mean(velocities)) if velocities.size else 0.0, float(np.std(velocities)) if velocities.size else 0.0, onset_centroid, onset_spread, onset_entropy, float(occupied.mean()), float(note[0].mean()), float(note[1:17].sum() / (16 * values.shape[1])), float(note[17].mean()), float(active[0].mean()), float(active[1:17].sum() / (16 * values.shape[1])), float(active[17].mean()), float(intervals.mean()) if intervals.size else 0.0, float(intervals.max()) if intervals.size else 0.0, float(intervals.std()) if intervals.size else 0.0, float(harmony.mean()), float(harmony.max()), float((harmony > 0).mean()), chroma_entropy]
+        result = [float(note[:, valid].mean()), float(active[:, valid].mean()), float(rest[:, valid].mean()), float(hold[:, valid].mean()), *pitch_values, float(np.mean(velocities)) if velocities.size else 0.0, float(np.std(velocities)) if velocities.size else 0.0, onset_centroid, onset_spread, onset_entropy, float(occupied.mean()), float(note[0, valid].mean()), float(note[1:17, valid].sum() / (16 * max(1, valid.sum()))), float(note[17, valid].mean()), float(active[0, valid].mean()), float(active[1:17, valid].sum() / (16 * max(1, valid.sum()))), float(active[17, valid].mean()), float(intervals.mean()) if intervals.size else 0.0, float(intervals.max()) if intervals.size else 0.0, float(intervals.std()) if intervals.size else 0.0, float(harmony.mean()), float(harmony.max()), float((harmony > 0).mean()), chroma_entropy]
+        if len(result) != len(V2_BAR_FEATURE_NAMES):
+            raise AssertionError("V2 feature contract must have 31 values")
         return np.asarray(result, dtype=np.float32)
 
     def _first_last_pitch(self, tensor: np.ndarray, note: np.ndarray) -> tuple[float, float]:

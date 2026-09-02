@@ -31,6 +31,9 @@ class NoteEvent:
     source_file_identity: str | None = None
     physical_track_index: int | None = None
     source_note_ordinal: int | None = None
+    # Persisted, stable identity of the un-clipped source note.  A continued
+    # note deliberately keeps this value in every bar it intersects.
+    source_note_id: str | None = None
     source_onset_ql: float | None = None
     continues_from_previous_bar: bool = False
     continues_into_next_bar: bool = False

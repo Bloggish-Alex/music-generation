@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from dataclasses import dataclass
+
 
 def identity(note: Any) -> str:
     """Return the source identity used as the final deterministic tie-break."""
@@ -12,15 +14,31 @@ def identity(note: Any) -> str:
             f"{note.get('physical_track_index', note.get('track_index', 0))}:"
             f"{note.get('source_note_ordinal', 0)}"
         ))
-    return (
+    return str(note.source_note_id or (
         f"{note.source_file_identity or ''}:{note.physical_track_index or 0}:"
         f"{note.source_note_ordinal or 0}"
-    )
+    ))
 
 
 def value(note: Any, name: str, default: Any = 0) -> Any:
     """Read a source field from either a raw mapping or a parsed note."""
     return note.get(name, default) if isinstance(note, dict) else getattr(note, name, default)
+
+
+@dataclass
+class SemanticCodecSequenceState:
+    """Stable melody identity carried only across contiguous source measures."""
+    previous_melody_source_note_id: str | None = None
+    previous_source_measure_index: int | None = None
+
+    def previous_note(self, active: Iterable[Any], source_measure_index: int | None) -> Any | None:
+        if self.previous_source_measure_index is None or source_measure_index != self.previous_source_measure_index + 1:
+            return None
+        return next((note for note in active if identity(note) == self.previous_melody_source_note_id), None)
+
+    def update(self, melody: Any | None, source_measure_index: int | None) -> None:
+        self.previous_melody_source_note_id = identity(melody) if melody is not None else None
+        self.previous_source_measure_index = source_measure_index
 
 
 def assign(

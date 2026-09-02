@@ -291,6 +291,10 @@ class MusicDirectoryParser:
                     source_file_identity=str(song.metadata["source_file_identity"]),
                     physical_track_index=int(physical_track_index),
                     source_note_ordinal=int(source_note_ordinal),
+                    source_note_id=(
+                        f"{song.metadata['source_file_identity']}:"
+                        f"{int(physical_track_index)}:{int(source_note_ordinal)}"
+                    ),
                     source_onset_ql=float(start),
                     continues_from_previous_bar=bool(start < bar_start),
                     continues_into_next_bar=bool(end > bar_end),
