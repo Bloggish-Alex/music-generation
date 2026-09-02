@@ -75,6 +75,10 @@ class JsonNpzCodecFidelityV2RawCapture:
             rows = json.loads(index_path.read_text(encoding="utf-8")); manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest.get("schema_version") != "bar_tensor_schema.v2" or not isinstance(rows, list):
                 raise ValueError("V2 manifest or index schema is invalid")
+            if type(manifest.get("row_count")) is not int or manifest["row_count"] != len(rows):
+                raise ValueError("V2 manifest row_count does not match bar_tensor_index rows")
+            if any(not isinstance(row, Mapping) or type(row.get("row")) is not int or row["row"] != position for position, row in enumerate(rows)):
+                raise ValueError("V2 bar_tensor_index rows must be unique contiguous canonical row positions")
             if manifest.get("arrays", {}).get("sha256") != _sha256(arrays_path):
                 raise ValueError("V2 manifest arrays.sha256 does not match codec_v2_arrays.npz")
             if manifest.get("index", {}).get("sha256") != _sha256(index_path):
@@ -496,7 +500,7 @@ def _source_bar_index(
     if not isinstance(songs, list):
         return None, "dataset_tonality raw source has no song observations"
     result: dict[tuple[str, int], Mapping[str, Any]] = {}
-    source_note_ids: set[str] = set()
+    source_note_facts: dict[tuple[str, str], tuple[int, int, float, int, int]] = {}
     for song in songs:
         if not isinstance(song, Mapping):
             return None, "dataset_tonality raw source contains an invalid song observation"
@@ -515,6 +519,7 @@ def _source_bar_index(
             notes = bar.get("notes")
             if not isinstance(notes, list):
                 return None, "dataset_tonality raw source bar has no note observations"
+            bar_note_ids: set[str] = set()
             for note in notes:
                 if not isinstance(note, Mapping):
                     return None, "dataset_tonality raw source contains an invalid note observation"
@@ -522,15 +527,23 @@ def _source_bar_index(
                 source_note_ordinal = note.get("source_note_ordinal")
                 source_note_id = note.get("source_note_id")
                 source_onset_ql = note.get("source_onset_ql")
+                pitch = note.get("pitch")
+                velocity = note.get("velocity")
                 if (
                     not isinstance(physical_track_index, int) or physical_track_index < 0
                     or not isinstance(source_note_ordinal, int) or source_note_ordinal < 0
                     or not isinstance(source_note_id, str) or not source_note_id
                     or not isinstance(source_onset_ql, (int, float)) or not math.isfinite(float(source_onset_ql)) or source_onset_ql < 0
-                    or source_note_id in source_note_ids
+                    or not isinstance(pitch, int) or not isinstance(velocity, int)
+                    or source_note_id in bar_note_ids
                 ):
                     return None, "dataset_tonality raw source note identity is incomplete, invalid, or duplicated"
-                source_note_ids.add(source_note_id)
+                facts = (physical_track_index, source_note_ordinal, float(source_onset_ql), pitch, velocity)
+                identity_key = (song_id, source_note_id)
+                previous = source_note_facts.setdefault(identity_key, facts)
+                if previous != facts:
+                    return None, "dataset_tonality raw source repeated note identity has inconsistent immutable facts"
+                bar_note_ids.add(source_note_id)
             result[key] = {
                 "base_song_id": base_song_id,
                 "applied_transpose_semitones": transpose,

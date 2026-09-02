@@ -19,7 +19,7 @@ def test_v2_capture_and_export_use_declared_row_aligned_arrays(tmp_path) -> None
     index.write_text(json.dumps(rows), encoding="utf-8")
     import hashlib
     digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "voice_names": [], "feature_names": [], "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(index)}}), encoding="utf-8")
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 2, "voice_names": [], "feature_names": [], "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(index)}}), encoding="utf-8")
     train, validation = tmp_path / "train.json", tmp_path / "validation.json"; _source(train, "train", "train_song"); _source(validation, "validation", "validation_song")
     result = JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": train, "validation": validation}, frozenset({"train_song"}), frozenset({"validation_song"})))
     assert set(result.artifacts) == {"train", "validation"}
@@ -36,14 +36,44 @@ def test_v2_capture_rejects_manifest_hash_or_note_identity_mismatch(tmp_path) ->
     np.savez_compressed(tmp_path / "codec_v2_arrays.npz", voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([60], dtype=np.int16), base_pitch_valid=np.asarray([True]))
     rows = [{"row": 0, "song_id": "song", "base_song_id": "song", "source_bar_index": 0}]
     (tmp_path / "bar_tensor_index.json").write_text(json.dumps(rows), encoding="utf-8")
-    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "arrays": {"sha256": "sha256:wrong"}, "index": {"sha256": "sha256:wrong"}}), encoding="utf-8")
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 1, "arrays": {"sha256": "sha256:wrong"}, "index": {"sha256": "sha256:wrong"}}), encoding="utf-8")
     source = tmp_path / "source.json"; _source(source, "train", "song")
     request = CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": source}, frozenset({"song"}), frozenset())
     result = JsonNpzCodecFidelityV2RawCapture().capture(request)
     assert result.unavailable["train"].startswith("V2 manifest arrays.sha256")
     import hashlib
     digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(tmp_path / "bar_tensor_index.json")}}), encoding="utf-8")
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 1, "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(tmp_path / "bar_tensor_index.json")}}), encoding="utf-8")
     source.write_text(json.dumps({"schema_version": "dataset_tonality_raw_source.v1", "dataset": {"split": "train"}, "availability": {"bar_note_events": True, "split_membership": True}, "songs": [{"song_id": "song", "base_song_id": "song", "applied_transpose_semitones": 0, "bars": [{"bar_index": 0, "notes": [{"pitch": 60}]}]}]}), encoding="utf-8")
     result = JsonNpzCodecFidelityV2RawCapture().capture(request)
     assert "note identity" in result.unavailable["train"]
+
+
+def test_v2_capture_accepts_one_source_note_clipped_across_bars(tmp_path) -> None:
+    voices = np.zeros((2, 18, 16, 6), dtype=np.float32)
+    np.savez_compressed(tmp_path / "codec_v2_arrays.npz", voice_tensors=voices, bar_contexts=np.zeros((2, 12), dtype=np.float32), base_pitches=np.asarray([60, 60], dtype=np.int16), base_pitch_valid=np.asarray([True, True]))
+    rows = [{"row": 0, "song_id": "song", "base_song_id": "song", "source_bar_index": 0}, {"row": 1, "song_id": "song", "base_song_id": "song", "source_bar_index": 1}]
+    index = tmp_path / "bar_tensor_index.json"; index.write_text(json.dumps(rows), encoding="utf-8")
+    import hashlib
+    digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 2, "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(index)}}), encoding="utf-8")
+    sustained = {"pitch": 60, "velocity": 80, "physical_track_index": 2, "source_note_ordinal": 7, "source_note_id": "file:2:7", "source_onset_ql": 3.5}
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps({"schema_version": "dataset_tonality_raw_source.v1", "dataset": {"split": "train"}, "availability": {"bar_note_events": True, "split_membership": True}, "songs": [{"song_id": "song", "base_song_id": "song", "applied_transpose_semitones": 0, "bars": [{"bar_index": 0, "notes": [{**sustained, "onset_ql": 3.5, "duration_ql": 0.5}]}, {"bar_index": 1, "notes": [{**sustained, "onset_ql": 0.0, "duration_ql": 1.0}]}]}]}), encoding="utf-8")
+    result = JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": source}, frozenset({"song"}), frozenset()))
+    assert "train" in result.artifacts
+
+
+def test_v2_capture_rejects_noncanonical_manifest_or_index_rows(tmp_path) -> None:
+    voices = np.zeros((1, 18, 16, 6), dtype=np.float32)
+    np.savez_compressed(tmp_path / "codec_v2_arrays.npz", voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([60], dtype=np.int16), base_pitch_valid=np.asarray([True]))
+    index = tmp_path / "bar_tensor_index.json"; index.write_text(json.dumps([{ "row": 3, "song_id": "song", "base_song_id": "song", "source_bar_index": 0 }]), encoding="utf-8")
+    import hashlib
+    digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 2, "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(index)}}), encoding="utf-8")
+    source = tmp_path / "source.json"; _source(source, "train", "song")
+    result = JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": source}, frozenset({"song"}), frozenset()))
+    assert "row_count" in result.unavailable["train"]
+    (tmp_path / "encoding_manifest.json").write_text(json.dumps({"schema_version": "bar_tensor_schema.v2", "row_count": 1, "arrays": {"sha256": digest(tmp_path / "codec_v2_arrays.npz")}, "index": {"sha256": digest(index)}}), encoding="utf-8")
+    result = JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": source}, frozenset({"song"}), frozenset()))
+    assert "canonical row positions" in result.unavailable["train"]
