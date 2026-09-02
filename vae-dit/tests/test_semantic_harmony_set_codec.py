@@ -56,3 +56,15 @@ def test_v2_preserves_cross_bar_melody_identity_and_marks_continuation_hold() ->
     assert records[1].tensor[0, 0, 0] == records[0].tensor[0, 0, 0]
     assert records[1].tensor[0, 0, 2] == 0.0
     assert records[1].tensor[0, 0, 3] == 1.0
+
+
+def test_v2_velocity_ratio_uses_clamped_assigned_velocities() -> None:
+    high = _note(72, 0); high.velocity = 200
+    bass = _note(60, 1); bass.velocity = 127
+    bar = BarRecord("song", "fixture.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [high, bass])])
+    tensor = SemanticHarmonySetCodec.from_config(_config()).encode(bar).tensor
+    ratios = tensor[[0, 17], 0, 5]
+    assert np.allclose(ratios, [.5, .5]) and np.isclose(ratios.sum(), 1.0)
+    high.velocity = bass.velocity = 0
+    zeros = SemanticHarmonySetCodec.from_config(_config()).encode(bar).tensor[:, 0, 5]
+    assert np.isfinite(zeros).all() and np.all(zeros == 0.0)

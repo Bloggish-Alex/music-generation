@@ -75,7 +75,10 @@ class SemanticHarmonySetCodec:
             assigned = [(0, melody), *[(index + 1, note) for index, note in enumerate(harmony)]]
             if bass is not None:
                 assigned.append((17, bass))
-            denominator = sum(max(0, int(note.velocity)) for _, note in assigned)
+            denominator = sum(
+                max(0.0, min(float(note.velocity), self.config.velocity_scale))
+                for _, note in assigned
+            )
             for lane, note in assigned:
                 self._write(tensor[lane, slot], note, base_pitch, start, denominator)
             previous = melody
