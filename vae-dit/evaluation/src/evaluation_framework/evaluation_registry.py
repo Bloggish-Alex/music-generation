@@ -59,6 +59,12 @@ def _register_builtin_modules() -> None:
     from .evaluation_renderer_consistency import RENDERER_CONSISTENCY_MODULE
     from .evaluation_attribution import ATTRIBUTION_MODULE
     from .evaluation_oracle_ladder import ORACLE_LADDER_MODULE
+    from .evaluation_final_v2_diagnostics import (
+        FORM_ACTION_ALIGNMENT_MODULE,
+        PARSER_INTEGRITY_MODULE,
+        PERFORMANCE_CONTROLS_MODULE,
+        QUANTIZATION_AUDIT_MODULE,
+    )
 
     DEFAULT_MODULE_REGISTRY.register(DATASET_TONALITY_MODULE)
     DEFAULT_MODULE_REGISTRY.register(ANCHOR_TRANSPORT_MODULE)
@@ -77,6 +83,10 @@ def _register_builtin_modules() -> None:
     DEFAULT_MODULE_REGISTRY.register(RENDERER_CONSISTENCY_MODULE)
     DEFAULT_MODULE_REGISTRY.register(ATTRIBUTION_MODULE)
     DEFAULT_MODULE_REGISTRY.register(ORACLE_LADDER_MODULE)
+    DEFAULT_MODULE_REGISTRY.register(PARSER_INTEGRITY_MODULE)
+    DEFAULT_MODULE_REGISTRY.register(QUANTIZATION_AUDIT_MODULE)
+    DEFAULT_MODULE_REGISTRY.register(PERFORMANCE_CONTROLS_MODULE)
+    DEFAULT_MODULE_REGISTRY.register(FORM_ACTION_ALIGNMENT_MODULE)
 
 
 _register_builtin_modules()

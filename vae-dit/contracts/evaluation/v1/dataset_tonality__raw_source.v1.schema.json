@@ -42,17 +42,21 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["bar_index", "bar_length_ql", "time_signature", "notes"],
+              "required": ["bar_index", "bar_length_ql", "time_signature", "source_measure_index", "meter_numerator", "meter_denominator", "is_pickup", "notes"],
               "properties": {
                 "bar_index": {"type": "integer", "minimum": 0},
                 "bar_length_ql": {"type": "number", "exclusiveMinimum": 0},
                 "time_signature": {"type": "string", "pattern": "^[0-9]+/[0-9]+$"},
+                "source_measure_index": {"type": ["integer", "null"], "minimum": 0},
+                "meter_numerator": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+                "meter_denominator": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+                "is_pickup": {"type": "boolean"},
                 "tempo_bpm": {"type": ["number", "null"], "exclusiveMinimum": 0},
                 "notes": {
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["track_index", "physical_track_index", "source_note_ordinal", "source_note_id", "source_onset_ql", "pitch", "onset_ql", "duration_ql", "velocity"],
+                    "required": ["track_index", "physical_track_index", "source_note_ordinal", "source_note_id", "source_onset_ql", "pitch", "onset_ql", "duration_ql", "velocity", "continues_from_previous_bar", "continues_into_next_bar"],
                     "properties": {
                       "track_index": {"type": "integer", "minimum": 0},
                       "physical_track_index": {"type": "integer", "minimum": 0},
@@ -62,7 +66,9 @@
                       "pitch": {"type": "integer", "minimum": 0, "maximum": 127},
                       "onset_ql": {"type": "number", "minimum": 0},
                       "duration_ql": {"type": "number", "exclusiveMinimum": 0},
-                      "velocity": {"type": "integer", "minimum": 0, "maximum": 127}
+                      "velocity": {"type": "integer", "minimum": 0, "maximum": 127},
+                      "continues_from_previous_bar": {"type": "boolean"},
+                      "continues_into_next_bar": {"type": "boolean"}
                     },
                     "additionalProperties": false
                   }

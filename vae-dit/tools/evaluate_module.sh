@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$MODULE" in
-    anchor_transport|attribution|codec_fidelity|dataset_tonality|dvae_fidelity|dvae_pitch_diagnostics|latent_probe|physical_trajectory_objective|renderer_consistency|trajectory_anchor_context) ;;
+    anchor_transport|attribution|codec_fidelity|dataset_tonality|dvae_fidelity|dvae_pitch_diagnostics|latent_probe|physical_trajectory_objective|renderer_consistency|trajectory_anchor_context|parser_integrity|quantization_audit|performance_controls|form_action_alignment) ;;
     *) echo "Unsupported module: $MODULE" >&2; exit 2 ;;
 esac
 [[ -z "$MODEL" || -z "$SOURCE_DIR" ]] || { echo "Use either --model or --source-dir." >&2; exit 2; }
@@ -58,11 +58,11 @@ fi
 mkdir -p "$RUN_DIR"
 
 revision="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
-python "$ROOT_DIR/tools/export_module.py" --module "$MODULE" --source-dir "$SOURCE_DIR" --output-dir "$RUN_DIR"
+"${PYTHON_BIN}" "$ROOT_DIR/tools/export_module.py" --module "$MODULE" --source-dir "$SOURCE_DIR" --output-dir "$RUN_DIR"
 
 case "$MODULE" in
     dvae_pitch_diagnostics) evaluation_modules="dvae_pitch_supervision_audit,dvae_pitch_gradient_probe" ;;
     *) evaluation_modules="$MODULE" ;;
 esac
-python "$ROOT_DIR/tools/evaluate.py" --run-dir "$RUN_DIR" --modules "$evaluation_modules" --mode all --code-revision "$revision"
+"${PYTHON_BIN}" "$ROOT_DIR/tools/evaluate.py" --run-dir "$RUN_DIR" --modules "$evaluation_modules" --mode all --code-revision "$revision"
 echo "${MODULE} report written to: ${RUN_DIR}"

@@ -13,8 +13,9 @@ from evaluation_framework.evaluation_codec_fidelity import _multiset_f1
 def test_v2_status_dispatches_to_monitor_report(tmp_path) -> None:
     public = tmp_path / "public"; public.mkdir(); run = EvaluationArtifactStore.create(tmp_path, "run")
     arrays = public / "codec_fidelity__raw_arrays__train.v2.npz"
-    voices = np.zeros((1, 18, 16, 6), dtype=np.float32); voices[:, :, :, 1] = 1.0
-    np.savez_compressed(arrays, voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([0], dtype=np.int16), base_pitch_valid=np.asarray([False]))
+    voices = np.zeros((1, 18, 48, 6), dtype=np.float32); mask = np.zeros((1, 48), dtype=bool); mask[:, :16] = True; voices[:, :, :16, 1] = 1.0
+    durations = np.zeros((1, 48), dtype=np.float32); durations[:, :16] = .25
+    np.savez_compressed(arrays, voice_tensors=voices, slot_valid_mask=mask, slot_durations_ql=durations, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([0], dtype=np.int16), base_pitch_valid=np.asarray([False]))
     import hashlib
     digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     source = public / "dataset_tonality__raw_source__train.v1.json"
@@ -39,7 +40,7 @@ def test_v2_harmony_pitch_state_multiset_detects_a_mismatch() -> None:
 
 def test_v2_measurement_uses_continuity_and_onset_hold_state(tmp_path) -> None:
     public = tmp_path / "public"; public.mkdir(); run = EvaluationArtifactStore.create(tmp_path, "run")
-    voices = np.zeros((1, 18, 16, 6), dtype=np.float32); voices[:, :, :, 1] = 1.0
+    voices = np.zeros((1, 18, 48, 6), dtype=np.float32); mask = np.zeros((1, 48), dtype=bool); mask[:, :16] = True; voices[:, :, :16, 1] = 1.0
     for lane, pitch in ((0, 72), (17, 60)):
         voices[0, lane, :4, 0] = (pitch - 60) / 24.0
         voices[0, lane, :4, 1] = 0.0
@@ -53,7 +54,8 @@ def test_v2_measurement_uses_continuity_and_onset_hold_state(tmp_path) -> None:
     voices[0, 1, 2:4, 3] = 1.0
     voices[0, 1, 1:4, 4] = 70 / 127.0
     arrays = public / "codec_fidelity__raw_arrays__train.v2.npz"
-    np.savez_compressed(arrays, voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([60], dtype=np.int16), base_pitch_valid=np.asarray([True]))
+    durations = np.zeros((1, 48), dtype=np.float32); durations[:, :16] = .25
+    np.savez_compressed(arrays, voice_tensors=voices, slot_valid_mask=mask, slot_durations_ql=durations, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([60], dtype=np.int16), base_pitch_valid=np.asarray([True]))
     import hashlib
     digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     notes = [

@@ -133,12 +133,14 @@ class JsonDatasetTonalityRawSourceWriter:
                 "track_index": int(track.track_index),
                 "physical_track_index": int(note.physical_track_index if note.physical_track_index is not None else track.track_index),
                 "source_note_ordinal": int(note.source_note_ordinal if note.source_note_ordinal is not None else 0),
-                "source_note_id": f"{note.source_file_identity or ''}:{note.physical_track_index if note.physical_track_index is not None else track.track_index}:{note.source_note_ordinal if note.source_note_ordinal is not None else 0}",
+                "source_note_id": str(note.source_note_id or f"{note.source_file_identity or ''}:{note.physical_track_index if note.physical_track_index is not None else track.track_index}:{note.source_note_ordinal if note.source_note_ordinal is not None else 0}"),
                 "source_onset_ql": float(note.source_onset_ql if note.source_onset_ql is not None else note.onset_ql),
                 "pitch": int(note.pitch),
                 "onset_ql": float(note.onset_ql),
                 "duration_ql": float(note.duration_ql),
                 "velocity": int(note.velocity),
+                "continues_from_previous_bar": bool(note.continues_from_previous_bar),
+                "continues_into_next_bar": bool(note.continues_into_next_bar),
             }
             for track in bar.tracks
             for note in track.notes
@@ -158,6 +160,10 @@ class JsonDatasetTonalityRawSourceWriter:
             "bar_index": int(bar.bar_index),
             "bar_length_ql": bar_length,
             "time_signature": time_signature,
+            "source_measure_index": int(bar.source_measure_index) if bar.source_measure_index is not None else None,
+            "meter_numerator": int(bar.meter_numerator) if bar.meter_numerator is not None else None,
+            "meter_denominator": int(bar.meter_denominator) if bar.meter_denominator is not None else None,
+            "is_pickup": bool(bar.is_pickup),
             "tempo_bpm": None,
             "notes": sorted(
                 notes,

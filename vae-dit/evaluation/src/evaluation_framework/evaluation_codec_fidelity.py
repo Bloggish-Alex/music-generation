@@ -4,7 +4,7 @@ import io, json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import numpy as np
-from codec.semantic_harmony_assignment import assign
+from codec.semantic_harmony_assignment import SemanticCodecSequenceState, assign
 from .evaluation_api import ArtifactBundle, ArtifactEvaluator, ArtifactExporter, EvaluationModule, EvaluationResult
 from .evaluation_context import EvaluationContext, ExportContext
 from .core.artifacts import VerifiedArtifactResolver
@@ -90,16 +90,17 @@ def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict
     """Measure V2 lane facts without reconstructing a V1 semantic tensor."""
     obs=resolver.json(status["artifacts"]["observation"]); source=resolver.json(obs["source_raw"]); manifest=resolver.json(obs["encoding_manifest"]); archive=resolver.npz(obs["arrays"])
     try:
-        voices=np.asarray(archive["voice_tensors"],dtype=float); contexts=np.asarray(archive["bar_contexts"],dtype=float); bases=np.asarray(archive["base_pitches"],dtype=float); valid=np.asarray(archive["base_pitch_valid"],dtype=bool)
+        voices=np.asarray(archive["voice_tensors"],dtype=float); masks=np.asarray(archive["slot_valid_mask"],dtype=bool); durations=np.asarray(archive["slot_durations_ql"],dtype=float); contexts=np.asarray(archive["bar_contexts"],dtype=float); bases=np.asarray(archive["base_pitches"],dtype=float); valid=np.asarray(archive["base_pitch_valid"],dtype=bool)
     finally: archive.close()
     epsilon=float(manifest.get("configuration",{}).get("slot_time_epsilon_ql",1e-6))
     tolerance=int(manifest.get("configuration",{}).get("melody_continuity_tolerance",7))
     bars={(str(song["song_id"]),int(bar["bar_index"])):bar for song in source["songs"] for bar in song["bars"]}
-    active=(voices[...,2]>.5)|(voices[...,3]>.5); melody=active[:,0]; bass=active[:,17]; harmony=active[:,1:17]
+    active=(voices[...,2]>.5)|(voices[...,3]>.5); melody=active[:,0]&masks; bass=active[:,17]&masks; harmony=active[:,1:17]&masks[:,None]
     pitches=np.rint(bases[:,None,None]+voices[...,0]*24.0)
     harmony_counts=harmony.sum(axis=(1,2)); empty=(~active.any(axis=(1,2))).sum()
     source_register=[]; tensor_register=[]; source_context=[]; tensor_context=[]; source_lane_chroma=np.zeros(12); tensor_lane_chroma=np.zeros(12); unpaired=0; melody_exact=[]; bass_exact=[]; harmony_source=[]; harmony_tensor=[]; harmony_state_source=[]; harmony_state_tensor=[]; cardinality_errors=[]; cardinality_exact=[]; non_empty_slot_f1=[]; empty_slot_exact=[]
-    for row in obs.get("alignment",[]):
+    sequence_states={}
+    for row in sorted(obs.get("alignment",[]),key=lambda item:(str(item["song_id"]),int(item.get("source_measure_index",item["source_bar_index"])))):
         index=int(row["tensor_row"]); bar=bars.get((str(row["song_id"]), int(row["source_bar_index"])))
         if bar is None: unpaired+=1; continue
         notes=bar.get("notes", [])
@@ -107,19 +108,21 @@ def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict
             base=int(bases[index]); expected=np.zeros(12)
             for note in notes: expected[(int(note["pitch"])-base)%12]+=max(0.,float(note.get("duration_ql",0.)))*float(note.get("velocity",0))/127.
             source_context.append(_norm(expected)); tensor_context.append(_norm(contexts[index]))
-        slots=int(voices.shape[2]); slot_length=float(bar.get("bar_length_ql", 4.0))/slots; previous_source_melody=None
-        for slot in range(slots):
-            start,end=slot*slot_length,(slot+1)*slot_length
+        state=sequence_states.setdefault(str(row["song_id"]),SemanticCodecSequenceState())
+        previous_source_melody=None
+        for slot in np.flatnonzero(masks[index]):
+            start=float(np.sum(durations[index,:slot])); end=start+float(durations[index,slot])
             slot_notes=[note for note in notes if float(note.get("onset_ql",0.))<end-epsilon and float(note.get("onset_ql",0.))+float(note.get("duration_ql",0.))>start+epsilon]
-            source_melody,source_bass,source_harmony=assign(slot_notes, previous_source_melody, tolerance)
+            prior=state.previous_note(slot_notes,bar.get("source_measure_index")) if slot == 0 else previous_source_melody
+            source_melody,source_bass,source_harmony=assign(slot_notes, prior, tolerance)
             if source_melody is not None: previous_source_melody=source_melody
             tensor_melody=int(pitches[index,0,slot]) if active[index,0,slot] else None; tensor_bass=int(pitches[index,17,slot]) if active[index,17,slot] else None
-            source_melody_state="onset" if source_melody and abs(float(source_melody.get("onset_ql",0.))-start)<=epsilon else "hold"
-            source_bass_state="onset" if source_bass and abs(float(source_bass.get("onset_ql",0.))-start)<=epsilon else "hold"
+            source_melody_state="onset" if source_melody and not (slot == 0 and source_melody.get("continues_from_previous_bar")) and abs(float(source_melody.get("onset_ql",0.))-start)<=epsilon else "hold"
+            source_bass_state="onset" if source_bass and not (slot == 0 and source_bass.get("continues_from_previous_bar")) and abs(float(source_bass.get("onset_ql",0.))-start)<=epsilon else "hold"
             tensor_melody_state="onset" if tensor_melody is not None and voices[index,0,slot,2]>.5 else "hold" if tensor_melody is not None else "rest"
             tensor_bass_state="onset" if tensor_bass is not None and voices[index,17,slot,2]>.5 else "hold" if tensor_bass is not None else "rest"
             melody_exact.append((tensor_melody,tensor_melody_state)==((int(source_melody["pitch"]),source_melody_state) if source_melody else (None,"rest"))); bass_exact.append((tensor_bass,tensor_bass_state)==((int(source_bass["pitch"]),source_bass_state) if source_bass else (None,"rest")))
-            source_state=[(int(note["pitch"]), "onset" if abs(float(note.get("onset_ql",0.))-start)<=epsilon else "hold") for note in source_harmony]
+            source_state=[(int(note["pitch"]), "onset" if not (slot == 0 and note.get("continues_from_previous_bar")) and abs(float(note.get("onset_ql",0.))-start)<=epsilon else "hold") for note in source_harmony]
             tensor_state=[(int(pitches[index,lane,slot]), "onset" if voices[index,lane,slot,2]>.5 else "hold") for lane in range(1,17) if active[index,lane,slot]]
             harmony_source.extend(item[0] for item in source_state); harmony_tensor.extend(item[0] for item in tensor_state); harmony_state_source.extend(source_state); harmony_state_tensor.extend(tensor_state)
             cardinality_errors.append(abs(len(source_state)-len(tensor_state))); cardinality_exact.append(len(source_state)==len(tensor_state))
@@ -129,14 +132,15 @@ def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict
                 non_empty_slot_f1.append(_multiset_f1(source_state, tensor_state)[2])
             source_assigned=[note for note in (source_melody, *source_harmony, source_bass) if note is not None]
             for note in source_assigned:
-                weight=slot_length*max(0.0,min(float(note.get("velocity",0)),127.0))/127.0
+                weight=float(durations[index,slot])*max(0.0,min(float(note.get("velocity",0)),127.0))/127.0
                 source_lane_chroma[int(note["pitch"])%12]+=weight
                 source_register.append((int(note["pitch"]),weight))
             for lane in range(18):
                 if active[index,lane,slot]:
-                    pitch=int(pitches[index,lane,slot]); weight=slot_length*max(0.0,float(voices[index,lane,slot,4]))
+                    pitch=int(pitches[index,lane,slot]); weight=float(durations[index,slot])*max(0.0,float(voices[index,lane,slot,4]))
                     tensor_lane_chroma[pitch%12]+=weight
                     tensor_register.append((pitch,weight))
+        state.update(previous_source_melody,bar.get("source_measure_index"))
     precision,recall,f1=_multiset_f1(harmony_source,harmony_tensor); state_precision,state_recall,state_f1=_multiset_f1(harmony_state_source,harmony_state_tensor)
     cosine=[float(np.dot(a,b)/(max(np.linalg.norm(a)*np.linalg.norm(b),1e-8))) for a,b in zip(source_context,tensor_context)]
     source_median=_weighted_median(source_register); tensor_median=_weighted_median(tensor_register)
@@ -168,7 +172,7 @@ def _cosine(left,right):
 def _png(profiles):
     try:
         import matplotlib.pyplot as plt
-        f,a=plt.subplots(figsize=(6,3)); a.bar(list(profiles),[p["semantic_physical_chroma"]["cosine_mean"] for p in profiles.values()]); a.set_ylim(0,1); a.set_ylabel("Chroma cosine"); f.tight_layout(); o=io.BytesIO();f.savefig(o,format="png",dpi=150);plt.close(f);return o.getvalue()
+        f,a=plt.subplots(figsize=(6,3)); a.bar(list(profiles),[p["context_chroma"]["cosine_mean"] if p.get("schema_version")=="bar_tensor_schema.v2" else p["semantic_physical_chroma"]["cosine_mean"] for p in profiles.values()]); a.set_ylim(0,1); a.set_ylabel("Chroma cosine"); f.tight_layout(); o=io.BytesIO();f.savefig(o,format="png",dpi=150);plt.close(f);return o.getvalue()
     except Exception:return bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360f8cff0ff3f0005fe02fe8e4cacf50000000049454e44ae426082")
 def _markdown(r):
     if r["status"]=="UNAVAILABLE":return "# Codec 保真度\n\n所需 codec 原始观察不可用。\n"

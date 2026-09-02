@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/init_env.sh"
 
-NAME=""; DATA_DIR=""; RUN_ID=""; CONFIG_PATH="${CONFIG}"; SCHEMA=""
+NAME=""; DATA_DIR=""; RUN_ID=""; CONFIG_PATH="${ROOT_DIR}/config/codec_v2.yaml"; SCHEMA="bar_tensor_schema.v2"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dataset-root) DATA_DIR="$2"; shift 2;; --dataset-name) NAME="$2"; shift 2;; --run-id) RUN_ID="$2"; shift 2;; --config) CONFIG_PATH="$2"; shift 2;; --schema-version) SCHEMA="$2"; shift 2;;
@@ -13,10 +13,10 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$NAME" ] || { echo "--dataset-name is required" >&2; exit 2; }
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/../datasets/${NAME}}"
-SCHEMA="${SCHEMA:-bar_tensor_schema.v1}"
+SCHEMA="${SCHEMA:-bar_tensor_schema.v2}"
+[ "$SCHEMA" = "bar_tensor_schema.v2" ] || { echo "Only bar_tensor_schema.v2 is supported." >&2; exit 2; }
 [ -n "$RUN_ID" ] || RUN_ID="${NAME}-${SCHEMA##*.}-r001"
-VERSION_DIR="v1"; [ "$SCHEMA" = "bar_tensor_schema.v2" ] && VERSION_DIR="v2"
-ENCODE_DIR="${OUTPUT_DIR}/models/${NAME}/encoded/${VERSION_DIR}/${RUN_ID}"
+ENCODE_DIR="${OUTPUT_DIR}/models/${NAME}/encoded/${RUN_ID}"
 
 if [ ! -d "$DATA_DIR" ]; then
     echo "Error: dataset '${NAME}' not found at ${DATA_DIR}"

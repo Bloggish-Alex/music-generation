@@ -25,7 +25,7 @@ class MusicParserConfig:
     """Configuration for symbolic music parsing."""
 
     quantize_input: bool = True
-    quantize_divisors: tuple[int, ...] = (4, 3)
+    quantize_divisors: tuple[int, ...] = (4,)
     quantize_offsets: bool = True
     quantize_durations: bool = True
     hard_safety_limit: int = 48
@@ -40,7 +40,7 @@ class MusicParserConfig:
         section = ConfigView(config).section("music_parser")
         return cls(
             quantize_input=bool(section.get("quantize_input", True)),
-            quantize_divisors=tuple(int(x) for x in section.get("quantize_divisors", [4, 3])),
+            quantize_divisors=tuple(int(x) for x in section.get("quantize_divisors", [4])),
             quantize_offsets=bool(section.get("quantize_offsets", True)),
             quantize_durations=bool(section.get("quantize_durations", True)),
             hard_safety_limit=int(section.get("hard_safety_limit", 48)),
@@ -126,8 +126,8 @@ class MusicDirectoryParser:
             self._tag_source_events(score)
             source_events = self._all_event_boundaries(score)
             score = self._quantize_score(score)
-            quantization_audit = self._quantization_audit(source_events, self._all_event_boundaries(score))
             spans = extract_measure_spans(score)
+            quantization_audit = self._quantization_audit(source_events, self._all_event_boundaries(score), spans)
             raw_tracks = self._collect_tracks(score)
             if not raw_tracks:
                 raise ValueError("No note events found.")
@@ -137,7 +137,7 @@ class MusicDirectoryParser:
             song_id=f"{path.stem}{tune_suffix}{suffix}",
             file_path=str(path),
             form=metadata.get("form"),
-            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root), "tune_index": tune_index, "parser_measure_count": len(spans), "track_retention": dict(self.track_retention_events[-1]), "performance_controls": {"tempo_bpm": list(controls.tempo_bpm), "key_signature": controls.key_signature, "key_confidence": controls.key_confidence, "cc64_available": controls.cc64.cc64_available, "cc64_intervals_ql": [list(interval) for interval in controls.cc64.cc64_intervals], "cc64_unavailable_reason": controls.cc64.unavailable_reason}, "quantization_audit": quantization_audit},
+            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root), "tune_index": tune_index, "opus_tune_count": len(tunes), "parser_measure_count": len(spans), "track_retention": dict(self.track_retention_events[-1]), "performance_controls": {"tempo_bpm": list(controls.tempo_bpm), "key_signature": controls.key_signature, "key_confidence": controls.key_confidence, "cc64_available": controls.cc64.cc64_available, "cc64_intervals_ql": [list(interval) for interval in controls.cc64.cc64_intervals], "cc64_unavailable_reason": controls.cc64.unavailable_reason}, "quantization_audit": quantization_audit},
             )
             for bar_index, span in enumerate(spans):
                 bar = self._build_bar(song, raw_tracks, bar_index, span, len(spans))
@@ -215,7 +215,7 @@ class MusicDirectoryParser:
         return [(index, self._collect_events(part)) for index, part in enumerate(parts)] if parts else [(0, self._collect_events(score))]
 
     @staticmethod
-    def _quantization_audit(source: Dict[tuple[str, int], tuple[float, float]], quantized: Dict[tuple[str, int], tuple[float, float]]) -> Dict[str, Any]:
+    def _quantization_audit(source: Dict[tuple[str, int], tuple[float, float]], quantized: Dict[tuple[str, int], tuple[float, float]], spans: Sequence[MeasureSpan] = ()) -> Dict[str, Any]:
         if set(source) != set(quantized):
             raise ValueError("quantization_event_identity_mismatch")
         onset = [abs(quantized[key][0] - source[key][0]) for key in sorted(source)]
@@ -223,7 +223,12 @@ class MusicDirectoryParser:
         def summary(values: List[float]) -> Dict[str, float]:
             ordered = sorted(values)
             return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
-        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "event_count": len(onset), "nonzero_residual_count": sum(value > 1e-9 for value in onset + end), "onset_residual_ql": summary(onset), "end_residual_ql": summary(end)}
+        by_meter: Dict[str, Dict[str, List[float]]] = {}
+        for key in sorted(source):
+            start, source_end = source[key]; meter = next((span.time_signature for span in spans if span.start_ql <= start < span.end_ql), "UNMAPPED")
+            bucket = by_meter.setdefault(meter, {"onset": [], "end": []})
+            bucket["onset"].append(abs(quantized[key][0] - start)); bucket["end"].append(abs(quantized[key][1] - source_end))
+        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "event_count": len(onset), "nonzero_residual_count": sum(value > 1e-9 for value in onset + end), "onset_residual_ql": summary(onset), "end_residual_ql": summary(end), "by_meter": {meter: {"event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"]), "onset_residual_samples_ql": values["onset"], "end_residual_samples_ql": values["end"]} for meter, values in by_meter.items()}}
 
     def _element_pitches(self, element: Any) -> List[int]:
         """Extract MIDI pitches from a note or chord element."""

@@ -68,7 +68,7 @@ class JsonNpzCodecFidelityV2RawCapture:
 
     def capture(self, request: CodecFidelityV2RawCaptureRequest) -> CodecFidelityRawCaptureResult:
         encoded_dir = Path(request.encoded_dir)
-        arrays_path, index_path, manifest_path = (encoded_dir / "codec_v2_arrays.npz", encoded_dir / "bar_tensor_index.json", encoded_dir / "encoding_manifest.json")
+        arrays_path, index_path, manifest_path = (encoded_dir / "voice_tensors.npz", encoded_dir / "bar_tensor_index.json", encoded_dir / "encoding_manifest.json")
         if not all(path.is_file() for path in (arrays_path, index_path, manifest_path)):
             return self._unavailable_all(request, "V2 canonical encoding artifacts are unavailable")
         try:
@@ -79,15 +79,22 @@ class JsonNpzCodecFidelityV2RawCapture:
                 raise ValueError("V2 manifest row_count does not match bar_tensor_index rows")
             if any(not isinstance(row, Mapping) or type(row.get("row")) is not int or row["row"] != position for position, row in enumerate(rows)):
                 raise ValueError("V2 bar_tensor_index rows must be unique contiguous canonical row positions")
-            if manifest.get("arrays", {}).get("sha256") != _sha256(arrays_path):
-                raise ValueError("V2 manifest arrays.sha256 does not match codec_v2_arrays.npz")
+            arrays_manifest = manifest.get("arrays", {})
+            if arrays_manifest.get("path") != arrays_path.name or arrays_manifest.get("sha256") != _sha256(arrays_path):
+                raise ValueError("V2 manifest arrays.sha256 does not match voice_tensors.npz")
             if manifest.get("index", {}).get("sha256") != _sha256(index_path):
                 raise ValueError("V2 manifest index.sha256 does not match bar_tensor_index.json")
+            policy = manifest.get("slot_grid_policy", {})
+            if policy != {"quantum_ql": 0.25, "capacity": 48, "epsilon_ql": 1e-6}:
+                raise ValueError("V2 manifest slot_grid_policy is not canonical")
             with np.load(arrays_path, allow_pickle=False) as archive:
-                values = {name: np.asarray(archive[name]) for name in ("voice_tensors", "bar_contexts", "base_pitches", "base_pitch_valid")}
+                values = {name: np.asarray(archive[name]) for name in ("voice_tensors", "slot_valid_mask", "slot_durations_ql", "bar_contexts", "base_pitches", "base_pitch_valid")}
             count = len(rows)
-            if any(array.shape[0] != count for array in values.values()) or values["voice_tensors"].shape[1:] != (18, 16, 6) or values["bar_contexts"].shape[1:] != (12,) or not np.isfinite(values["voice_tensors"]).all() or not np.isfinite(values["bar_contexts"]).all():
+            if any(array.shape[0] != count for array in values.values()) or values["voice_tensors"].shape[1:] != (18, 48, 6) or values["slot_valid_mask"].shape[1:] != (48,) or values["slot_durations_ql"].shape[1:] != (48,) or values["bar_contexts"].shape[1:] != (12,) or not np.isfinite(values["voice_tensors"]).all() or not np.isfinite(values["slot_durations_ql"]).all() or not np.isfinite(values["bar_contexts"]).all():
                 raise ValueError("V2 arrays are non-finite or misaligned")
+            masks = values["slot_valid_mask"]; durations = values["slot_durations_ql"]
+            if any(not np.array_equal(mask, np.r_[np.ones(int(mask.sum()), dtype=bool), np.zeros(48 - int(mask.sum()), dtype=bool)]) for mask in masks) or np.any(durations[~masks] != 0) or np.any(durations[masks] <= 0) or np.any(durations[masks] > 0.25 + 1e-6):
+                raise ValueError("V2 slot_valid_mask or slot_durations_ql violates canonical grid invariants")
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
             return self._unavailable_all(request, str(error))
         groups: dict[str, list[int]] = {"train": [], "validation": [], "excluded_unpaired": []}
@@ -118,10 +125,19 @@ class JsonNpzCodecFidelityV2RawCapture:
                 unavailable[split] = alignment_error
                 observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
                 self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, alignment_error)); statuses[split] = status_path; continue
+            duration_error = next((
+                "slot_durations_ql does not equal the aligned source bar length"
+                for position in positions
+                if not math.isclose(float(values["slot_durations_ql"][position].sum()), float(source_bars[(str(rows[position].get("song_id")), int(rows[position].get("source_bar_index", -1)))]["bar_length_ql"]), abs_tol=1.0e-6)
+            ), None)
+            if duration_error is not None:
+                unavailable[split] = duration_error
+                observation_path.unlink(missing_ok=True); split_arrays_path.unlink(missing_ok=True)
+                self._write_json(status_path, self._status(request, split, "UNAVAILABLE", {}, duration_error)); statuses[split] = status_path; continue
             selected = np.asarray(positions, dtype=np.int64)
             np.savez_compressed(split_arrays_path, **{name: value[selected] for name, value in values.items()})
             alignment = [{**rows[position], "tensor_row": local_row} for local_row, position in enumerate(positions)]
-            observation = {"schema_version": RAW_OBSERVATION_V2_SCHEMA_VERSION, "dataset": {"identity": request.dataset_identity, "content_sha256": request.dataset_content_sha256, "split": split, "split_unit": "base_song_id"}, "arrays": {"path": split_arrays_path.name, "sha256": _sha256(split_arrays_path), "names": {name: {"dtype": str(value[selected].dtype), "shape": list(value[selected].shape)} for name, value in values.items()}}, "encoding_manifest": {"path": manifest_path.name, "sha256": _sha256(manifest_path)}, "bar_tensor_index": {"path": index_path.name, "sha256": _sha256(index_path)}, "source_raw": {"path": source_ref.name, "sha256": _sha256(source_ref)}, "tensor_schema": {"schema_version": "bar_tensor_schema.v2", "voice_names": manifest.get("voice_names"), "feature_names": manifest.get("feature_names")}, "alignment": alignment, "availability": {"voice_tensors": True, "bar_contexts": True, "base_pitches": True, "base_pitch_valid": True, "row_alignment": True, "source_raw_reference": True}}
+            observation = {"schema_version": RAW_OBSERVATION_V2_SCHEMA_VERSION, "dataset": {"identity": request.dataset_identity, "content_sha256": request.dataset_content_sha256, "split": split, "split_unit": "base_song_id"}, "arrays": {"path": split_arrays_path.name, "sha256": _sha256(split_arrays_path), "names": {name: {"dtype": str(value[selected].dtype), "shape": list(value[selected].shape)} for name, value in values.items()}}, "encoding_manifest": {"path": manifest_path.name, "sha256": _sha256(manifest_path)}, "bar_tensor_index": {"path": index_path.name, "sha256": _sha256(index_path)}, "source_raw": {"path": source_ref.name, "sha256": _sha256(source_ref)}, "tensor_schema": {"schema_version": "bar_tensor_schema.v2", "voice_names": manifest.get("voice_names"), "feature_names": manifest.get("feature_names"), "slot_grid_policy": policy}, "alignment": alignment, "availability": {"voice_tensors": True, "slot_valid_mask": True, "slot_durations_ql": True, "bar_contexts": True, "base_pitches": True, "base_pitch_valid": True, "row_alignment": True, "source_raw_reference": True}}
             self._write_json(observation_path, observation); artifacts[split] = observation_path
             self._write_json(status_path, self._status(request, split, "AVAILABLE", {"observation": observation_path, "arrays": split_arrays_path}, None)); statuses[split] = status_path
         return CodecFidelityRawCaptureResult(artifacts, unavailable, statuses)
@@ -513,6 +529,9 @@ def _source_bar_index(
         for bar in bars:
             if not isinstance(bar, Mapping) or not isinstance(bar.get("bar_index"), int):
                 return None, "dataset_tonality raw source bar observations are incomplete"
+            bar_length_ql = bar.get("bar_length_ql")
+            if not isinstance(bar_length_ql, (int, float)) or not math.isfinite(float(bar_length_ql)) or float(bar_length_ql) <= 0:
+                return None, "dataset_tonality raw source bar_length_ql is invalid"
             key = (song_id, int(bar["bar_index"]))
             if key in result:
                 return None, "dataset_tonality raw source repeats a song_id/bar_index observation"
@@ -547,6 +566,7 @@ def _source_bar_index(
             result[key] = {
                 "base_song_id": base_song_id,
                 "applied_transpose_semitones": transpose,
+                "bar_length_ql": float(bar_length_ql),
             }
     return result, ""
 
