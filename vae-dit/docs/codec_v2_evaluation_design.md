@@ -6,3 +6,7 @@ Evaluation uses the existing framework. `AVAILABLE` requires aligned manifest, i
 `form_action_alignment` searches for RETURN immediately after the opening
 anchor window. It does not wait for the midpoint of the song, so middle and
 late thematic recurrences are both detectable.
+
+Quantization residual samples are stored only in
+`quantization_residual_samples.v2.npz`; `songs.json` retains per-song/per-meter
+summary counts and p95/max values, never sample lists.

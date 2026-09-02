@@ -1,1 +1,34 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","status","run","dataset","availability"],"properties":{"schema_version":{"const":"quantization_audit_raw_observation.v2"},"status":{"enum":["AVAILABLE","UNAVAILABLE"]},"run":{"$ref":"#/$defs/run"},"dataset":{"$ref":"#/$defs/dataset"},"availability":{"type":"object","required":["raw_capture","source_boundaries"],"properties":{"raw_capture":{"type":"boolean"},"source_boundaries":{"type":"boolean"}}},"grid_policy":{"type":"object","required":["quantum_ql","epsilon_ql","capacity"]},"by_file_meter":{"type":"array","items":{"type":"object","required":["source_file_identity","meter","event_count","nonzero_residual_count","onset_residual_ql","end_residual_ql"],"properties":{"source_file_identity":{"type":"string","minLength":1},"meter":{"type":"string","pattern":"^[0-9]+/[0-9]+$"},"event_count":{"type":"integer","minimum":0},"nonzero_residual_count":{"type":"integer","minimum":0},"onset_residual_ql":{"$ref":"#/$defs/residual"},"end_residual_ql":{"$ref":"#/$defs/residual"}}}},"unavailable_reasons":{"type":"array"}},"allOf":[{"if":{"properties":{"status":{"const":"AVAILABLE"}}},"then":{"required":["grid_policy","by_file_meter"],"properties":{"availability":{"properties":{"raw_capture":{"const":true},"source_boundaries":{"const":true}}}}}},{"if":{"properties":{"status":{"const":"UNAVAILABLE"}}},"then":{"required":["unavailable_reasons"],"properties":{"availability":{"properties":{"raw_capture":{"const":false}}}}}}],"$defs":{"run":{"type":"object","required":["encoding_manifest_sha256","bar_tensor_index_sha256","tensor_schema_version"],"properties":{"encoding_manifest_sha256":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"bar_tensor_index_sha256":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"tensor_schema_version":{"const":"bar_tensor_schema.v2"}}},"dataset":{"type":"object","required":["identity","content_sha256"]},"residual":{"type":"object","required":["max","p95"],"properties":{"max":{"type":"number","minimum":0},"p95":{"type":"number","minimum":0}}}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codec V2 quantization audit raw observation",
+  "type": "object",
+  "required": ["schema_version", "status", "run", "dataset", "availability"],
+  "properties": {
+    "schema_version": {"const": "quantization_audit_raw_observation.v2"},
+    "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+    "run": {"$ref": "#/$defs/run"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "availability": {"$ref": "#/$defs/availability"},
+    "grid_policy": {"$ref": "#/$defs/gridPolicy"},
+    "by_file_meter": {"type": "array", "items": {"$ref": "#/$defs/fileMeter"}},
+    "residual_samples": {"$ref": "#/$defs/residualSamples"},
+    "unavailable_reasons": {"type": "array", "items": {"$ref": "#/$defs/reason"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "AVAILABLE"}}}, "then": {"required": ["grid_policy", "by_file_meter", "residual_samples", "unavailable_reasons"], "properties": {"availability": {"properties": {"raw_capture": {"const": true}, "source_boundaries": {"const": true}, "residual_samples": {"const": true}}}, "unavailable_reasons": {"maxItems": 0}}}},
+    {"if": {"properties": {"status": {"const": "UNAVAILABLE"}}}, "then": {"required": ["unavailable_reasons"], "properties": {"availability": {"properties": {"raw_capture": {"const": false}, "source_boundaries": {"const": false}, "residual_samples": {"const": false}}}}}}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "run": {"type": "object", "required": ["encoding_manifest_sha256", "bar_tensor_index_sha256", "tensor_schema_version"], "properties": {"encoding_manifest_sha256": {"$ref": "#/$defs/sha256"}, "bar_tensor_index_sha256": {"$ref": "#/$defs/sha256"}, "tensor_schema_version": {"const": "bar_tensor_schema.v2"}}, "additionalProperties": false},
+    "dataset": {"type": "object", "required": ["identity", "content_sha256"], "properties": {"identity": {"type": "string", "minLength": 1}, "content_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}}, "additionalProperties": false},
+    "availability": {"type": "object", "required": ["raw_capture", "source_boundaries", "residual_samples"], "properties": {"raw_capture": {"type": "boolean"}, "source_boundaries": {"type": "boolean"}, "residual_samples": {"type": "boolean"}}, "additionalProperties": false},
+    "gridPolicy": {"type": "object", "required": ["quantum_ql", "epsilon_ql", "capacity"], "properties": {"quantum_ql": {"const": 0.25}, "epsilon_ql": {"const": 0.000001}, "capacity": {"const": 48}}, "additionalProperties": false},
+    "residual": {"type": "object", "required": ["max", "p95"], "properties": {"max": {"type": "number", "minimum": 0}, "p95": {"type": "number", "minimum": 0}}, "additionalProperties": false},
+    "fileMeter": {"type": "object", "required": ["source_file_identity", "meter", "event_count", "nonzero_residual_count", "onset_residual_ql", "end_residual_ql"], "properties": {"source_file_identity": {"type": "string", "minLength": 1}, "meter": {"type": "string", "pattern": "^[1-9][0-9]*/[1-9][0-9]*$"}, "event_count": {"type": "integer", "minimum": 0}, "nonzero_residual_count": {"type": "integer", "minimum": 0}, "onset_residual_ql": {"$ref": "#/$defs/residual"}, "end_residual_ql": {"$ref": "#/$defs/residual"}}, "additionalProperties": false},
+    "arrayDescriptor": {"type": "object", "required": ["dtype", "shape"], "properties": {"dtype": {"type": "string", "minLength": 1}, "shape": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1, "maxItems": 1}}, "additionalProperties": false},
+    "residualSamples": {"type": "object", "required": ["path", "sha256", "arrays"], "properties": {"path": {"const": "quantization_residual_samples.v2.npz"}, "sha256": {"$ref": "#/$defs/sha256"}, "arrays": {"type": "object", "required": ["source_file_identities", "meters", "group_offsets", "onset_residuals_ql", "end_residuals_ql"], "properties": {"source_file_identities": {"$ref": "#/$defs/arrayDescriptor"}, "meters": {"$ref": "#/$defs/arrayDescriptor"}, "group_offsets": {"allOf": [{"$ref": "#/$defs/arrayDescriptor"}, {"properties": {"dtype": {"const": "int64"}}}]}, "onset_residuals_ql": {"allOf": [{"$ref": "#/$defs/arrayDescriptor"}, {"properties": {"dtype": {"const": "float32"}}}]}, "end_residuals_ql": {"allOf": [{"$ref": "#/$defs/arrayDescriptor"}, {"properties": {"dtype": {"const": "float32"}}}]}}, "additionalProperties": false}}, "additionalProperties": false},
+    "reason": {"type": "object", "required": ["field", "reason"], "properties": {"field": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

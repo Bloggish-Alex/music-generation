@@ -124,6 +124,13 @@ class MusicDirectoryParser:
             score = self._quantize_score(score)
             spans = extract_measure_spans(score)
             quantization_audit = self._quantization_audit(source_events, self._all_event_boundaries(score), spans)
+            residual_samples = {
+                meter: {
+                    "onset_residual_samples_ql": values.pop("onset_residual_samples_ql"),
+                    "end_residual_samples_ql": values.pop("end_residual_samples_ql"),
+                }
+                for meter, values in quantization_audit["by_meter"].items()
+            }
             raw_tracks, track_retention = self._collect_tracks(score)
             if not raw_tracks:
                 raise ValueError("No note events found.")
@@ -135,6 +142,7 @@ class MusicDirectoryParser:
             form=metadata.get("form"),
             metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root), "tune_index": tune_index, "opus_tune_count": len(tunes), "parser_measure_count": len(spans), "track_retention": track_retention, "performance_controls": {"tempo_bpm": list(controls.tempo_bpm), "key_signature": controls.key_signature, "key_confidence": controls.key_confidence, "cc64_available": controls.cc64.cc64_available, "cc64_intervals_ql": [list(interval) for interval in controls.cc64.cc64_intervals], "cc64_unavailable_reason": controls.cc64.unavailable_reason}, "quantization_audit": quantization_audit},
             )
+            song.runtime_diagnostics["quantization_residual_samples"] = residual_samples
             for bar_index, span in enumerate(spans):
                 bar = self._build_bar(song, raw_tracks, bar_index, span, len(spans))
                 self._assign_form_section(bar, metadata)
@@ -156,7 +164,7 @@ class MusicDirectoryParser:
         )
 
     def _collect_tracks(self, score: stream.Score) -> tuple[List[tuple[int, List[tuple[float, float, int, int, int]]]], Dict[str, Any]]:
-        """Collect note events per music21 part, with register splitting fallback."""
+        """Collect retained physical-part events and their explicit retention record."""
         parts = list(score.parts) if getattr(score, "parts", None) else []
         if len(parts) > 1:
             tracks = [(index, self._collect_events(part)) for index, part in enumerate(parts)]

@@ -116,6 +116,7 @@ class SongRecord:
     file_path: str
     form: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    runtime_diagnostics: Dict[str, Any] = field(default_factory=dict, repr=False)
     bars: List[BarRecord] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
