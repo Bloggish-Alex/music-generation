@@ -8,8 +8,6 @@ music_parser:
   quantize_durations: true
   hard_safety_limit: 48
   track_retention_policy: error
-  register_split_low_max: 55
-  register_split_mid_max: 72
   default_velocity: 64
 
 bar_tensor:

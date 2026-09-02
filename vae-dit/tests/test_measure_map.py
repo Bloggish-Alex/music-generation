@@ -43,8 +43,9 @@ def test_measure_map_rejects_part_mismatch() -> None:
 def test_single_part_retains_physical_track_zero_and_duplicate_audit_ids() -> None:
     parser = MusicDirectoryParser(MusicParserConfig())
     score = _score("4/4", 4.0)
-    tracks = parser._collect_tracks(score)
+    tracks, retention = parser._collect_tracks(score)
     assert [physical for physical, _ in tracks] == [0]
+    assert retention["policy"] == "retain_all"
     source = {(0, 0): (0.13, 0.88), (0, 1): (0.13, 0.88)}
     quantized = {(0, 0): (0.25, 1.0), (0, 1): (0.0, 0.75)}
     audit = parser._quantization_audit(source, quantized)
@@ -60,7 +61,7 @@ def test_quantized_parser_path_preserves_source_ids_through_reordering_and_chord
     quantized = parser._quantize_score(score)
     after = parser._all_event_boundaries(quantized)
     assert set(before) == set(after) and len(after) == 4
-    tracks = parser._collect_tracks(quantized)
+    tracks, _ = parser._collect_tracks(quantized)
     song = SongRecord("fixture", "fixture.mid", metadata={"source_file_identity": "file"})
     bar = parser._build_bar(song, tracks, 0, MeasureSpan(0, 0.0, 4.0, "4/4", 4, 4), 1)
     identifiers = [f"{item.physical_track_index}:{item.source_note_ordinal}" for track in bar.tracks for item in track.notes]
@@ -73,6 +74,6 @@ def test_track_retention_defaults_to_error_and_records_explicit_truncation() -> 
     with pytest.raises(ValueError, match="track_limit_exceeded"):
         failing._select_tracks(tracks)
     truncating = MusicDirectoryParser(MusicParserConfig(hard_safety_limit=2, track_retention_policy="truncate"))
-    assert len(truncating._select_tracks(tracks)) == 2
-    event = truncating.track_retention_events[-1]
+    selected, event = truncating._select_tracks(tracks)
+    assert len(selected) == 2
     assert event["dropped_part_count"] == 1 and event["dropped_note_count"] == 1
