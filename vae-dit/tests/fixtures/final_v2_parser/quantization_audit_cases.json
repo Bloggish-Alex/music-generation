@@ -1,0 +1,1 @@
+[{"name":"exact_boundary","onset_residual_ql":0.0,"end_residual_ql":0.0},{"name":"residual_monitor","source_onset_ql":1.13,"source_end_ql":1.88,"quantized_onset_ql":1.25,"quantized_end_ql":2.0,"onset_residual_ql":0.12,"end_residual_ql":0.12,"classification":"MONITOR"}]
