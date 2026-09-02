@@ -8,13 +8,14 @@ import hashlib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import numpy as np
 
 from codec.action_labeler import ActionLabeler
 from codec.bar_feature_extractor import BarFeatureExtractor, EncodedBarFeatureStore, V2_BAR_FEATURE_NAMES
 from codec.bar_tensor_codec_factory import BarTensorCodecFactory
+from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
 from data.core import BarTensorRecord, SongRecord
 from data.music_parser import MusicDirectoryParser
 from diagnostics.diagnostics import DiagnosticsBase
@@ -113,11 +114,11 @@ class EncodingPipeline:
             )
         )
 
-    def _encode_tensors(self, codec: Any, songs: List[SongRecord]) -> List[BarTensorRecord]:
+    def _encode_tensors(self, codec: SemanticHarmonySetCodec, songs: List[SongRecord]) -> List[BarTensorRecord]:
         """Encode every parsed bar with diagnostics."""
         records: List[BarTensorRecord] = []
         for song in songs:
-            records.extend(codec.encode_song(song) if hasattr(codec, "encode_song") else [codec.encode(bar) for bar in song.bars])
+            records.extend(codec.encode_song(song))
         return records
 
     def _write_outputs(

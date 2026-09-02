@@ -50,10 +50,12 @@ class SemanticHarmonySetCodec:
         return cls(SemanticHarmonySetConfig.from_config(config))
 
     def encode_song(self, song: SongRecord) -> list[BarTensorRecord]:
+        """Canonical sequence API; preserves continuity across adjacent bars."""
         state = SemanticCodecSequenceState()
         return [self.encode(bar, state) for bar in song.bars]
 
     def encode(self, bar: BarRecord, state: SemanticCodecSequenceState | None = None) -> BarTensorRecord:
+        """Encode one independent bar; callers must not loop it for a multi-bar song."""
         notes = [note for track in bar.tracks for note in track.notes]
         base_pitch = bass_anchor_pitch(notes)
         grid = SlotGrid.for_bar(float(bar.bar_length_ql))
