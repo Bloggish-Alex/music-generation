@@ -98,16 +98,15 @@ def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict
     active=(voices[...,2]>.5)|(voices[...,3]>.5); melody=active[:,0]; bass=active[:,17]; harmony=active[:,1:17]
     pitches=np.rint(bases[:,None,None]+voices[...,0]*24.0)
     harmony_counts=harmony.sum(axis=(1,2)); empty=(~active.any(axis=(1,2))).sum()
-    source_events=[]; tensor_events=[]; source_register=[]; tensor_register=[]; source_context=[]; tensor_context=[]; unpaired=0; melody_exact=[]; bass_exact=[]; harmony_source=[]; harmony_tensor=[]; harmony_state_source=[]; harmony_state_tensor=[]; cardinality_errors=[]; cardinality_exact=[]
+    source_register=[]; tensor_register=[]; source_context=[]; tensor_context=[]; source_lane_chroma=np.zeros(12); tensor_lane_chroma=np.zeros(12); unpaired=0; melody_exact=[]; bass_exact=[]; harmony_source=[]; harmony_tensor=[]; harmony_state_source=[]; harmony_state_tensor=[]; cardinality_errors=[]; cardinality_exact=[]; non_empty_slot_f1=[]; empty_slot_exact=[]
     for row in obs.get("alignment",[]):
         index=int(row["tensor_row"]); bar=bars.get((str(row["song_id"]), int(row["source_bar_index"])))
         if bar is None: unpaired+=1; continue
-        notes=bar.get("notes", []); source_events.extend(int(note["pitch"]) for note in notes)
-        tensor_events.extend(int(value) for value in pitches[index][active[index]])
+        notes=bar.get("notes", [])
         if valid[index]:
             base=int(bases[index]); expected=np.zeros(12)
             for note in notes: expected[(int(note["pitch"])-base)%12]+=max(0.,float(note.get("duration_ql",0.)))*float(note.get("velocity",0))/127.
-            source_context.append(_norm(expected)); tensor_context.append(_norm(contexts[index])); source_register.extend(int(note["pitch"]) for note in notes); tensor_register.extend(pitches[index][active[index]].tolist())
+            source_context.append(_norm(expected)); tensor_context.append(_norm(contexts[index]))
         slots=int(voices.shape[2]); slot_length=float(bar.get("bar_length_ql", 4.0))/slots; previous_source_melody=None
         for slot in range(slots):
             start,end=slot*slot_length,(slot+1)*slot_length
@@ -124,9 +123,24 @@ def _measure_v2(resolver:VerifiedArtifactResolver,status:Mapping[str,Any])->dict
             tensor_state=[(int(pitches[index,lane,slot]), "onset" if voices[index,lane,slot,2]>.5 else "hold") for lane in range(1,17) if active[index,lane,slot]]
             harmony_source.extend(item[0] for item in source_state); harmony_tensor.extend(item[0] for item in tensor_state); harmony_state_source.extend(source_state); harmony_state_tensor.extend(tensor_state)
             cardinality_errors.append(abs(len(source_state)-len(tensor_state))); cardinality_exact.append(len(source_state)==len(tensor_state))
+            source_empty, tensor_empty = not source_state, not tensor_state
+            empty_slot_exact.append(source_empty and tensor_empty)
+            if not source_empty or not tensor_empty:
+                non_empty_slot_f1.append(_multiset_f1(source_state, tensor_state)[2])
+            source_assigned=[note for note in (source_melody, *source_harmony, source_bass) if note is not None]
+            for note in source_assigned:
+                weight=slot_length*max(0.0,min(float(note.get("velocity",0)),127.0))/127.0
+                source_lane_chroma[int(note["pitch"])%12]+=weight
+                source_register.append((int(note["pitch"]),weight))
+            for lane in range(18):
+                if active[index,lane,slot]:
+                    pitch=int(pitches[index,lane,slot]); weight=slot_length*max(0.0,float(voices[index,lane,slot,4]))
+                    tensor_lane_chroma[pitch%12]+=weight
+                    tensor_register.append((pitch,weight))
     precision,recall,f1=_multiset_f1(harmony_source,harmony_tensor); state_precision,state_recall,state_f1=_multiset_f1(harmony_state_source,harmony_state_tensor)
     cosine=[float(np.dot(a,b)/(max(np.linalg.norm(a)*np.linalg.norm(b),1e-8))) for a,b in zip(source_context,tensor_context)]
-    return {"dataset":obs["dataset"],"bar_count":int(len(voices)),"schema_version":"bar_tensor_schema.v2","melody":{"active_slot_count":int(melody.sum()),"exact_pitch_state_rate":float(np.mean(melody_exact)) if melody_exact else "UNAVAILABLE"},"bass":{"active_slot_count":int(bass.sum()),"exact_pitch_state_rate":float(np.mean(bass_exact)) if bass_exact else "UNAVAILABLE"},"harmony":{"active_event_count":int(harmony.sum()),"cardinality_mean":float(harmony_counts.mean()) if len(harmony_counts) else 0.,"cardinality_max":int(harmony_counts.max()) if len(harmony_counts) else 0.,"cardinality_exact_rate":float(np.mean(cardinality_exact)) if cardinality_exact else "UNAVAILABLE","cardinality_mae":float(np.mean(cardinality_errors)) if cardinality_errors else "UNAVAILABLE","pitch_multiset_precision":precision,"pitch_multiset_recall":recall,"pitch_multiset_f1":f1,"pitch_state_multiset_precision":state_precision,"pitch_state_multiset_recall":state_recall,"pitch_state_multiset_f1":state_f1},"context_chroma":{"cosine_mean":float(np.mean(cosine)) if cosine else "UNAVAILABLE"},"register":{"source_median":_median(source_register),"tensor_median":_median(tensor_register),"median_gap_semitones":_median(tensor_register)-_median(source_register),"anchorless_row_count":int((~valid).sum())},"counts":{"empty_row_count":int(empty),"unpaired_row_count":int(unpaired)}}
+    source_median=_weighted_median(source_register); tensor_median=_weighted_median(tensor_register)
+    return {"dataset":obs["dataset"],"bar_count":int(len(voices)),"schema_version":"bar_tensor_schema.v2","melody":{"active_slot_count":int(melody.sum()),"exact_pitch_state_rate":float(np.mean(melody_exact)) if melody_exact else "UNAVAILABLE"},"bass":{"active_slot_count":int(bass.sum()),"exact_pitch_state_rate":float(np.mean(bass_exact)) if bass_exact else "UNAVAILABLE"},"harmony":{"active_event_count":int(harmony.sum()),"cardinality_mean":float(harmony_counts.mean()) if len(harmony_counts) else 0.,"cardinality_max":int(harmony_counts.max()) if len(harmony_counts) else 0.,"cardinality_exact_rate":float(np.mean(cardinality_exact)) if cardinality_exact else "UNAVAILABLE","cardinality_mae":float(np.mean(cardinality_errors)) if cardinality_errors else "UNAVAILABLE","empty_slot_exact_rate":float(np.mean(empty_slot_exact)) if empty_slot_exact else "UNAVAILABLE","non_empty_slot_macro_f1":float(np.mean(non_empty_slot_f1)) if non_empty_slot_f1 else "UNAVAILABLE","pitch_multiset_precision":precision,"pitch_multiset_recall":recall,"pitch_multiset_f1":f1,"pitch_state_multiset_precision":state_precision,"pitch_state_multiset_recall":state_recall,"pitch_state_multiset_f1":state_f1},"context_chroma":{"cosine_mean":float(np.mean(cosine)) if cosine else "UNAVAILABLE"},"lane_chroma":{"cosine":_cosine(source_lane_chroma,tensor_lane_chroma)},"register":{"source_median":source_median,"tensor_median":tensor_median,"median_gap_semitones":tensor_median-source_median if isinstance(source_median,float) and isinstance(tensor_median,float) else "UNAVAILABLE","anchorless_row_count":int((~valid).sum())},"counts":{"empty_row_count":int(empty),"unpaired_row_count":int(unpaired)}}
 
 def _multiset_f1(source, tensor):
     from collections import Counter
@@ -138,6 +152,19 @@ def _norm(x):return x/max(float(np.sum(x)),1e-8)
 def _median(x):
     values=np.asarray(x)
     return float(np.median(values)) if values.size else 0.0
+def _weighted_median(values):
+    if not values:return "UNAVAILABLE"
+    ordered=sorted((float(pitch),float(weight)) for pitch,weight in values if weight>0)
+    if not ordered:return "UNAVAILABLE"
+    threshold=sum(weight for _,weight in ordered)/2; total=0.0
+    for pitch,weight in ordered:
+        total+=weight
+        if total>=threshold:return pitch
+    return ordered[-1][0]
+def _cosine(left,right):
+    if not left.sum() and not right.sum():return 1.0
+    if not left.sum() or not right.sum():return 0.0
+    return float(np.dot(left,right)/(np.linalg.norm(left)*np.linalg.norm(right)))
 def _png(profiles):
     try:
         import matplotlib.pyplot as plt

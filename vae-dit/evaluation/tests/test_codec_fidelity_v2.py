@@ -45,10 +45,13 @@ def test_v2_measurement_uses_continuity_and_onset_hold_state(tmp_path) -> None:
         voices[0, lane, :4, 1] = 0.0
         voices[0, lane, 0, 2] = 1.0
         voices[0, lane, 1:4, 3] = 1.0
+    voices[0, 0, :4, 4] = 90 / 127.0
+    voices[0, 17, :4, 4] = 80 / 127.0
     voices[0, 1, 1:4, 0] = (78 - 60) / 24.0
     voices[0, 1, 1:4, 1] = 0.0
     voices[0, 1, 1, 2] = 1.0
     voices[0, 1, 2:4, 3] = 1.0
+    voices[0, 1, 1:4, 4] = 70 / 127.0
     arrays = public / "codec_fidelity__raw_arrays__train.v2.npz"
     np.savez_compressed(arrays, voice_tensors=voices, bar_contexts=np.zeros((1, 12), dtype=np.float32), base_pitches=np.asarray([60], dtype=np.int16), base_pitch_valid=np.asarray([True]))
     import hashlib
@@ -71,3 +74,6 @@ def test_v2_measurement_uses_continuity_and_onset_hold_state(tmp_path) -> None:
     metrics = result.report["metrics"]["splits"]["train"]
     assert metrics["melody"]["exact_pitch_state_rate"] == 1.0
     assert metrics["harmony"]["pitch_state_multiset_f1"] == 1.0
+    assert metrics["harmony"]["non_empty_slot_macro_f1"] == 1.0
+    assert np.isclose(metrics["lane_chroma"]["cosine"], 1.0)
+    assert metrics["register"]["median_gap_semitones"] == 0.0

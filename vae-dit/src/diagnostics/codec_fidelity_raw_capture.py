@@ -75,6 +75,10 @@ class JsonNpzCodecFidelityV2RawCapture:
             rows = json.loads(index_path.read_text(encoding="utf-8")); manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest.get("schema_version") != "bar_tensor_schema.v2" or not isinstance(rows, list):
                 raise ValueError("V2 manifest or index schema is invalid")
+            if manifest.get("arrays", {}).get("sha256") != _sha256(arrays_path):
+                raise ValueError("V2 manifest arrays.sha256 does not match codec_v2_arrays.npz")
+            if manifest.get("index", {}).get("sha256") != _sha256(index_path):
+                raise ValueError("V2 manifest index.sha256 does not match bar_tensor_index.json")
             with np.load(arrays_path, allow_pickle=False) as archive:
                 values = {name: np.asarray(archive[name]) for name in ("voice_tensors", "bar_contexts", "base_pitches", "base_pitch_valid")}
             count = len(rows)
@@ -492,6 +496,7 @@ def _source_bar_index(
     if not isinstance(songs, list):
         return None, "dataset_tonality raw source has no song observations"
     result: dict[tuple[str, int], Mapping[str, Any]] = {}
+    source_note_ids: set[str] = set()
     for song in songs:
         if not isinstance(song, Mapping):
             return None, "dataset_tonality raw source contains an invalid song observation"
@@ -507,6 +512,25 @@ def _source_bar_index(
             key = (song_id, int(bar["bar_index"]))
             if key in result:
                 return None, "dataset_tonality raw source repeats a song_id/bar_index observation"
+            notes = bar.get("notes")
+            if not isinstance(notes, list):
+                return None, "dataset_tonality raw source bar has no note observations"
+            for note in notes:
+                if not isinstance(note, Mapping):
+                    return None, "dataset_tonality raw source contains an invalid note observation"
+                physical_track_index = note.get("physical_track_index")
+                source_note_ordinal = note.get("source_note_ordinal")
+                source_note_id = note.get("source_note_id")
+                source_onset_ql = note.get("source_onset_ql")
+                if (
+                    not isinstance(physical_track_index, int) or physical_track_index < 0
+                    or not isinstance(source_note_ordinal, int) or source_note_ordinal < 0
+                    or not isinstance(source_note_id, str) or not source_note_id
+                    or not isinstance(source_onset_ql, (int, float)) or not math.isfinite(float(source_onset_ql)) or source_onset_ql < 0
+                    or source_note_id in source_note_ids
+                ):
+                    return None, "dataset_tonality raw source note identity is incomplete, invalid, or duplicated"
+                source_note_ids.add(source_note_id)
             result[key] = {
                 "base_song_id": base_song_id,
                 "applied_transpose_semitones": transpose,
