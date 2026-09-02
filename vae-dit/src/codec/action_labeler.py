@@ -174,7 +174,7 @@ class ActionLabeler:
             return
         anchor = np.mean(np.stack(vectors[:anchor_size], axis=0), axis=0)
         consecutive: List[int] = []
-        start_index = max(anchor_size, len(bars) // 2)
+        start_index = anchor_size
         for index in range(start_index, len(bars)):
             similarity = self.vectorizer.similarity(vectors[index], anchor)
             if similarity >= self.config.return_similarity_threshold:
