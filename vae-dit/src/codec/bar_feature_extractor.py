@@ -191,7 +191,9 @@ class EncodedBarFeatureStore:
         (self.encoded_dir / self.SUMMARY_FILE).write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return summary
 
-    def matrix_for_rows(self, rows: Sequence[Dict[str, Any]], fallback_tensor_file: str = "bar_tensors.npz") -> tuple[np.ndarray, Dict[str, Any]]:
+    def matrix_for_rows(self, rows: Sequence[Dict[str, Any]], fallback_tensor_file: str = "voice_tensors.npz") -> tuple[np.ndarray, Dict[str, Any]]:
+        """Reject legacy keyed-feature consumers; final V2 stores one row matrix."""
+        raise ValueError("Legacy keyed bar feature lookup is unsupported for bar_tensor_schema.v2; consume canonical bar_features.npz rows.")
         """Return [rows, 27] features, using cached artifacts or legacy fallback."""
         feature_path = self.encoded_dir / self.FEATURE_FILE
         if feature_path.exists():

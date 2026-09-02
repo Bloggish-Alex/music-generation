@@ -14,8 +14,6 @@ from typing import Any, Mapping, Protocol, Sequence
 
 import numpy as np
 
-from codec.bar_tensor_codec import FEATURE_NAMES
-from codec.semantic_bar_tensor_codec import SEMANTIC_FEATURE_NAMES, SEMANTIC_TRACK_NAMES
 from data.core import BarTensorRecord, SongRecord
 
 
@@ -165,9 +163,10 @@ class CodecFidelityRawCapture(Protocol):
 
 
 class JsonNpzCodecFidelityRawCapture:
-    """Write stable split tensors, schema and source alignment atomically."""
+    """Retired V1 capture entrypoint; legacy artifacts are never produced."""
 
     def capture(self, request: CodecFidelityRawCaptureRequest) -> CodecFidelityRawCaptureResult:
+        raise ValueError("Legacy codec-fidelity V1 capture is retired; use JsonNpzCodecFidelityV2RawCapture on canonical voice_tensors.npz.")
         song_by_id = self._song_by_id(request.songs)
         records_by_split = self._records_by_split(request, song_by_id)
         artifacts: dict[str, Path] = {}

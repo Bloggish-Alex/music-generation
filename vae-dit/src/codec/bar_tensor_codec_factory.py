@@ -6,8 +6,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from common.config_loader import ConfigView
-from codec.bar_tensor_codec import BarTensorCodec
-from codec.semantic_bar_tensor_codec import SemanticBarTensorCodec
 from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
 
 
@@ -18,11 +16,7 @@ class BarTensorCodecFactory:
     def create(config: Dict[str, Any]) -> Any:
         """Return a codec with an encode(bar) method."""
         section = ConfigView(config).section("bar_tensor")
-        backend = str(section.get("backend", "legacy_physical")).strip().lower()
-        if backend in {"legacy", "legacy_physical", "physical"}:
-            return BarTensorCodec.from_config(config)
-        if backend in {"semantic_3voice", "semantic", "melody_harmony_bass"}:
-            return SemanticBarTensorCodec.from_config(config)
-        if backend == "semantic_harmony_set_v2":
-            return SemanticHarmonySetCodec.from_config(config)
-        raise ValueError(f"Unsupported bar_tensor.backend: {backend}")
+        backend = str(section.get("backend", "")).strip().lower()
+        if backend != "semantic_harmony_set_v2":
+            raise ValueError("Only final Codec V2 backend semantic_harmony_set_v2 is supported; re-encode legacy artifacts.")
+        return SemanticHarmonySetCodec.from_config(config)

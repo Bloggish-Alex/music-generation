@@ -132,33 +132,9 @@ class EncodingPipeline:
             json.dumps([song.to_dict() for song in songs], indent=2),
             encoding="utf-8",
         )
-        if self._is_v2():
-            return self._write_v2_outputs(output_dir, songs, tensors, provenance)
-        arrays = {
-            f"{record.song_id}__bar_{record.bar_index:04d}": record.tensor
-            for record in tensors
-        }
-        # The same stable key is reused by tensor, feature, and index artifacts.
-        if arrays:
-            np.savez_compressed(output_dir / "bar_tensors.npz", **arrays)
-        else:
-            np.savez_compressed(output_dir / "bar_tensors.npz")
-        feature_summary = EncodedBarFeatureStore(output_dir).write(arrays)
-        index_rows = [
-            {
-                "tensor_key": f"{record.song_id}__bar_{record.bar_index:04d}",
-                "song_id": record.song_id,
-                "bar_index": int(record.bar_index),
-                "tensor_shape": record.tensor_shape,
-                "diagnostics": record.diagnostics,
-            }
-            for record in tensors
-        ]
-        (output_dir / "bar_tensor_index.json").write_text(
-            json.dumps(index_rows, indent=2),
-            encoding="utf-8",
-        )
-        return feature_summary
+        if not self._is_v2():
+            raise ValueError("Only final bar_tensor_schema.v2 output is supported; re-encode legacy data.")
+        return self._write_v2_outputs(output_dir, songs, tensors, provenance)
 
     def _is_v2(self) -> bool:
         section = self.config.get("bar_tensor", {})
