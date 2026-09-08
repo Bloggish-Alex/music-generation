@@ -56,18 +56,20 @@ def test_unavailable_final_v2_raw_observations_remain_schema_valid(tmp_path) -> 
 
 def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
     first, second = _samples("first"), _samples("second")
-    songs = [SongRecord("opus__tune_000", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 0, "quantization_audit": _audit(first)}, runtime_diagnostics={"quantization_fragment_samples": first}), SongRecord("opus__tune_001", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 1, "quantization_audit": _audit(second)}, runtime_diagnostics={"quantization_fragment_samples": second})]
+    bars = [BarRecord("opus", "opus.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)]
+    songs = [SongRecord("opus__tune_000", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 0, "quantization_audit": _audit(first)}, runtime_diagnostics={"quantization_fragment_samples": first}, bars=bars), SongRecord("opus__tune_001", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 1, "quantization_audit": _audit(second)}, runtime_diagnostics={"quantization_fragment_samples": second}, bars=bars)]
     common = {"run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "fixture", "content_sha256": None}}
     payload = FinalV2EvaluationRawCapture._quantization(common, songs, tmp_path)
     assert payload["audit_unit"] == "source_note_fragment"
     assert payload["fragment_count"] == 4
-    assert [row["tune_index"] for row in payload["by_file_meter"]] == [0, 1]
+    assert len(payload["by_file_meter"]) == 1
     archive_path = tmp_path / payload["residual_samples"]["path"]
     assert payload["residual_samples"]["sha256"] == _digest(archive_path)
     with np.load(archive_path, allow_pickle=False) as archive:
         assert {"source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "quantized_local_end_ql"} <= set(archive.files)
         assert archive["group_offsets"].dtype == np.dtype("int64")
-        assert archive["group_offsets"].tolist() == [0, 2, 4]
+        assert archive["group_offsets"].tolist() == [0, 4]
+        assert archive["sample_tune_indexes"].tolist() == [0, 0, 1, 1]
         assert archive["onset_residuals_ql"].dtype == np.dtype("float32")
     schema_path = __import__("pathlib").Path(__file__).resolve().parents[2] / "contracts" / "evaluation" / "v2" / "quantization_audit__raw_observation.v2.schema.json"
     Draft202012Validator(json.loads(schema_path.read_text())).validate(payload)
@@ -83,8 +85,16 @@ def test_quantization_audit_rejects_missing_or_legacy_runtime_samples(tmp_path, 
 
 def test_quantization_audit_rejects_summary_statistic_mismatch(tmp_path) -> None:
     samples = _samples(); audit = _audit(samples); audit["by_meter"]["4/4"]["onset_residual_ql"]["max"] = .09
-    song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": audit}, runtime_diagnostics={"quantization_fragment_samples": samples})
+    song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": audit}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=[BarRecord("song", "song.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)])
     with pytest.raises(ValueError, match="quantization fragment samples disagree with summary"):
+        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+
+
+@pytest.mark.parametrize("field,value", [("meter", "3/4"), ("canonical_bar_index", 9), ("quantized_local_start_ql", .1), ("quantized_local_end_ql", .4), ("raw_local_end_ql", .0)])
+def test_quantization_audit_rejects_fragments_outside_canonical_slot_grid(tmp_path, field, value) -> None:
+    samples = _samples(); samples[0][field] = value
+    song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=[BarRecord("song", "song.mid", 0, .625, canonical_bar_index=0, time_signature="5/32"), BarRecord("song", "song.mid", 1, 4.0, canonical_bar_index=1, time_signature="4/4")])
+    with pytest.raises(ValueError, match="canonical bar alignment|sample values"):
         FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
 
 

@@ -42,9 +42,10 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["bar_index", "bar_length_ql", "time_signature", "source_measure_index", "meter_numerator", "meter_denominator", "is_pickup", "notes"],
+              "required": ["bar_index", "canonical_bar_index", "bar_length_ql", "time_signature", "source_measure_index", "meter_numerator", "meter_denominator", "is_pickup", "notes"],
               "properties": {
                 "bar_index": {"type": "integer", "minimum": 0},
+                "canonical_bar_index": {"type": "integer", "minimum": 0},
                 "bar_length_ql": {"type": "number", "exclusiveMinimum": 0},
                 "time_signature": {"type": "string", "pattern": "^[0-9]+/[0-9]+$"},
                 "source_measure_index": {"type": ["integer", "null"], "minimum": 0},

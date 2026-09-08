@@ -158,6 +158,7 @@ class JsonDatasetTonalityRawSourceWriter:
                 raise ValueError("source note facts are outside the raw-source contract")
         return {
             "bar_index": int(bar.bar_index),
+            "canonical_bar_index": int(bar.canonical_bar_index) if bar.canonical_bar_index is not None else int(bar.bar_index),
             "bar_length_ql": bar_length,
             "time_signature": time_signature,
             "source_measure_index": int(bar.canonical_bar_index) if bar.canonical_bar_index is not None else int(bar.bar_index),
