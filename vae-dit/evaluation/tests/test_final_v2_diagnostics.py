@@ -38,6 +38,36 @@ def test_final_v2_diagnostic_raw_schema_rejects_available_without_capture(tmp_pa
         Draft202012Validator(schema).validate(payload)
 
 
+def test_controls_capture_is_schema_valid_unavailable_when_raw_controls_are_missing() -> None:
+    root = __import__("pathlib").Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "contracts" / "evaluation" / "v2" / "performance_controls__raw_observation.v2.schema.json").read_text())
+    song = SongRecord("song", "song.mid", metadata={"performance_controls": {"tempo_available": False, "key_available": False, "cc64_available": False, "cc64_unavailable_reason": "canonical_raw_controls_pending"}}, bars=[BarRecord("song", "song.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [NoteEvent(60, 0.0, 1.0, 80)])])])
+    payload = FinalV2EvaluationRawCapture._controls({"run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "fixture", "content_sha256": None}}, [song])
+    assert payload["status"] == "UNAVAILABLE"
+    assert payload["availability"] == {"raw_capture": True, "tempo": False, "key": False, "velocity": True, "cc64": False}
+    assert payload["velocity"]["note_count"] == 1
+    Draft202012Validator(schema).validate(payload)
+    payload["availability"]["raw_capture"] = False
+    Draft202012Validator(schema).validate(payload)
+
+
+def test_controls_capture_requires_velocity_for_available_status() -> None:
+    root = __import__("pathlib").Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "contracts" / "evaluation" / "v2" / "performance_controls__raw_observation.v2.schema.json").read_text())
+    song = SongRecord("song", "song.mid", metadata={"performance_controls": {"tempo_available": True, "key_available": True, "cc64_available": True}})
+    payload = FinalV2EvaluationRawCapture._controls({"run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "fixture", "content_sha256": None}}, [song])
+    assert payload["status"] == "UNAVAILABLE"
+    assert payload["availability"]["velocity"] is False
+    assert {"field": "velocity", "reason": "no_note_velocity_facts"} in payload["unavailable_reasons"]
+    Draft202012Validator(schema).validate(payload)
+
+
+def test_controls_capture_adds_cc64_reason_when_source_omits_it() -> None:
+    song = SongRecord("song", "song.mid", metadata={"performance_controls": {"tempo_available": True, "key_available": True, "cc64_available": False}}, bars=[BarRecord("song", "song.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [NoteEvent(60, 0.0, 1.0, 80)])])])
+    payload = FinalV2EvaluationRawCapture._controls({}, [song])
+    assert {"field": "cc64", "reason": "canonical_raw_controls_pending"} in payload["unavailable_reasons"]
+
+
 def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:
     public = tmp_path / "public"; public.mkdir(); run = EvaluationArtifactStore.create(tmp_path, "run")
     raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {"4/4": 1}, "opus_tune_count": 0, "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "parser_failures": [], "unavailable_reasons": []}

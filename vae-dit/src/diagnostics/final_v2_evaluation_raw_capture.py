@@ -202,8 +202,14 @@ class FinalV2EvaluationRawCapture:
         tempo_available = all(bool(item.get("tempo_available")) for item in facts)
         key_available = all(bool(item.get("key_available")) for item in facts)
         cc64_available = all(bool(item.get("cc64_available")) for item in facts)
+        velocity_available = bool(velocities)
         reasons = [str(item.get("cc64_unavailable_reason")) for item in facts if item.get("cc64_unavailable_reason")]
-        payload = {"schema_version": "performance_controls_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "tempo": tempo_available, "key": key_available, "velocity": bool(velocities), "cc64": cc64_available}, "velocity": {"note_count": len(velocities), "mean": float(sum(velocities) / len(velocities)) if velocities else 0.0}, "unavailable_reasons": [{"field": "performance_controls", "reason": reason} for reason in reasons]}
+        if not cc64_available and not reasons:
+            reasons = ["canonical_raw_controls_pending"]
+        unavailable_reasons = ([{"field": "tempo", "reason": "canonical_raw_controls_pending"}] if not tempo_available else []) + ([{"field": "key", "reason": "canonical_raw_controls_pending"}] if not key_available else []) + ([{"field": "velocity", "reason": "no_note_velocity_facts"}] if not velocity_available else []) + ([{"field": "cc64", "reason": reason} for reason in reasons] if not cc64_available else [])
+        payload = {"schema_version": "performance_controls_raw_observation.v2", "status": "AVAILABLE" if tempo_available and key_available and velocity_available and cc64_available else "UNAVAILABLE", **common, "availability": {"raw_capture": True, "tempo": tempo_available, "key": key_available, "velocity": velocity_available, "cc64": cc64_available}, "unavailable_reasons": unavailable_reasons}
+        if velocities:
+            payload["velocity"] = {"note_count": len(velocities), "mean": float(sum(velocities) / len(velocities))}
         if tempo_available:
             payload["tempo"] = {"song_count": len(songs)}
         if key_available:
