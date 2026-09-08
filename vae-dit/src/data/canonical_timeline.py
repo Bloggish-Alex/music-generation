@@ -192,6 +192,20 @@ def build_canonical_spans(
     if not chain or chain[0].absolute_tick != 0:
         raise _failure("time_signature_initial_missing")
 
+    # Validate every resolved fact before terminal truncation.  A meter change
+    # after the last note produces no bar, but it is still part of the raw SMF
+    # authority and must land on an exact rational boundary.
+    validation_start = Fraction(0)
+    validation_active = chain[0]
+    for change in chain[1:]:
+        target = Fraction(change.absolute_tick, ppqn)
+        length = Fraction(validation_active.numerator * 4, validation_active.denominator)
+        while validation_start < target:
+            validation_start += length
+        if validation_start != target:
+            raise _failure("time_signature_mid_bar_change")
+        validation_active = change
+
     spans: list[CanonicalBarSpan] = []
     current_start = Fraction(0)
     active = chain[0]
@@ -200,8 +214,6 @@ def build_canonical_spans(
         next_change = Fraction(chain[chain_index].absolute_tick, ppqn) if chain_index < len(chain) else None
         length = Fraction(active.numerator * 4, active.denominator)
         end = current_start + length
-        if next_change is not None and next_change < end:
-            raise _failure("time_signature_mid_bar_change")
         spans.append(CanonicalBarSpan(len(spans), current_start, end, active.numerator, active.denominator, active.absolute_tick))
         current_start = end
         if next_change is not None and next_change == current_start:

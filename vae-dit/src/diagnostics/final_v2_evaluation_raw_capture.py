@@ -184,9 +184,19 @@ class FinalV2EvaluationRawCapture:
     @staticmethod
     def _controls(common: Mapping[str, Any], songs: Sequence[SongRecord]) -> dict[str, Any]:
         facts = [song.metadata.get("performance_controls", {}) for song in songs]
-        cc64_available = sum(bool(item.get("cc64_available")) for item in facts)
         velocities = [note.velocity for song in songs for bar in song.bars for track in bar.tracks for note in track.notes]
-        return {"schema_version": "performance_controls_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "tempo": True, "key": True, "velocity": bool(velocities), "cc64": True}, "tempo": {"song_count": len(songs)}, "key": {"song_count": len(songs)}, "velocity": {"note_count": len(velocities), "mean": float(sum(velocities) / len(velocities)) if velocities else 0.0}, "cc64": {"available": bool(cc64_available), "format_coverage": {"song_count": len(songs), "available_song_count": cc64_available}, "unavailable_reasons": [item.get("cc64_unavailable_reason") for item in facts if item.get("cc64_unavailable_reason")]}, "unavailable_reasons": []}
+        tempo_available = all(bool(item.get("tempo_available")) for item in facts)
+        key_available = all(bool(item.get("key_available")) for item in facts)
+        cc64_available = all(bool(item.get("cc64_available")) for item in facts)
+        reasons = [str(item.get("cc64_unavailable_reason")) for item in facts if item.get("cc64_unavailable_reason")]
+        payload = {"schema_version": "performance_controls_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "tempo": tempo_available, "key": key_available, "velocity": bool(velocities), "cc64": cc64_available}, "velocity": {"note_count": len(velocities), "mean": float(sum(velocities) / len(velocities)) if velocities else 0.0}, "unavailable_reasons": [{"field": "performance_controls", "reason": reason} for reason in reasons]}
+        if tempo_available:
+            payload["tempo"] = {"song_count": len(songs)}
+        if key_available:
+            payload["key"] = {"song_count": len(songs)}
+        if cc64_available:
+            payload["cc64"] = {"available": True, "format_coverage": {"song_count": len(songs), "available_song_count": len(songs)}, "unavailable_reasons": []}
+        return payload
 
     @staticmethod
     def _form_action(common: Mapping[str, Any], songs: Sequence[SongRecord]) -> dict[str, Any]:

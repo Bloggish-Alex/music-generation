@@ -91,3 +91,11 @@ def test_mid_bar_time_signature_change_fails_exactly() -> None:
     facts, notes = collect_raw_smf_facts(midi)
     with pytest.raises(CanonicalTimelineError, match="time_signature_mid_bar_change"):
         build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+
+
+def test_terminal_does_not_hide_a_later_mid_bar_time_signature_change() -> None:
+    """A post-terminal fact is validated even though it emits no trailing bar."""
+    midi = _midi([_ts(4, 4), _ts(3, 4, 480)], [_note_on(60, 90), _note_off(60, 480)])
+    facts, notes = collect_raw_smf_facts(midi)
+    with pytest.raises(CanonicalTimelineError, match="time_signature_mid_bar_change"):
+        build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))

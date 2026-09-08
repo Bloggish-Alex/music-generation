@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from data.music_parser import MusicDirectoryParser, MusicParserConfig
+from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
 
 
 def _write_five_thirty_second_midi(path: Path) -> None:
@@ -65,3 +66,24 @@ def test_parser_discovers_only_canonical_smf_inputs(tmp_path: Path) -> None:
     parser = MusicDirectoryParser(MusicParserConfig())
 
     assert [path.name for path in parser.discover_files(tmp_path)] == ["canonical.mid"]
+
+
+def test_cross_five_thirty_second_bar_keeps_raw_continuation_and_hold(tmp_path: Path) -> None:
+    """A continuation is physical even when its later local onset is zero."""
+    import mido
+
+    path = tmp_path / "cross.mid"
+    midi = mido.MidiFile(type=1, ticks_per_beat=480)
+    meta = mido.MidiTrack(); meta.append(mido.MetaMessage("time_signature", numerator=5, denominator=32, time=0))
+    notes = mido.MidiTrack(); notes.append(mido.Message("note_on", note=60, velocity=90, time=240)); notes.append(mido.Message("note_off", note=60, velocity=0, time=240))
+    midi.tracks.extend([meta, notes]); midi.save(str(path))
+    song = MusicDirectoryParser(MusicParserConfig()).parse_file(path, {}, dataset_root=tmp_path)[0]
+
+    assert [len(bar.tracks[0].notes) for bar in song.bars] == [1, 1]
+    first, second = song.bars
+    assert first.tracks[0].notes[0].continues_into_next_bar is True
+    assert second.tracks[0].notes[0].continues_from_previous_bar is True
+    config = {"bar_tensor": {"backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "overflow_policy": "error", "steps_per_bar": 48, "pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0}}
+    record = SemanticHarmonySetCodec.from_config(config).encode_song(song)[1]
+    assert record.tensor[0, 0, 2] == 0.0
+    assert record.tensor[0, 0, 3] == 1.0

@@ -166,15 +166,17 @@ class MusicDirectoryParser:
                 "canonical_span_count": len(spans),
                 "track_retention": retention,
                 "form_mapping_unavailable": bool(metadata),
-                "performance_controls": {"cc64_available": False, "cc64_unavailable_reason": "canonical_raw_controls_pending"},
+                "performance_controls": {
+                    "tempo_available": False,
+                    "key_available": False,
+                    "cc64_available": False,
+                    "cc64_unavailable_reason": "canonical_raw_controls_pending",
+                },
                 "quantization_audit": self._canonical_quantization_audit(fragments),
             },
         )
         fragment_samples = self._canonical_fragment_samples(source_identity, fragments)
         song.runtime_diagnostics["quantization_fragment_samples"] = fragment_samples
-        # Kept only as an in-memory summary view for existing diagnostics; the
-        # canonical capture consumes the fragment records above.
-        song.runtime_diagnostics["quantization_residual_samples"] = self._canonical_residual_samples(fragments)
         by_span: dict[int, list[Any]] = defaultdict(list)
         for fragment in fragments:
             by_span[fragment.canonical_bar_index].append(fragment)
@@ -234,15 +236,6 @@ class MusicDirectoryParser:
                 "end_residual_ql": abs(quantized_end - raw_end),
             })
         return samples
-
-    @staticmethod
-    def _canonical_residual_samples(fragments: Sequence[Any]) -> Dict[str, Dict[str, list[float]]]:
-        samples: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"onset_residual_samples_ql": [], "end_residual_samples_ql": []})
-        for fragment in fragments:
-            meter = fragment.meter
-            samples[meter]["onset_residual_samples_ql"].append(float(abs(fragment.quantized_local_start_ql - fragment.raw_local_start_ql)))
-            samples[meter]["end_residual_samples_ql"].append(float(abs(fragment.quantized_local_end_ql - fragment.raw_local_end_ql)))
-        return dict(samples)
 
     def _build_canonical_bar(
         self,
