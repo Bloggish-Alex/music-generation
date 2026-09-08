@@ -45,17 +45,31 @@ def test_v2_preserves_cross_bar_melody_identity_and_marks_continuation_hold() ->
     continued = _note(72, 0)
     continued.duration_ql = 4.0
     continued.continues_into_next_bar = True
-    bar0 = BarRecord("song", "fixture.mid", 0, 4.0, source_measure_index=0, tracks=[TrackRecord(0, "track", [continued])])
+    bar0 = BarRecord("song", "fixture.mid", 0, 4.0, source_measure_index=91, canonical_bar_index=0, tracks=[TrackRecord(0, "track", [continued])])
     next_bar_continued = _note(72, 0)
     next_bar_continued.duration_ql = 1.0
     next_bar_continued.continues_from_previous_bar = True
     # A new higher note would win without the frozen seven-semitone continuity rule.
     new_note = _note(76, 1)
-    bar1 = BarRecord("song", "fixture.mid", 1, 4.0, source_measure_index=1, tracks=[TrackRecord(0, "track", [next_bar_continued, new_note])])
+    bar1 = BarRecord("song", "fixture.mid", 1, 4.0, source_measure_index=12, canonical_bar_index=1, tracks=[TrackRecord(0, "track", [next_bar_continued, new_note])])
     records = SemanticHarmonySetCodec.from_config(_config()).encode_song(SongRecord("song", "fixture.mid", bars=[bar0, bar1]))
     assert records[1].tensor[0, 0, 0] == records[0].tensor[0, 0, 0]
     assert records[1].tensor[0, 0, 2] == 0.0
     assert records[1].tensor[0, 0, 3] == 1.0
+
+
+def test_v2_resets_melody_continuity_across_a_canonical_bar_gap() -> None:
+    continued = _note(72, 0)
+    continued.continues_into_next_bar = True
+    first = BarRecord("song", "fixture.mid", 0, 4.0, canonical_bar_index=0, tracks=[TrackRecord(0, "track", [continued])])
+    held = _note(72, 0)
+    held.continues_from_previous_bar = True
+    higher = _note(76, 1)
+    gapped = BarRecord("song", "fixture.mid", 2, 4.0, canonical_bar_index=2, tracks=[TrackRecord(0, "track", [held, higher])])
+
+    records = SemanticHarmonySetCodec.from_config(_config()).encode_song(SongRecord("song", "fixture.mid", bars=[first, gapped]))
+
+    assert records[1].tensor[0, 0, 0] != records[0].tensor[0, 0, 0]
 
 
 def test_v2_velocity_ratio_uses_clamped_assigned_velocities() -> None:

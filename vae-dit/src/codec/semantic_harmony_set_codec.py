@@ -56,6 +56,11 @@ class SemanticHarmonySetCodec:
 
     def encode(self, bar: BarRecord, state: SemanticCodecSequenceState | None = None) -> BarTensorRecord:
         """Encode one independent bar; callers must not loop it for a multi-bar song."""
+        canonical_bar_index = (
+            int(bar.canonical_bar_index)
+            if bar.canonical_bar_index is not None
+            else int(bar.bar_index)
+        )
         notes = [note for track in bar.tracks for note in track.notes]
         base_pitch = bass_anchor_pitch(notes)
         grid = SlotGrid.for_bar(float(bar.bar_length_ql))
@@ -70,7 +75,7 @@ class SemanticHarmonySetCodec:
             active = [note for note in notes if note.onset_ql < end - epsilon and note.onset_ql + note.duration_ql > start + epsilon]
             if not active:
                 continue
-            prior = state.previous_note(active, bar.source_measure_index) if state is not None and slot == 0 else previous
+            prior = state.previous_note(active, canonical_bar_index) if state is not None and slot == 0 else previous
             melody,bass,harmony = assign(active, prior, self.config.melody_continuity_tolerance)
             if len(harmony) > self.config.max_harmony_notes:
                 raise ValueError(f"harmony_lane_overflow: song={bar.song_id} bar={bar.bar_index} slot={slot} count={len(harmony)}")
@@ -85,7 +90,7 @@ class SemanticHarmonySetCodec:
                 self._write(tensor[lane, slot], note, base_pitch, start, denominator)
             previous = melody
         if state is not None:
-            state.update(previous, bar.source_measure_index)
+            state.update(previous, canonical_bar_index)
         context = relative_chromagram(notes, base_pitch, velocity_scale=self.config.velocity_scale)
         diagnostics = {"codec_backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "base_pitch": base_pitch, "base_pitch_valid": base_pitch is not None, "bar_context": context.tolist() if base_pitch is not None else [0.0] * 12, "voice_names": VOICE_NAMES, "feature_names": FEATURE_NAMES, "slot_valid_mask": list(grid.slot_valid_mask), "slot_durations_ql": list(grid.slot_durations_ql)}
         return BarTensorRecord(bar.song_id, int(bar.bar_index), list(tensor.shape), tensor, diagnostics)

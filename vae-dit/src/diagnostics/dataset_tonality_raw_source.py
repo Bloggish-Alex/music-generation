@@ -160,7 +160,7 @@ class JsonDatasetTonalityRawSourceWriter:
             "bar_index": int(bar.bar_index),
             "bar_length_ql": bar_length,
             "time_signature": time_signature,
-            "source_measure_index": int(bar.source_measure_index) if bar.source_measure_index is not None else None,
+            "source_measure_index": int(bar.canonical_bar_index) if bar.canonical_bar_index is not None else int(bar.bar_index),
             "meter_numerator": int(bar.meter_numerator) if bar.meter_numerator is not None else None,
             "meter_denominator": int(bar.meter_denominator) if bar.meter_denominator is not None else None,
             "is_pickup": bool(bar.is_pickup),

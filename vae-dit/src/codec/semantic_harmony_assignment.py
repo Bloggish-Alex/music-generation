@@ -27,18 +27,18 @@ def value(note: Any, name: str, default: Any = 0) -> Any:
 
 @dataclass
 class SemanticCodecSequenceState:
-    """Stable melody identity carried only across contiguous source measures."""
+    """Stable melody identity carried only across contiguous canonical bars."""
     previous_melody_source_note_id: str | None = None
-    previous_source_measure_index: int | None = None
+    previous_canonical_bar_index: int | None = None
 
-    def previous_note(self, active: Iterable[Any], source_measure_index: int | None) -> Any | None:
-        if self.previous_source_measure_index is None or source_measure_index != self.previous_source_measure_index + 1:
+    def previous_note(self, active: Iterable[Any], canonical_bar_index: int | None) -> Any | None:
+        if self.previous_canonical_bar_index is None or canonical_bar_index != self.previous_canonical_bar_index + 1:
             return None
         return next((note for note in active if identity(note) == self.previous_melody_source_note_id), None)
 
-    def update(self, melody: Any | None, source_measure_index: int | None) -> None:
+    def update(self, melody: Any | None, canonical_bar_index: int | None) -> None:
         self.previous_melody_source_note_id = identity(melody) if melody is not None else None
-        self.previous_source_measure_index = source_measure_index
+        self.previous_canonical_bar_index = canonical_bar_index
 
 
 def assign(
