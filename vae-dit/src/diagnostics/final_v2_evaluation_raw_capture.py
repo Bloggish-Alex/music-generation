@@ -67,71 +67,95 @@ class FinalV2EvaluationRawCapture:
 
     @staticmethod
     def _quantization(common: Mapping[str, Any], songs: Sequence[SongRecord], output_dir: Path) -> dict[str, Any]:
+        """Capture only complete local-fragment timing facts; no legacy fallback."""
         def residual(values: list[float]) -> dict[str, float]:
             ordered = sorted(values)
             return {"max": max(ordered, default=0.0), "p95": ordered[max(0, math.ceil(.95 * len(ordered)) - 1)] if ordered else 0.0}
 
-        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        required_sample = {
+            "source_note_id", "canonical_bar_index", "meter",
+            "raw_local_start_ql", "raw_local_end_ql",
+            "quantized_local_start_ql", "quantized_local_end_ql",
+            "onset_residual_ql", "end_residual_ql",
+        }
+        grouped: dict[tuple[str, int, str], list[Mapping[str, Any]]] = {}
         for song in songs:
             audit = song.metadata.get("quantization_audit", {})
-            samples = song.runtime_diagnostics.get("quantization_residual_samples", {})
-            for meter, values in audit.get("by_meter", {}).items():
-                sample = samples.get(meter)
-                if not isinstance(sample, Mapping):
-                    raise ValueError(f"quantization residual samples are unavailable for {song.song_id}/{meter}")
-                onset_values = sample.get("onset_residual_samples_ql")
-                end_values = sample.get("end_residual_samples_ql")
-                if not isinstance(onset_values, list) or not isinstance(end_values, list) or len(onset_values) != len(end_values) or len(onset_values) != int(values.get("event_count", -1)):
-                    raise ValueError(f"quantization residual samples disagree with summary for {song.song_id}/{meter}")
+            samples = song.runtime_diagnostics.get("quantization_fragment_samples")
+            if audit.get("audit_unit") != "source_note_fragment" or not isinstance(samples, list):
+                raise ValueError(f"quantization fragment samples are unavailable for {song.song_id}")
+            if int(audit.get("fragment_count", -1)) != len(samples):
+                raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}")
+            per_meter: dict[str, list[Mapping[str, Any]]] = {}
+            identities: set[tuple[str, int]] = set()
+            for sample in samples:
+                if not isinstance(sample, Mapping) or set(sample) != required_sample:
+                    raise ValueError(f"quantization fragment sample has an invalid shape for {song.song_id}")
+                note_id, bar_index, meter = sample["source_note_id"], sample["canonical_bar_index"], sample["meter"]
+                if not isinstance(note_id, str) or not note_id or not isinstance(bar_index, int) or bar_index < 0 or not isinstance(meter, str) or "/" not in meter:
+                    raise ValueError(f"quantization fragment sample identity is invalid for {song.song_id}")
+                identity = (note_id, bar_index)
+                if identity in identities:
+                    raise ValueError(f"quantization fragment identity is duplicated for {song.song_id}")
+                identities.add(identity)
                 try:
-                    onset_values = [float(value) for value in onset_values]
-                    end_values = [float(value) for value in end_values]
+                    raw_start, raw_end, quantized_start, quantized_end, onset_error, end_error = (float(sample[name]) for name in ("raw_local_start_ql", "raw_local_end_ql", "quantized_local_start_ql", "quantized_local_end_ql", "onset_residual_ql", "end_residual_ql"))
                 except (TypeError, ValueError) as error:
-                    raise ValueError(f"quantization residual samples are non-numeric for {song.song_id}/{meter}") from error
-                if any(not math.isfinite(value) or value < 0.0 for value in onset_values + end_values):
-                    raise ValueError(f"quantization residual samples are invalid for {song.song_id}/{meter}")
-                expected_summary = {
-                    "event_count": len(onset_values),
-                    "nonzero_residual_count": sum(value > 1e-9 for value in onset_values + end_values),
-                    "onset_residual_ql": residual(onset_values),
-                    "end_residual_ql": residual(end_values),
-                }
-                if int(values.get("nonzero_residual_count", -1)) != expected_summary["nonzero_residual_count"]:
-                    raise ValueError(f"quantization residual samples disagree with summary for {song.song_id}/{meter}")
-                for field in ("onset_residual_ql", "end_residual_ql"):
-                    declared = values.get(field)
-                    if not isinstance(declared, Mapping) or any(not math.isclose(float(declared.get(statistic, float("nan"))), expected_summary[field][statistic], abs_tol=1e-9) for statistic in ("max", "p95")):
-                        raise ValueError(f"quantization residual samples disagree with summary for {song.song_id}/{meter}")
-                key = (str(song.metadata.get("source_file_identity", song.song_id)), str(meter))
-                bucket = grouped.setdefault(key, {"onset": [], "end": []})
-                bucket["onset"].extend(onset_values)
-                bucket["end"].extend(end_values)
-        keys = sorted(grouped); offsets = [0]; onset: list[float] = []; end: list[float] = []
+                    raise ValueError(f"quantization fragment sample is non-numeric for {song.song_id}") from error
+                if (not all(math.isfinite(value) and value >= 0.0 for value in (raw_start, raw_end, quantized_start, quantized_end, onset_error, end_error)) or raw_end < raw_start or quantized_end <= quantized_start or not math.isclose(onset_error, abs(quantized_start - raw_start), abs_tol=1e-9) or not math.isclose(end_error, abs(quantized_end - raw_end), abs_tol=1e-9)):
+                    raise ValueError(f"quantization fragment sample values are invalid for {song.song_id}")
+                per_meter.setdefault(meter, []).append(sample)
+            for meter, summary in audit.get("by_meter", {}).items():
+                meter_samples = per_meter.get(meter, [])
+                onset_values = [float(sample["onset_residual_ql"]) for sample in meter_samples]
+                end_values = [float(sample["end_residual_ql"]) for sample in meter_samples]
+                if int(summary.get("fragment_count", summary.get("event_count", -1))) != len(meter_samples) or int(summary.get("nonzero_residual_count", -1)) != sum(value > 1e-9 for value in onset_values + end_values):
+                    raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}/{meter}")
+                for field, values in (("onset_residual_ql", onset_values), ("end_residual_ql", end_values)):
+                    declared = summary.get(field)
+                    if not isinstance(declared, Mapping) or any(not math.isclose(float(declared.get(statistic, float("nan"))), residual(values)[statistic], abs_tol=1e-9) for statistic in ("max", "p95")):
+                        raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}/{meter}")
+            if set(per_meter) != set(audit.get("by_meter", {})):
+                raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}")
+            source = str(song.metadata.get("source_file_identity", song.song_id))
+            tune_index = int(song.metadata.get("tune_index", 0))
+            for meter, meter_samples in per_meter.items():
+                grouped.setdefault((source, tune_index, meter), []).extend(meter_samples)
+        keys = sorted(grouped); offsets = [0]; flat: list[Mapping[str, Any]] = []
         for key in keys:
-            onset.extend(grouped[key]["onset"])
-            end.extend(grouped[key]["end"])
-            offsets.append(len(onset))
+            rows = sorted(grouped[key], key=lambda item: (int(item["canonical_bar_index"]), str(item["source_note_id"])))
+            flat.extend(rows)
+            offsets.append(len(flat))
         path = output_dir / "quantization_residual_samples.v2.npz"
         archive = {
             "source_file_identities": np.asarray([key[0] for key in keys], dtype=np.str_),
-            "meters": np.asarray([key[1] for key in keys], dtype=np.str_),
+            "tune_indexes": np.asarray([key[1] for key in keys], dtype=np.int64),
+            "meters": np.asarray([key[2] for key in keys], dtype=np.str_),
             "group_offsets": np.asarray(offsets, dtype=np.int64),
-            "onset_residuals_ql": np.asarray(onset, dtype=np.float32),
-            "end_residuals_ql": np.asarray(end, dtype=np.float32),
+            "source_note_ids": np.asarray([item["source_note_id"] for item in flat], dtype=np.str_),
+            "canonical_bar_indexes": np.asarray([item["canonical_bar_index"] for item in flat], dtype=np.int64),
+            "raw_local_start_ql": np.asarray([item["raw_local_start_ql"] for item in flat], dtype=np.float32),
+            "raw_local_end_ql": np.asarray([item["raw_local_end_ql"] for item in flat], dtype=np.float32),
+            "quantized_local_start_ql": np.asarray([item["quantized_local_start_ql"] for item in flat], dtype=np.float32),
+            "quantized_local_end_ql": np.asarray([item["quantized_local_end_ql"] for item in flat], dtype=np.float32),
+            "onset_residuals_ql": np.asarray([item["onset_residual_ql"] for item in flat], dtype=np.float32),
+            "end_residuals_ql": np.asarray([item["end_residual_ql"] for item in flat], dtype=np.float32),
         }
         np.savez_compressed(path, **archive)
         arrays = {name: {"dtype": str(value.dtype), "shape": list(value.shape)} for name, value in archive.items()}
         FinalV2EvaluationRawCapture._validate_residual_archive(path, arrays)
         rows = []
-        for source, meter in keys:
-            values = grouped[(source, meter)]
-            rows.append({"source_file_identity": source, "meter": meter, "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": residual(values["onset"]), "end_residual_ql": residual(values["end"])})
-        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "grid_policy": {"quantum_ql": .25, "epsilon_ql": 1e-6, "capacity": 48}, "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
+        for source, tune_index, meter in keys:
+            values = grouped[(source, tune_index, meter)]
+            onset_values = [float(item["onset_residual_ql"]) for item in values]
+            end_values = [float(item["end_residual_ql"]) for item in values]
+            rows.append({"source_file_identity": source, "tune_index": tune_index, "meter": meter, "fragment_count": len(values), "nonzero_residual_count": sum(value > 1e-9 for value in onset_values + end_values), "onset_residual_ql": residual(onset_values), "end_residual_ql": residual(end_values)})
+        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "audit_unit": "source_note_fragment", "fragment_count": len(flat), "grid_policy": {"quantum_ql": .25, "epsilon_ql": 1e-6, "capacity": 48}, "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
 
     @staticmethod
     def _validate_residual_archive(path: Path, declared_arrays: Mapping[str, Mapping[str, Any]]) -> None:
         """Reject a non-canonical residual archive before publishing AVAILABLE."""
-        required = {"source_file_identities", "meters", "group_offsets", "onset_residuals_ql", "end_residuals_ql"}
+        required = {"source_file_identities", "tune_indexes", "meters", "group_offsets", "source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "raw_local_end_ql", "quantized_local_start_ql", "quantized_local_end_ql", "onset_residuals_ql", "end_residuals_ql"}
         with np.load(path, allow_pickle=False) as archive:
             if set(archive.files) != required:
                 raise ValueError("quantization residual archive has an invalid array set")
@@ -140,20 +164,21 @@ class FinalV2EvaluationRawCapture:
             descriptor = declared_arrays.get(name, {})
             if descriptor.get("dtype") != str(value.dtype) or descriptor.get("shape") != list(value.shape):
                 raise ValueError(f"quantization residual archive descriptor mismatch: {name}")
-        source_ids, meters = arrays["source_file_identities"], arrays["meters"]
+        source_ids, tune_indexes, meters = arrays["source_file_identities"], arrays["tune_indexes"], arrays["meters"]
         offsets = arrays["group_offsets"]
         onset, end = arrays["onset_residuals_ql"], arrays["end_residuals_ql"]
-        if source_ids.ndim != 1 or meters.ndim != 1 or source_ids.shape != meters.shape:
+        if source_ids.ndim != 1 or meters.ndim != 1 or source_ids.shape != meters.shape or tune_indexes.shape != meters.shape:
             raise ValueError("quantization residual archive group dimensions are invalid")
         if source_ids.dtype.kind not in {"U", "S"} or meters.dtype.kind not in {"U", "S"}:
             raise ValueError("quantization residual archive string arrays are invalid")
-        if offsets.dtype != np.dtype("int64") or offsets.ndim != 1 or len(offsets) != len(source_ids) + 1:
+        if tune_indexes.dtype != np.dtype("int64") or np.any(tune_indexes < 0) or offsets.dtype != np.dtype("int64") or offsets.ndim != 1 or len(offsets) != len(source_ids) + 1:
             raise ValueError("quantization residual archive offsets are invalid")
-        if onset.dtype != np.dtype("float32") or end.dtype != np.dtype("float32") or onset.ndim != 1 or onset.shape != end.shape:
+        sample_arrays = (arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["quantized_local_start_ql"], arrays["quantized_local_end_ql"], onset, end)
+        if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or arrays["canonical_bar_indexes"].dtype != np.dtype("int64") or any(value.dtype != np.dtype("float32") for value in sample_arrays[2:]):
             raise ValueError("quantization residual archive residual arrays are invalid")
         if int(offsets[0]) != 0 or int(offsets[-1]) != len(onset) or np.any(np.diff(offsets) < 0):
             raise ValueError("quantization residual archive offsets do not align")
-        if not np.isfinite(onset).all() or not np.isfinite(end).all() or np.any(onset < 0.0) or np.any(end < 0.0):
+        if not all(np.isfinite(value).all() for value in sample_arrays[2:]) or any(np.any(value < 0.0) for value in sample_arrays[2:]) or np.any(arrays["raw_local_end_ql"] < arrays["raw_local_start_ql"]) or np.any(arrays["quantized_local_end_ql"] <= arrays["quantized_local_start_ql"]) or not np.allclose(onset, np.abs(arrays["quantized_local_start_ql"] - arrays["raw_local_start_ql"])) or not np.allclose(end, np.abs(arrays["quantized_local_end_ql"] - arrays["raw_local_end_ql"])):
             raise ValueError("quantization residual archive values are invalid")
 
     @staticmethod
