@@ -170,6 +170,10 @@ class MusicDirectoryParser:
                 "quantization_audit": self._canonical_quantization_audit(fragments),
             },
         )
+        fragment_samples = self._canonical_fragment_samples(source_identity, fragments)
+        song.runtime_diagnostics["quantization_fragment_samples"] = fragment_samples
+        # Kept only as an in-memory summary view for existing diagnostics; the
+        # canonical capture consumes the fragment records above.
         song.runtime_diagnostics["quantization_residual_samples"] = self._canonical_residual_samples(fragments)
         by_span: dict[int, list[Any]] = defaultdict(list)
         for fragment in fragments:
@@ -204,6 +208,32 @@ class MusicDirectoryParser:
             return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
         fragment_count = sum(len(item["onset"]) for item in by_meter.values())
         return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
+
+    @staticmethod
+    def _canonical_fragment_samples(
+        source_file_identity: str,
+        fragments: Sequence[Any],
+    ) -> list[Dict[str, Any]]:
+        """Return one complete audit fact for each source-note/bar fragment."""
+        samples = []
+        for fragment in fragments:
+            note = fragment.source_note
+            raw_start = float(fragment.raw_local_start_ql)
+            raw_end = float(fragment.raw_local_end_ql)
+            quantized_start = float(fragment.quantized_local_start_ql)
+            quantized_end = float(fragment.quantized_local_end_ql)
+            samples.append({
+                "source_note_id": f"{source_file_identity}:{note.physical_track_index}:{note.source_note_ordinal}",
+                "canonical_bar_index": int(fragment.canonical_bar_index),
+                "meter": str(fragment.meter),
+                "raw_local_start_ql": raw_start,
+                "raw_local_end_ql": raw_end,
+                "quantized_local_start_ql": quantized_start,
+                "quantized_local_end_ql": quantized_end,
+                "onset_residual_ql": abs(quantized_start - raw_start),
+                "end_residual_ql": abs(quantized_end - raw_end),
+            })
+        return samples
 
     @staticmethod
     def _canonical_residual_samples(fragments: Sequence[Any]) -> Dict[str, Dict[str, list[float]]]:

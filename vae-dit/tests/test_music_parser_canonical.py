@@ -44,6 +44,18 @@ def test_parser_uses_bar_local_grid_and_preserves_raw_note_identity(tmp_path: Pa
     assert audit["audit_unit"] == "source_note_fragment"
     assert audit["fragment_count"] == 1
     assert audit["by_meter"]["5/32"]["fragment_count"] == 1
+    samples = song.runtime_diagnostics["quantization_fragment_samples"]
+    assert samples == [{
+        "source_note_id": note.source_note_id,
+        "canonical_bar_index": 1,
+        "meter": "5/32",
+        "raw_local_start_ql": 0.125,
+        "raw_local_end_ql": 0.375,
+        "quantized_local_start_ql": 0.25,
+        "quantized_local_end_ql": 0.5,
+        "onset_residual_ql": 0.125,
+        "end_residual_ql": 0.125,
+    }]
 
 
 def test_parser_discovers_only_canonical_smf_inputs(tmp_path: Path) -> None:
