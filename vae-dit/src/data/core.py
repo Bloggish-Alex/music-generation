@@ -70,6 +70,9 @@ class BarRecord:
     bar_length_ql: float
     time_signature: str = "4/4"
     source_measure_index: int | None = None
+    # Canonical raw-MIDI bar authority.  During migration source_measure_index
+    # is serialized as the same-value compatibility alias only.
+    canonical_bar_index: int | None = None
     meter_numerator: int | None = None
     meter_denominator: int | None = None
     is_pickup: bool = False
@@ -95,6 +98,7 @@ class BarRecord:
             "bar_length_ql": float(self.bar_length_ql),
             "time_signature": self.time_signature,
             "source_measure_index": self.source_measure_index,
+            "canonical_bar_index": self.canonical_bar_index,
             "meter_numerator": self.meter_numerator,
             "meter_denominator": self.meter_denominator,
             "is_pickup": self.is_pickup,

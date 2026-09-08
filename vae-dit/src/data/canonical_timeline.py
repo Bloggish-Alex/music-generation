@@ -90,6 +90,7 @@ class BarLocalQuantizedNote:
 
     source_note: RawSourceNote
     canonical_bar_index: int
+    meter: str
     raw_local_start_ql: Fraction
     raw_local_end_ql: Fraction
     quantized_local_start_ql: Fraction
@@ -232,7 +233,7 @@ def fragment_note(note: RawSourceNote, span: CanonicalBarSpan, *, ppqn: int) -> 
     if quantized_end <= quantized_start:
         raise _failure("quantization_nonpositive_clipped_duration")
     return BarLocalQuantizedNote(
-        note, span.canonical_bar_index, raw_local_start, raw_local_end,
+        note, span.canonical_bar_index, span.time_signature, raw_local_start, raw_local_end,
         quantized_start, quantized_end,
         source_start < span.start_ql, source_end > span.end_ql,
     )

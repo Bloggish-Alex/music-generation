@@ -7,6 +7,7 @@ import json
 import hashlib
 import unicodedata
 import math
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -15,9 +16,17 @@ from common.config_loader import ConfigView
 from data.core import BarRecord, MeasureSpan, NoteEvent, SongRecord, TrackRecord
 from data.measure_map import extract_measure_spans, split_tunes
 from data.performance_controls import collect_controls
+from data.canonical_timeline import (
+    CanonicalBarSpan,
+    RawSourceNote,
+    build_canonical_spans,
+    collect_raw_smf_facts,
+    fragment_notes,
+    resolve_time_signature_chain,
+)
 
 
-MUSIC_SUFFIXES = {".mid", ".midi", ".abc", ".krn"}
+MUSIC_SUFFIXES = {".mid", ".midi"}
 MIDI_PITCH_CARDINALITY = 128  # zero-based MIDI pitch indices are [0, 127].
 
 
@@ -110,45 +119,145 @@ class MusicDirectoryParser:
         dataset_root: str | Path | None = None,
     ) -> List[SongRecord]:
         """Parse one file into one independent SongRecord per Opus tune."""
-        from music21 import converter
-
         path = Path(file_path)
-        parsed = converter.parse(str(path))
-        records: List[SongRecord] = []
-        tunes = split_tunes(parsed)
-        for tune_index, tune in enumerate(tunes):
-            score = tune.transpose(int(transpose_semitones), inPlace=False) if int(transpose_semitones) != 0 else tune
-            controls = collect_controls(score, path)
-            self._tag_source_events(score)
-            source_events = self._all_event_boundaries(score)
-            score = self._quantize_score(score)
-            spans = extract_measure_spans(score)
-            quantization_audit = self._quantization_audit(source_events, self._all_event_boundaries(score), spans)
-            residual_samples = {
-                meter: {
-                    "onset_residual_samples_ql": values.pop("onset_residual_samples_ql"),
-                    "end_residual_samples_ql": values.pop("end_residual_samples_ql"),
-                }
-                for meter, values in quantization_audit["by_meter"].items()
-            }
-            raw_tracks, track_retention = self._collect_tracks(score)
-            if not raw_tracks:
-                raise ValueError("No note events found.")
-            suffix = f"_T{int(transpose_semitones):+d}" if int(transpose_semitones) != 0 else ""
-            tune_suffix = f"__tune_{tune_index:03d}" if len(tunes) > 1 else ""
-            song = SongRecord(
-            song_id=f"{path.stem}{tune_suffix}{suffix}",
+        if path.suffix.lower() in {".mid", ".midi"}:
+            return self._parse_canonical_midi(path, metadata, transpose_semitones, dataset_root)
+        raise ValueError("canonical_smf_required")
+
+    def _parse_canonical_midi(
+        self,
+        path: Path,
+        metadata: Dict[str, Any],
+        transpose_semitones: int,
+        dataset_root: str | Path | None,
+    ) -> List[SongRecord]:
+        """Parse one PPQN SMF using the raw-event canonical timeline authority."""
+        import mido
+
+        if not self.config.quantize_input or self.config.quantize_divisors != (4,):
+            raise ValueError("canonical_quantization_policy_invalid")
+        midi = mido.MidiFile(str(path))
+        signatures, source_notes = collect_raw_smf_facts(midi)
+        if not source_notes:
+            raise ValueError("no_note_events")
+        chain = resolve_time_signature_chain(signatures)
+        ppqn = int(midi.ticks_per_beat)
+        spans = build_canonical_spans(chain, ppqn=ppqn, terminal_end_ql=max(note.end_ql(ppqn) for note in source_notes))
+        fragments = fragment_notes(source_notes, spans, ppqn=ppqn)
+        retained_tracks, retention = self._canonical_track_retention(source_notes)
+        retained = set(retained_tracks)
+        fragments = [fragment for fragment in fragments if fragment.source_note.physical_track_index in retained]
+        if not fragments:
+            raise ValueError("no_note_events")
+
+        source_identity = self._source_file_identity(path, dataset_root)
+        suffix = f"_T{int(transpose_semitones):+d}" if int(transpose_semitones) != 0 else ""
+        song = SongRecord(
+            song_id=f"{path.stem}{suffix}",
             file_path=str(path),
-            form=metadata.get("form"),
-            metadata={**dict(metadata), "transpose_semitones": int(transpose_semitones), "source_file_identity": self._source_file_identity(path, dataset_root), "tune_index": tune_index, "opus_tune_count": len(tunes), "parser_measure_count": len(spans), "track_retention": track_retention, "performance_controls": {"tempo_bpm": list(controls.tempo_bpm), "key_signature": controls.key_signature, "key_confidence": controls.key_confidence, "cc64_available": controls.cc64.cc64_available, "cc64_intervals_ql": [list(interval) for interval in controls.cc64.cc64_intervals], "cc64_unavailable_reason": controls.cc64.unavailable_reason}, "quantization_audit": quantization_audit},
-            )
-            song.runtime_diagnostics["quantization_residual_samples"] = residual_samples
-            for bar_index, span in enumerate(spans):
-                bar = self._build_bar(song, raw_tracks, bar_index, span, len(spans))
-                self._assign_form_section(bar, metadata)
-                song.bars.append(bar)
-            records.append(song)
-        return records
+            form=None,
+            metadata={
+                **dict(metadata),
+                "transpose_semitones": int(transpose_semitones),
+                "source_file_identity": source_identity,
+                "tune_index": 0,
+                "opus_tune_count": 1,
+                "canonical_parser_version": "raw_smf_v1",
+                "canonical_span_count": len(spans),
+                "track_retention": retention,
+                "form_mapping_unavailable": bool(metadata),
+                "performance_controls": {"cc64_available": False, "cc64_unavailable_reason": "canonical_raw_controls_pending"},
+                "quantization_audit": self._canonical_quantization_audit(fragments),
+            },
+        )
+        song.runtime_diagnostics["quantization_residual_samples"] = self._canonical_residual_samples(fragments)
+        by_span: dict[int, list[Any]] = defaultdict(list)
+        for fragment in fragments:
+            by_span[fragment.canonical_bar_index].append(fragment)
+        for span in spans:
+            song.bars.append(self._build_canonical_bar(song, span, by_span.get(span.canonical_bar_index, []), retained_tracks, transpose_semitones, ppqn))
+        return [song]
+
+    def _canonical_track_retention(self, notes: Sequence[RawSourceNote]) -> tuple[list[int], Dict[str, Any]]:
+        """Retain raw physical note tracks or fail under the frozen 48-track policy."""
+        counts = Counter(note.physical_track_index for note in notes)
+        ranked = sorted(counts, key=lambda index: (-counts[index], index))
+        if len(ranked) <= self.config.hard_safety_limit:
+            return ranked, {"physical_part_count": len(ranked), "policy": "retain_all", "retained_physical_track_indexes": ranked, "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}
+        if self.config.track_retention_policy != "truncate":
+            raise ValueError("track_limit_exceeded")
+        retained, dropped = ranked[:self.config.hard_safety_limit], ranked[self.config.hard_safety_limit:]
+        dropped_notes = sum(counts[index] for index in dropped)
+        return retained, {"physical_part_count": len(ranked), "policy": "truncate", "retained_physical_track_indexes": retained, "dropped_part_count": len(dropped), "dropped_note_count": dropped_notes, "dropped_note_ratio": dropped_notes / max(1, len(notes))}
+
+    @staticmethod
+    def _canonical_quantization_audit(fragments: Sequence[Any]) -> Dict[str, Any]:
+        """Summarize fragment-local timing residuals by their canonical meter."""
+        by_meter: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"onset": [], "end": []})
+        for fragment in fragments:
+            meter = fragment.meter
+            bucket = by_meter[meter]
+            bucket["onset"].append(float(abs(fragment.quantized_local_start_ql - fragment.raw_local_start_ql)))
+            bucket["end"].append(float(abs(fragment.quantized_local_end_ql - fragment.raw_local_end_ql)))
+        def summary(values: list[float]) -> Dict[str, float]:
+            ordered = sorted(values)
+            return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
+        fragment_count = sum(len(item["onset"]) for item in by_meter.values())
+        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
+
+    @staticmethod
+    def _canonical_residual_samples(fragments: Sequence[Any]) -> Dict[str, Dict[str, list[float]]]:
+        samples: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"onset_residual_samples_ql": [], "end_residual_samples_ql": []})
+        for fragment in fragments:
+            meter = fragment.meter
+            samples[meter]["onset_residual_samples_ql"].append(float(abs(fragment.quantized_local_start_ql - fragment.raw_local_start_ql)))
+            samples[meter]["end_residual_samples_ql"].append(float(abs(fragment.quantized_local_end_ql - fragment.raw_local_end_ql)))
+        return dict(samples)
+
+    def _build_canonical_bar(
+        self,
+        song: SongRecord,
+        span: CanonicalBarSpan,
+        fragments: Sequence[Any],
+        retained_tracks: Sequence[int],
+        transpose_semitones: int,
+        ppqn: int,
+    ) -> BarRecord:
+        """Convert bar-local quantized fragments into the codec-facing record."""
+        tracks: list[TrackRecord] = []
+        for track_index, physical_track_index in enumerate(retained_tracks):
+            notes = []
+            for fragment in fragments:
+                source = fragment.source_note
+                if source.physical_track_index != physical_track_index:
+                    continue
+                notes.append(NoteEvent(
+                    pitch=int(source.pitch) + int(transpose_semitones),
+                    onset_ql=float(fragment.quantized_local_start_ql),
+                    duration_ql=float(fragment.duration_ql),
+                    velocity=int(source.velocity),
+                    source_file_identity=str(song.metadata["source_file_identity"]),
+                    physical_track_index=int(physical_track_index),
+                    source_note_ordinal=int(source.source_note_ordinal),
+                    source_note_id=f"{song.metadata['source_file_identity']}:{physical_track_index}:{source.source_note_ordinal}",
+                    source_onset_ql=float(source.start_ql(ppqn)),
+                    continues_from_previous_bar=fragment.continues_from_previous_bar,
+                    continues_into_next_bar=fragment.continues_into_next_bar,
+                ))
+            tracks.append(TrackRecord(track_index, f"track_{physical_track_index}", notes))
+        return BarRecord(
+            song_id=song.song_id,
+            file_path=song.file_path,
+            bar_index=span.canonical_bar_index,
+            canonical_bar_index=span.canonical_bar_index,
+            source_measure_index=span.canonical_bar_index,
+            bar_length_ql=float(span.end_ql - span.start_ql),
+            time_signature=span.time_signature,
+            meter_numerator=span.numerator,
+            meter_denominator=span.denominator,
+            source_bar_count=int(song.metadata["canonical_span_count"]),
+            tracks=tracks,
+        )
 
     def _quantize_score(self, score: Any) -> Any:
         """Quantize symbolic timing so grid encoding is stable."""
