@@ -75,6 +75,20 @@ def test_fifo_pairing_and_file_scoped_ordinals_are_deterministic() -> None:
     assert [note.source_note_ordinal for note in notes] == [0, 1, 2]
 
 
+def test_frozen_pairing_normalization_discards_only_authorized_redundancies() -> None:
+    midi = _midi([_ts(4, 4)], [_note_on(60, 90), _note_off(60), _note_on(60, 80), _note_off(60, 10), _note_off(62)])
+    repairs = []
+    _, notes = collect_raw_smf_facts(midi, repairs=repairs)
+    assert [(note.pitch, note.start_tick, note.end_tick, note.source_note_ordinal) for note in notes] == [(60, 0, 10, 0)]
+    assert [repair.repair_kind for repair in repairs] == ["same_tick_zero_duration_pair", "redundant_orphan_note_off"]
+
+
+def test_same_tick_pair_with_fifo_depth_above_one_remains_strict_failure() -> None:
+    midi = _midi([_ts(4, 4)], [_note_on(60, 90), _note_on(60, 80), _note_off(60)])
+    with pytest.raises(CanonicalTimelineError, match="note_nonpositive_duration"):
+        collect_raw_smf_facts(midi, repairs=[])
+
+
 @pytest.mark.parametrize("events, error", [
     ([_ts(4, 4, 1)], "time_signature_initial_missing"),
     ([_ts(4, 4), _note_off(60)], "orphan_note_off"),

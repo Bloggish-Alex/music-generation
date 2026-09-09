@@ -137,7 +137,9 @@ class MusicDirectoryParser:
         if not self.config.quantize_input or self.config.quantize_divisors != (4,):
             raise ValueError("canonical_quantization_policy_invalid")
         midi = mido.MidiFile(str(path))
-        signatures, source_notes = collect_raw_smf_facts(midi)
+        source_identity = self._source_file_identity(path, dataset_root)
+        repairs = []
+        signatures, source_notes = collect_raw_smf_facts(midi, repairs=repairs)
         if not source_notes:
             raise ValueError("no_note_events")
         chain = resolve_time_signature_chain(signatures)
@@ -150,7 +152,6 @@ class MusicDirectoryParser:
         if not fragments:
             raise ValueError("no_note_events")
 
-        source_identity = self._source_file_identity(path, dataset_root)
         suffix = f"_T{int(transpose_semitones):+d}" if int(transpose_semitones) != 0 else ""
         song = SongRecord(
             song_id=f"{path.stem}{suffix}",
@@ -173,6 +174,7 @@ class MusicDirectoryParser:
                     "cc64_unavailable_reason": "canonical_raw_controls_pending",
                 },
                 "quantization_audit": self._canonical_quantization_audit(fragments),
+                "raw_pairing_repairs": [self._pairing_repair_fact(source_identity, path, dataset_root, midi, repair) for repair in repairs],
             },
         )
         fragment_samples = self._canonical_fragment_samples(source_identity, fragments)
@@ -183,6 +185,31 @@ class MusicDirectoryParser:
         for span in spans:
             song.bars.append(self._build_canonical_bar(song, span, by_span.get(span.canonical_bar_index, []), retained_tracks, transpose_semitones, ppqn))
         return [song]
+
+    @staticmethod
+    def _pairing_repair_fact(source_file_identity: str, path: Path, dataset_root: str | Path | None, midi: Any, repair: Any) -> Dict[str, Any]:
+        """Attach file provenance to one canonical raw-pairing repair."""
+        return {
+            "repair_kind": repair.repair_kind,
+            "source_file_identity": source_file_identity,
+            "dataset_relative_posix_path": unicodedata.normalize("NFC", path.resolve().relative_to(Path(dataset_root or path.parent).resolve()).as_posix()),
+            "tune_index": 0,
+            "physical_track_index": repair.physical_track_index,
+            "channel": repair.channel,
+            "pitch": repair.pitch,
+            "on_tick": repair.on_tick,
+            "on_event_ordinal": repair.on_event_ordinal,
+            "off_tick": repair.off_tick,
+            "off_event_ordinal": repair.off_event_ordinal,
+            "on_velocity": repair.on_velocity,
+            "queue_depth_before": repair.queue_depth_before,
+            "same_tick_events": [
+                {"event_kind": kind, "event_ordinal": ordinal, "velocity": velocity}
+                for kind, ordinal, velocity in repair.same_tick_events
+            ],
+            "smf_format": int(midi.type),
+            "ppqn": int(midi.ticks_per_beat),
+        }
 
     def _canonical_track_retention(self, notes: Sequence[RawSourceNote]) -> tuple[list[int], Dict[str, Any]]:
         """Retain raw physical note tracks or fail under the frozen 48-track policy."""
