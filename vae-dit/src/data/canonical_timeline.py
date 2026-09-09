@@ -100,6 +100,9 @@ class CanonicalBarSpan:
     nominal_meter: str | None = None
     triggering_ts_tick: int | None = None
     triggering_ts_provenance: tuple[int, int, int, int] | None = None
+    canonical_start_tick: int = 0
+    canonical_end_tick: int = 0
+    ppqn: int = 0
 
     @property
     def time_signature(self) -> str:
@@ -244,14 +247,19 @@ def build_canonical_spans(
         next_change = Fraction(chain[chain_index].absolute_tick, ppqn) if chain_index < len(chain) else None
         length = Fraction(active.numerator * 4, active.denominator)
         end = current_start + length
-        if next_change is not None and current_start < next_change < end:
-            if next_change <= terminal_end_ql:
-                change = chain[chain_index]
-                spans.append(CanonicalBarSpan(len(spans), current_start, next_change, active.numerator, active.denominator, active.absolute_tick, True, "time_signature_change", f"{active.numerator}/{active.denominator}", change.absolute_tick, (change.contributors[0].physical_track_index, change.contributors[0].event_ordinal, change.numerator, change.denominator)))
+        if next_change is not None and next_change <= terminal_end_ql and current_start < next_change < end:
+            change = chain[chain_index]
+            start_tick = current_start * ppqn
+            if start_tick.denominator != 1:
+                raise _failure("canonical_span_tick_invariant")
+            spans.append(CanonicalBarSpan(len(spans), current_start, next_change, active.numerator, active.denominator, active.absolute_tick, True, "time_signature_change", f"{active.numerator}/{active.denominator}", change.absolute_tick, (change.contributors[0].physical_track_index, change.contributors[0].event_ordinal, change.numerator, change.denominator), int(start_tick), change.absolute_tick, ppqn))
             current_start = next_change
             active = chain[chain_index]; chain_index += 1
             continue
-        spans.append(CanonicalBarSpan(len(spans), current_start, end, active.numerator, active.denominator, active.absolute_tick, False, None, f"{active.numerator}/{active.denominator}"))
+        start_tick, end_tick = current_start * ppqn, end * ppqn
+        if start_tick.denominator != 1 or end_tick.denominator != 1:
+            raise _failure("canonical_span_tick_invariant")
+        spans.append(CanonicalBarSpan(len(spans), current_start, end, active.numerator, active.denominator, active.absolute_tick, False, None, f"{active.numerator}/{active.denominator}", None, None, int(start_tick), int(end_tick), ppqn))
         current_start = end
         if next_change is not None and next_change == current_start:
             active = chain[chain_index]

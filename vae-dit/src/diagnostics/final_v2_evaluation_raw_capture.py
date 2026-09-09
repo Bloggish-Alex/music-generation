@@ -85,7 +85,7 @@ class FinalV2EvaluationRawCapture:
         if payload.get("schema_version") != "raw_pairing_repairs.v1" or payload.get("normalization_policy_version") != manifest.get("normalization_policy_version") or not isinstance(repairs, list) or canonical(repairs) != canonical(expected_repairs) or not {item["source_file_identity"] for item in repairs} <= source_ids or manifest.get("repair_count") != len(repairs) or manifest.get("repair_counts_by_kind") != expected or manifest.get("repair_affected_file_count") != len({item["source_file_identity"] for item in repairs}) or not dataset_identity or any(item.get("repair_kind") not in expected or (item.get("repair_kind") == "same_tick_zero_duration_pair" and item.get("on_tick") != item.get("off_tick")) or (item.get("repair_kind") == "redundant_orphan_note_off" and item.get("on_tick") is not None) for item in repairs):
             raise ValueError("raw pairing repair artifact is invalid")
         FinalV2EvaluationRawCapture._validate_partial_alignment(songs, manifest, output_dir)
-        partials = [{"source_file_identity": song.metadata.get("source_file_identity"), "tune_index": song.metadata.get("tune_index", 0), "canonical_bar_index": bar.canonical_bar_index, "exact_start_ql": bar.canonical_start_ql, "exact_end_ql": bar.canonical_end_ql, "actual_bar_length_ql": bar.bar_length_ql, "nominal_meter": bar.nominal_meter, "partial_reason": bar.partial_reason, "triggering_ts_tick": bar.triggering_ts_tick, "triggering_ts_provenance": bar.triggering_ts_provenance} for song in songs for bar in song.bars if bar.is_partial]
+        partials = [{"source_file_identity": song.metadata.get("source_file_identity"), "tune_index": song.metadata.get("tune_index", 0), "canonical_bar_index": bar.canonical_bar_index, "canonical_start_tick": bar.canonical_start_tick, "canonical_end_tick": bar.canonical_end_tick, "ppqn": bar.ppqn, "actual_bar_length_ql": bar.bar_length_ql, "nominal_meter": bar.nominal_meter, "partial_reason": bar.partial_reason, "triggering_ts_tick": bar.triggering_ts_tick, "triggering_ts_provenance": bar.triggering_ts_provenance} for song in songs for bar in song.bars if bar.is_partial]
         return {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": len(songs), "measure_count": len(bars), "meter_distribution": dict(Counter(bar.time_signature for bar in bars)), "opus_tune_count": len(opus_sources), "over_capacity_count": 0}, "partial_span_count": len(partials), "partial_reason_counts": {"time_signature_change": len(partials)}, "partial_spans": partials, "track_retention": {"hard_safety_limit": 48, "policy": "truncate" if any(item.get("policy") == "truncate" for item in retained) else "retain_all", "dropped_part_count": sum(int(item.get("dropped_part_count", 0)) for item in retained), "dropped_note_count": sum(int(item.get("dropped_note_count", 0)) for item in retained), "dropped_note_ratio": float(sum(float(item.get("dropped_note_ratio", 0.0)) for item in retained) / max(1, len(retained)))}, "normalization_policy_version": manifest["normalization_policy_version"], "repair_artifact": artifact, "repair_count": len(repairs), "repair_counts_by_kind": expected, "repair_affected_file_count": len({item["source_file_identity"] for item in repairs}), "parser_failures": list(failures), "unavailable_reasons": []}
 
     @staticmethod
@@ -94,17 +94,17 @@ class FinalV2EvaluationRawCapture:
         for song in songs:
             ordered = sorted(song.bars, key=lambda bar: int(bar.canonical_bar_index if bar.canonical_bar_index is not None else bar.bar_index))
             for position, bar in enumerate(ordered):
-                start, end = bar.canonical_start_ql, bar.canonical_end_ql
-                if start is None or end is None or not math.isclose(float(end) - float(start), float(bar.bar_length_ql), abs_tol=1e-9) or float(end) <= float(start):
+                start, end, ppqn = bar.canonical_start_tick, bar.canonical_end_tick, bar.ppqn
+                if start is None or end is None or ppqn is None or ppqn <= 0 or end <= start or not math.isclose((end - start) / ppqn, float(bar.bar_length_ql), abs_tol=1e-9):
                     raise ValueError("canonical partial span boundaries are invalid")
                 if bar.is_partial:
                     provenance = bar.triggering_ts_provenance
-                    if bar.partial_reason != "time_signature_change" or bar.triggering_ts_tick is None or not isinstance(provenance, Mapping) or not math.isclose(float(bar.triggering_ts_tick) / int(song.metadata.get("ppqn", 0)), float(end), abs_tol=1e-9):
+                    if bar.partial_reason != "time_signature_change" or bar.triggering_ts_tick != end or not isinstance(provenance, Mapping):
                         raise ValueError("canonical partial span provenance is invalid")
                     if position + 1 < len(ordered):
                         following = ordered[position + 1]
                         expected_meter = f"{provenance.get('numerator')}/{provenance.get('denominator')}"
-                        if not math.isclose(float(following.canonical_start_ql), float(end), abs_tol=1e-9) or following.time_signature != expected_meter:
+                        if following.canonical_start_tick != end or following.ppqn != ppqn or following.time_signature != expected_meter:
                             raise ValueError("canonical partial span phase is invalid")
                 elif bar.partial_reason is not None or bar.triggering_ts_tick is not None or bar.triggering_ts_provenance is not None:
                     raise ValueError("full canonical span contains partial metadata")
@@ -126,8 +126,8 @@ class FinalV2EvaluationRawCapture:
             if item is None:
                 raise ValueError("canonical partial index row is unknown")
             _, bar = item
-            expected = (bool(bar.is_partial), bar.partial_reason, float(bar.bar_length_ql), bar.nominal_meter or bar.time_signature, bar.triggering_ts_tick)
-            observed = (row.get("is_partial"), row.get("partial_reason"), float(row.get("actual_bar_length_ql", -1)), row.get("nominal_meter"), row.get("triggering_ts_tick"))
+            expected = (bar.canonical_start_tick, bar.canonical_end_tick, bar.ppqn, bool(bar.is_partial), bar.partial_reason, float(bar.bar_length_ql), bar.nominal_meter or bar.time_signature, bar.triggering_ts_tick)
+            observed = (row.get("canonical_start_tick"), row.get("canonical_end_tick"), row.get("ppqn"), row.get("is_partial"), row.get("partial_reason"), float(row.get("actual_bar_length_ql", -1)), row.get("nominal_meter"), row.get("triggering_ts_tick"))
             mask = np.asarray(masks[position], dtype=bool); duration = np.asarray(durations[position], dtype=float)
             if observed != expected or not np.array_equal(mask, np.arange(len(mask)) < int(mask.sum())) or np.any(duration[~mask] != 0) or np.any(duration[mask] <= 0) or not math.isclose(float(duration[mask].sum()), float(bar.bar_length_ql), abs_tol=1e-6):
                 raise ValueError("canonical partial index/slot alignment is invalid")

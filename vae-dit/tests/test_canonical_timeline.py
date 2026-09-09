@@ -117,6 +117,13 @@ def test_terminal_time_signature_change_materializes_the_preceding_partial_span(
     assert len(spans) == 1 and spans[0].is_partial and spans[0].end_ql == Fraction(1)
 
 
+def test_post_terminal_time_signature_does_not_remove_terminal_rest_tail() -> None:
+    midi = _midi([_ts(4, 4), _ts(3, 4, 960)], [_note_on(60, 90), _note_off(60, 480)])
+    facts, notes = collect_raw_smf_facts(midi)
+    spans = build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+    assert [(span.start_ql, span.end_ql, span.time_signature, span.is_partial) for span in spans] == [(Fraction(0), Fraction(4), "4/4", False)]
+
+
 @pytest.mark.parametrize("raw_start,raw_end,expected_slot,expected_end", [
     (53, 58, 0, Fraction(1, 4)),
     (96, 144, 1, Fraction(1, 2)),

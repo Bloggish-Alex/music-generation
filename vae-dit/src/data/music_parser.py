@@ -318,8 +318,9 @@ class MusicDirectoryParser:
             nominal_meter=span.nominal_meter,
             triggering_ts_tick=span.triggering_ts_tick,
             triggering_ts_provenance=({"physical_track_index": span.triggering_ts_provenance[0], "event_ordinal": span.triggering_ts_provenance[1], "numerator": span.triggering_ts_provenance[2], "denominator": span.triggering_ts_provenance[3]} if span.triggering_ts_provenance is not None else None),
-            canonical_start_ql=float(span.start_ql),
-            canonical_end_ql=float(span.end_ql),
+            canonical_start_tick=span.canonical_start_tick,
+            canonical_end_tick=span.canonical_end_tick,
+            ppqn=span.ppqn,
             source_bar_count=int(song.metadata["canonical_span_count"]),
             tracks=tracks,
         )
