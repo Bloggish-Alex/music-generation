@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Raw pairing census v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_version", "findings", "aggregates"],
+  "properties": {
+    "schema_version": {"const": "raw_pairing_census.v1"},
+    "policy_version": {"const": "smf_fifo_track_channel_pitch_v1"},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "aggregates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["by_failure_code", "by_source_file", "by_physical_track", "by_channel", "by_pitch", "by_tick_relation"],
+      "properties": {
+        "by_failure_code": {"$ref": "#/$defs/aggregate"},
+        "by_source_file": {"$ref": "#/$defs/aggregate"},
+        "by_physical_track": {"$ref": "#/$defs/aggregate"},
+        "by_channel": {"$ref": "#/$defs/aggregate"},
+        "by_pitch": {"$ref": "#/$defs/aggregate"},
+        "by_tick_relation": {"$ref": "#/$defs/aggregate"}
+      }
+    }
+  },
+  "$defs": {
+    "aggregate": {"type": "array", "items": {"type": "object", "required": ["count"], "properties": {"count": {"type": "integer", "minimum": 0}}}},
+    "pending": {"type": "object", "additionalProperties": false, "required": ["absolute_tick", "event_ordinal", "velocity"], "properties": {"absolute_tick": {"type": "integer", "minimum": 0}, "event_ordinal": {"type": "integer", "minimum": 0}, "velocity": {"type": "integer", "minimum": 1, "maximum": 127}}},
+    "same_tick_event": {"type": "object", "additionalProperties": false, "required": ["event_kind", "absolute_tick", "event_ordinal", "velocity"], "properties": {"event_kind": {"enum": ["note_on", "note_off"]}, "absolute_tick": {"type": "integer", "minimum": 0}, "event_ordinal": {"type": "integer", "minimum": 0}, "velocity": {"type": "integer", "minimum": 0, "maximum": 127}}},
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_file_identity", "dataset_relative_posix_path", "tune_index", "physical_track_index", "channel", "pitch", "failure_code", "absolute_tick", "event_ordinal", "queue_depth_before", "matched_on_tick", "matched_on_event_ordinal", "pending_on_queue", "same_tick_events", "tick_relation", "ppqn", "smf_format"],
+      "properties": {
+        "source_file_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "dataset_relative_posix_path": {"type": "string", "minLength": 1},
+        "tune_index": {"const": 0},
+        "physical_track_index": {"type": "integer", "minimum": 0},
+        "channel": {"type": "integer", "minimum": 0, "maximum": 15},
+        "pitch": {"type": "integer", "minimum": 0, "maximum": 127},
+        "failure_code": {"enum": ["orphan_note_off", "unterminated_note_on", "note_nonpositive_duration"]},
+        "absolute_tick": {"type": "integer", "minimum": 0},
+        "event_ordinal": {"type": "integer", "minimum": 0},
+        "queue_depth_before": {"type": "integer", "minimum": 0},
+        "matched_on_tick": {"type": ["integer", "null"], "minimum": 0},
+        "matched_on_event_ordinal": {"type": ["integer", "null"], "minimum": 0},
+        "pending_on_queue": {"type": "array", "items": {"$ref": "#/$defs/pending"}},
+        "same_tick_events": {"type": "array", "items": {"$ref": "#/$defs/same_tick_event"}},
+        "tick_relation": {"enum": ["same_tick", "different_tick", "unmatched"]},
+        "ppqn": {"type": "integer", "minimum": 1},
+        "smf_format": {"enum": [0, 1]}
+      }
+    }
+  }
+}
