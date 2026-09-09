@@ -3,10 +3,12 @@
   "title": "Raw pairing census v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "policy_version", "findings", "aggregates"],
+  "required": ["schema_version", "policy_version", "census_pairing_policy_version", "normalization_policy_version", "findings", "aggregates"],
   "properties": {
     "schema_version": {"const": "raw_pairing_census.v1"},
     "policy_version": {"const": "smf_fifo_track_channel_pitch_v1"},
+    "census_pairing_policy_version": {"const": "smf_fifo_track_channel_pitch_v1"},
+    "normalization_policy_version": {"const": "raw_pairing_normalization.v1"},
     "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
     "aggregates": {
       "type": "object",

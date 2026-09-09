@@ -123,6 +123,20 @@ def test_unavailable_final_v2_raw_observations_remain_schema_valid(tmp_path) -> 
         Draft202012Validator(json.loads((root / f"{module}__raw_observation.v2.schema.json").read_text())).validate(json.loads(path.read_text()))
 
 
+def test_parser_integrity_rejects_tampered_raw_pairing_repair_artifact(tmp_path) -> None:
+    repair = {"repair_kind": "same_tick_zero_duration_pair", "source_file_identity": "a" * 64, "dataset_relative_posix_path": "a.mid", "tune_index": 0, "physical_track_index": 0, "channel": 0, "pitch": 60, "queue_depth_before": 1, "same_tick_events": [], "smf_format": 1, "ppqn": 480, "on_tick": 10, "on_event_ordinal": 1, "on_velocity": 80, "off_tick": 10, "off_event_ordinal": 2}
+    artifact = tmp_path / "raw_pairing_repairs.v1.json"
+    artifact.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": [repair]}), encoding="utf-8")
+    manifest = {"normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": artifact.name, "sha256": _digest(artifact)}, "repair_count": 1, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 1, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 1}
+    common = {"dataset": {"identity": "fixture", "content_sha256": None}}
+    payload = FinalV2EvaluationRawCapture._parser_integrity(common, [], [], manifest, tmp_path)
+    assert payload["repair_count"] == 1
+    repair["off_tick"] = 11
+    artifact.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": [repair]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="repair provenance|repair artifact"):
+        FinalV2EvaluationRawCapture._parser_integrity(common, [], [], manifest, tmp_path)
+
+
 def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
     first, second = _samples("first"), _samples("second")
     bars = [BarRecord("opus", "opus.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)]

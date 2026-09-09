@@ -172,6 +172,8 @@ def run_census(dataset_root: Path, output_dir: Path, code_revision: str) -> Path
     artifact_payload = {
         "schema_version": SCHEMA_VERSION,
         "policy_version": POLICY_VERSION,
+        "census_pairing_policy_version": POLICY_VERSION,
+        "normalization_policy_version": "raw_pairing_normalization.v1",
         "findings": findings,
         "aggregates": {
             "by_failure_code": _aggregate(findings, "failure_code"),

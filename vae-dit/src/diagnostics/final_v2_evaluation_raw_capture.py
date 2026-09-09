@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import numpy as np
+from jsonschema import Draft202012Validator, ValidationError
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -33,7 +34,7 @@ class FinalV2EvaluationRawCapture:
         run = {"encoding_manifest_sha256": _sha256(manifest_path), "bar_tensor_index_sha256": _sha256(index_path), "tensor_schema_version": "bar_tensor_schema.v2"}
         common = {"run": run, "dataset": {"identity": dataset["identity"], "content_sha256": dataset.get("content_sha256")}}
         payloads = {
-            "parser_integrity": self._parser_integrity(common, songs, parser_failures),
+            "parser_integrity": self._parser_integrity(common, songs, parser_failures, manifest, output_dir),
             "quantization_audit": self._quantization(common, songs, output_dir),
             "performance_controls": self._controls(common, songs),
             "form_action_alignment": self._form_action(common, songs),
@@ -60,11 +61,27 @@ class FinalV2EvaluationRawCapture:
         return paths
 
     @staticmethod
-    def _parser_integrity(common: Mapping[str, Any], songs: Sequence[SongRecord], failures: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def _parser_integrity(common: Mapping[str, Any], songs: Sequence[SongRecord], failures: Sequence[Mapping[str, Any]], manifest: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
         bars = [bar for song in songs for bar in song.bars]
         retained = [song.metadata.get("track_retention", {}) for song in songs]
         opus_sources = {song.metadata.get("source_file_identity") for song in songs if int(song.metadata.get("opus_tune_count", 1)) > 1}
-        return {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": len(songs), "measure_count": len(bars), "meter_distribution": dict(Counter(bar.time_signature for bar in bars)), "opus_tune_count": len(opus_sources), "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "truncate" if any(item.get("policy") == "truncate" for item in retained) else "retain_all", "dropped_part_count": sum(int(item.get("dropped_part_count", 0)) for item in retained), "dropped_note_count": sum(int(item.get("dropped_note_count", 0)) for item in retained), "dropped_note_ratio": float(sum(float(item.get("dropped_note_ratio", 0.0)) for item in retained) / max(1, len(retained)))}, "parser_failures": list(failures), "unavailable_reasons": []}
+        artifact = manifest.get("repair_artifact", {})
+        path = output_dir / str(artifact.get("path", ""))
+        if manifest.get("normalization_policy_version") != "raw_pairing_normalization.v1" or not path.is_file() or artifact.get("sha256") != _sha256(path):
+            raise ValueError("raw pairing repair provenance is invalid")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        repair_schema = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "diagnostics" / "raw_pairing_repairs.v1.schema.json").read_text(encoding="utf-8"))
+        try:
+            Draft202012Validator(repair_schema).validate(payload)
+        except ValidationError as error:
+            raise ValueError("raw pairing repair artifact is invalid") from error
+        repairs = payload.get("repairs")
+        counts = Counter(item.get("repair_kind") for item in repairs) if isinstance(repairs, list) else Counter()
+        expected = {"same_tick_zero_duration_pair": counts["same_tick_zero_duration_pair"], "redundant_orphan_note_off": counts["redundant_orphan_note_off"]}
+        dataset_identity = str(common.get("dataset", {}).get("identity", ""))
+        if payload.get("schema_version") != "raw_pairing_repairs.v1" or payload.get("normalization_policy_version") != manifest.get("normalization_policy_version") or not isinstance(repairs, list) or manifest.get("repair_count") != len(repairs) or manifest.get("repair_counts_by_kind") != expected or manifest.get("repair_affected_file_count") != len({item["source_file_identity"] for item in repairs}) or not dataset_identity or any(item.get("repair_kind") not in expected or (item.get("repair_kind") == "same_tick_zero_duration_pair" and item.get("on_tick") != item.get("off_tick")) or (item.get("repair_kind") == "redundant_orphan_note_off" and item.get("on_tick") is not None) for item in repairs):
+            raise ValueError("raw pairing repair artifact is invalid")
+        return {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": len(songs), "measure_count": len(bars), "meter_distribution": dict(Counter(bar.time_signature for bar in bars)), "opus_tune_count": len(opus_sources), "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "truncate" if any(item.get("policy") == "truncate" for item in retained) else "retain_all", "dropped_part_count": sum(int(item.get("dropped_part_count", 0)) for item in retained), "dropped_note_count": sum(int(item.get("dropped_note_count", 0)) for item in retained), "dropped_note_ratio": float(sum(float(item.get("dropped_note_ratio", 0.0)) for item in retained) / max(1, len(retained)))}, "normalization_policy_version": manifest["normalization_policy_version"], "repair_artifact": artifact, "repair_count": len(repairs), "repair_counts_by_kind": expected, "repair_affected_file_count": len({item["source_file_identity"] for item in repairs}), "parser_failures": list(failures), "unavailable_reasons": []}
 
     @staticmethod
     def _quantization(common: Mapping[str, Any], songs: Sequence[SongRecord], output_dir: Path) -> dict[str, Any]:
