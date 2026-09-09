@@ -109,11 +109,12 @@ def test_controls_capture_adds_cc64_reason_when_source_omits_it() -> None:
 
 def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:
     public = tmp_path / "public"; public.mkdir(); run = EvaluationArtifactStore.create(tmp_path, "run")
-    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {"4/4": 1}, "opus_tune_count": 0, "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "parser_failures": [], "unavailable_reasons": []}
+    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {"4/4": 1}, "opus_tune_count": 0, "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": "raw_pairing_repairs.v1.json", "sha256": "sha256:" + "2" * 64}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 0, "partial_span_count": 0, "partial_reason_counts": {"time_signature_change": 0}, "partial_spans": [], "parser_failures": [], "unavailable_reasons": []}
     path = public / "parser_integrity__raw_observation.v2.json"; path.write_text(json.dumps(raw))
     exporter = FinalV2DiagnosticExporter("parser_integrity"); bundle = exporter.export(ExportContext("run", public, run))
     result = FinalV2DiagnosticEvaluator("parser_integrity").evaluate(EvaluationContext("run", public, run), bundle)
     assert result.report["status"] == "MONITOR"
+    assert result.report["metrics"]["observation"]["partial_span_count"] == 0
 
 
 def test_unavailable_final_v2_raw_observations_remain_schema_valid(tmp_path) -> None:
@@ -136,6 +137,29 @@ def test_parser_integrity_rejects_tampered_raw_pairing_repair_artifact(tmp_path)
     artifact.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": [repair]}), encoding="utf-8")
     with pytest.raises(ValueError, match="repair provenance|repair artifact"):
         FinalV2EvaluationRawCapture._parser_integrity(common, [song], [], manifest, tmp_path)
+
+
+@pytest.mark.parametrize("tamper", ["index_length", "index_reason", "slot_duration", "arrays_hash", "raw_end", "trigger_tick"])
+def test_parser_integrity_rejects_partial_index_raw_or_slot_tampering(tmp_path, tamper) -> None:
+    repair_path = tmp_path / "raw_pairing_repairs.v1.json"
+    repair_path.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": []}), encoding="utf-8")
+    bar = BarRecord("song", "song.mid", 0, 2.0, time_signature="3/4", canonical_bar_index=0, is_partial=True, partial_reason="time_signature_change", nominal_meter="3/4", triggering_ts_tick=960, triggering_ts_provenance={"physical_track_index": 0, "event_ordinal": 2, "numerator": 4, "denominator": 4}, canonical_start_ql=0.0, canonical_end_ql=2.0)
+    following = BarRecord("song", "song.mid", 1, 4.0, time_signature="4/4", canonical_bar_index=1, nominal_meter="4/4", canonical_start_ql=2.0, canonical_end_ql=6.0)
+    song = SongRecord("song", "song.mid", metadata={"source_file_identity": "a" * 64, "ppqn": 480, "raw_pairing_repairs": []}, bars=[bar, following])
+    rows = [{"row": 0, "song_id": "song", "canonical_bar_index": 0, "is_partial": True, "partial_reason": "time_signature_change", "actual_bar_length_ql": 2.0, "nominal_meter": "3/4", "triggering_ts_tick": 960}, {"row": 1, "song_id": "song", "canonical_bar_index": 1, "is_partial": False, "partial_reason": None, "actual_bar_length_ql": 4.0, "nominal_meter": "4/4", "triggering_ts_tick": None}]
+    masks = np.zeros((2, 48), dtype=bool); masks[0, :8] = True; masks[1, :16] = True
+    durations = np.zeros((2, 48), dtype=np.float32); durations[0, :8] = .25; durations[1, :16] = .25
+    if tamper == "index_length": rows[0]["actual_bar_length_ql"] = 2.25
+    if tamper == "index_reason": rows[0]["partial_reason"] = None
+    if tamper == "slot_duration": durations[0, 7] = .5
+    if tamper == "raw_end": bar.canonical_end_ql = 2.25
+    if tamper == "trigger_tick": bar.triggering_ts_tick = 961
+    index_path = tmp_path / "bar_tensor_index.json"; index_path.write_text(json.dumps(rows), encoding="utf-8")
+    arrays_path = tmp_path / "voice_tensors.npz"; np.savez_compressed(arrays_path, slot_valid_mask=masks, slot_durations_ql=durations)
+    manifest = {"normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": repair_path.name, "sha256": _digest(repair_path)}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 0, "index": {"path": index_path.name}, "arrays": {"path": arrays_path.name, "sha256": _digest(arrays_path)}}
+    if tamper == "arrays_hash": manifest["arrays"]["sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="canonical partial"):
+        FinalV2EvaluationRawCapture._parser_integrity({"dataset": {"identity": "fixture"}}, [song], [], manifest, tmp_path)
 
 
 def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:

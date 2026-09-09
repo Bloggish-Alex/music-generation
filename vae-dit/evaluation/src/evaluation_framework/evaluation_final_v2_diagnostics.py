@@ -42,7 +42,7 @@ class FinalV2DiagnosticEvaluator(ArtifactEvaluator):
 
 
 def _metrics(test_point: str, raw: Mapping[str, Any]) -> Mapping[str, Any]:
-    keys = {"parser_integrity": ("measure_map", "track_retention", "normalization_policy_version", "repair_artifact", "repair_count", "repair_counts_by_kind", "repair_affected_file_count", "parser_failures"), "quantization_audit": ("grid_policy", "fragment_count", "projected_fragment_count", "projected_fragment_rate", "by_file_meter"), "performance_controls": ("tempo", "key", "velocity", "cc64"), "form_action_alignment": ("coverage", "confusion_table")}[test_point]
+    keys = {"parser_integrity": ("measure_map", "track_retention", "normalization_policy_version", "repair_artifact", "repair_count", "repair_counts_by_kind", "repair_affected_file_count", "partial_span_count", "partial_reason_counts", "partial_spans", "parser_failures"), "quantization_audit": ("grid_policy", "fragment_count", "projected_fragment_count", "projected_fragment_rate", "by_file_meter"), "performance_controls": ("tempo", "key", "velocity", "cc64"), "form_action_alignment": ("coverage", "confusion_table")}[test_point]
     return {key: raw.get(key) for key in keys}
 
 

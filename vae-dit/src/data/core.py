@@ -80,6 +80,8 @@ class BarRecord:
     nominal_meter: str | None = None
     triggering_ts_tick: int | None = None
     triggering_ts_provenance: Dict[str, int] | None = None
+    canonical_start_ql: float | None = None
+    canonical_end_ql: float | None = None
     is_pickup: bool = False
     source_bar_count: Optional[int] = None
     form: Optional[str] = None
@@ -111,6 +113,8 @@ class BarRecord:
             "nominal_meter": self.nominal_meter,
             "triggering_ts_tick": self.triggering_ts_tick,
             "triggering_ts_provenance": self.triggering_ts_provenance,
+            "canonical_start_ql": self.canonical_start_ql,
+            "canonical_end_ql": self.canonical_end_ql,
             "is_pickup": self.is_pickup,
             "source_bar_count": self.source_bar_count,
             "form": self.form,

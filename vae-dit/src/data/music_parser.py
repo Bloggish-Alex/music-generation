@@ -164,6 +164,7 @@ class MusicDirectoryParser:
                 "tune_index": 0,
                 "opus_tune_count": 1,
                 "canonical_parser_version": "raw_smf_v1",
+                "ppqn": ppqn,
                 "canonical_span_count": len(spans),
                 "track_retention": retention,
                 "form_mapping_unavailable": bool(metadata),
@@ -317,6 +318,8 @@ class MusicDirectoryParser:
             nominal_meter=span.nominal_meter,
             triggering_ts_tick=span.triggering_ts_tick,
             triggering_ts_provenance=({"physical_track_index": span.triggering_ts_provenance[0], "event_ordinal": span.triggering_ts_provenance[1], "numerator": span.triggering_ts_provenance[2], "denominator": span.triggering_ts_provenance[3]} if span.triggering_ts_provenance is not None else None),
+            canonical_start_ql=float(span.start_ql),
+            canonical_end_ql=float(span.end_ql),
             source_bar_count=int(song.metadata["canonical_span_count"]),
             tracks=tracks,
         )
