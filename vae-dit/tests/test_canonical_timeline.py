@@ -76,11 +76,12 @@ def test_fifo_pairing_and_file_scoped_ordinals_are_deterministic() -> None:
 
 
 def test_frozen_pairing_normalization_discards_only_authorized_redundancies() -> None:
-    midi = _midi([_ts(4, 4)], [_note_on(60, 90), _note_off(60), _note_on(60, 80), _note_off(60, 10), _note_off(62)])
+    midi = _midi([_ts(4, 4)], [_note_on(60, 90), _note_off(60), _note_on(69, 70), _note_off(69, 10), _note_on(60, 80), _note_off(60, 10), _note_off(62)])
     repairs = []
     _, notes = collect_raw_smf_facts(midi, repairs=repairs)
-    assert [(note.pitch, note.start_tick, note.end_tick, note.source_note_ordinal) for note in notes] == [(60, 0, 10, 0)]
+    assert [(note.pitch, note.start_tick, note.end_tick, note.source_note_ordinal) for note in notes] == [(69, 0, 10, 0), (60, 10, 20, 1)]
     assert [repair.repair_kind for repair in repairs] == ["same_tick_zero_duration_pair", "redundant_orphan_note_off"]
+    assert [event[0] for event in repairs[0].same_tick_events] == ["note_on", "note_off", "note_on"]
 
 
 def test_same_tick_pair_with_fifo_depth_above_one_remains_strict_failure() -> None:

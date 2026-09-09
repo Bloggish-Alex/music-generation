@@ -150,9 +150,16 @@ def collect_raw_smf_facts(midi: Any, *, tune_index: int = 0, repairs: list[RawPa
     for track_index, track in enumerate(midi.tracks):
         absolute_tick = 0
         pending: dict[tuple[int, int], deque[tuple[int, int, int]]] = defaultdict(deque)
-        note_events: dict[tuple[int, int, int], list[tuple[str, int, int]]] = defaultdict(list)
+        note_events: dict[int, list[tuple[str, int, int]]] = defaultdict(list)
+        track_events: list[tuple[int, int, Any]] = []
         for event_ordinal, event in enumerate(track):
             absolute_tick += int(event.time)
+            track_events.append((absolute_tick, event_ordinal, event))
+            if event.type in {"note_on", "note_off"}:
+                channel, pitch = int(event.channel), int(event.note)
+                is_on = event.type == "note_on" and int(event.velocity) > 0
+                note_events[absolute_tick].append(("note_on" if is_on else "note_off", event_ordinal, int(event.velocity)))
+        for absolute_tick, event_ordinal, event in track_events:
             if event.type == "time_signature":
                 denominator = int(event.denominator)
                 exponent = _denominator_exponent(denominator)
@@ -165,19 +172,18 @@ def collect_raw_smf_facts(midi: Any, *, tune_index: int = 0, repairs: list[RawPa
             channel, pitch = int(event.channel), int(event.note)
             key = (channel, pitch)
             is_on = event.type == "note_on" and int(event.velocity) > 0
-            note_events[(channel, pitch, absolute_tick)].append(("note_on" if is_on else "note_off", event_ordinal, int(event.velocity)))
             if is_on:
                 pending[key].append((absolute_tick, event_ordinal, int(event.velocity)))
                 continue
             if not pending[key]:
                 if repairs is not None:
-                    repairs.append(RawPairingRepair("redundant_orphan_note_off", track_index, channel, pitch, None, None, absolute_tick, event_ordinal, None, 0, tuple(note_events[(channel, pitch, absolute_tick)])))
+                    repairs.append(RawPairingRepair("redundant_orphan_note_off", track_index, channel, pitch, None, None, absolute_tick, event_ordinal, None, 0, tuple(note_events[absolute_tick])))
                     continue
                 raise _failure("orphan_note_off")
             start_tick, onset_ordinal, velocity = pending[key].popleft()
             if absolute_tick == start_tick and len(pending[key]) == 0:
                 if repairs is not None:
-                    repairs.append(RawPairingRepair("same_tick_zero_duration_pair", track_index, channel, pitch, start_tick, onset_ordinal, absolute_tick, event_ordinal, velocity, 1, tuple(note_events[(channel, pitch, absolute_tick)])))
+                    repairs.append(RawPairingRepair("same_tick_zero_duration_pair", track_index, channel, pitch, start_tick, onset_ordinal, absolute_tick, event_ordinal, velocity, 1, tuple(note_events[absolute_tick])))
                     continue
                 raise _failure("note_nonpositive_duration")
             if absolute_tick < start_tick or absolute_tick == start_tick:

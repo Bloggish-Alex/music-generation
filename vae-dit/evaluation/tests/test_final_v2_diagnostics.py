@@ -129,12 +129,13 @@ def test_parser_integrity_rejects_tampered_raw_pairing_repair_artifact(tmp_path)
     artifact.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": [repair]}), encoding="utf-8")
     manifest = {"normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": artifact.name, "sha256": _digest(artifact)}, "repair_count": 1, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 1, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 1}
     common = {"dataset": {"identity": "fixture", "content_sha256": None}}
-    payload = FinalV2EvaluationRawCapture._parser_integrity(common, [], [], manifest, tmp_path)
+    song = SongRecord("song", "a.mid", metadata={"source_file_identity": "a" * 64, "raw_pairing_repairs": [repair]})
+    payload = FinalV2EvaluationRawCapture._parser_integrity(common, [song], [], manifest, tmp_path)
     assert payload["repair_count"] == 1
     repair["off_tick"] = 11
     artifact.write_text(json.dumps({"schema_version": "raw_pairing_repairs.v1", "normalization_policy_version": "raw_pairing_normalization.v1", "repairs": [repair]}), encoding="utf-8")
     with pytest.raises(ValueError, match="repair provenance|repair artifact"):
-        FinalV2EvaluationRawCapture._parser_integrity(common, [], [], manifest, tmp_path)
+        FinalV2EvaluationRawCapture._parser_integrity(common, [song], [], manifest, tmp_path)
 
 
 def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
