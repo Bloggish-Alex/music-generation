@@ -245,18 +245,18 @@ class FinalV2EvaluationRawCapture:
             "sample_tune_indexes": np.asarray([item[0] for item in flat], dtype=np.int64),
             "source_note_ids": np.asarray([item[1]["source_note_id"] for item in flat], dtype=np.str_),
             "canonical_bar_indexes": np.asarray([item[1]["canonical_bar_index"] for item in flat], dtype=np.int64),
-            "raw_local_start_ql": np.asarray([item[1]["raw_local_start_ql"] for item in flat], dtype=np.float32),
-            "raw_local_end_ql": np.asarray([item[1]["raw_local_end_ql"] for item in flat], dtype=np.float32),
-            "ordinary_quantized_local_start_ql": np.asarray([item[1]["ordinary_quantized_local_start_ql"] for item in flat], dtype=np.float32),
-            "ordinary_quantized_local_end_ql": np.asarray([item[1]["ordinary_quantized_local_end_ql"] for item in flat], dtype=np.float32),
-            "final_quantized_local_start_ql": np.asarray([item[1]["final_quantized_local_start_ql"] for item in flat], dtype=np.float32),
-            "final_quantized_local_end_ql": np.asarray([item[1]["final_quantized_local_end_ql"] for item in flat], dtype=np.float32),
+            "raw_local_start_ql": np.asarray([item[1]["raw_local_start_ql"] for item in flat], dtype=np.float64),
+            "raw_local_end_ql": np.asarray([item[1]["raw_local_end_ql"] for item in flat], dtype=np.float64),
+            "ordinary_quantized_local_start_ql": np.asarray([item[1]["ordinary_quantized_local_start_ql"] for item in flat], dtype=np.float64),
+            "ordinary_quantized_local_end_ql": np.asarray([item[1]["ordinary_quantized_local_end_ql"] for item in flat], dtype=np.float64),
+            "final_quantized_local_start_ql": np.asarray([item[1]["final_quantized_local_start_ql"] for item in flat], dtype=np.float64),
+            "final_quantized_local_end_ql": np.asarray([item[1]["final_quantized_local_end_ql"] for item in flat], dtype=np.float64),
             "quantization_repair_kinds": np.asarray([item[1]["quantization_repair_kind"] or "none" for item in flat], dtype=np.str_),
             "repair_slot_indexes": np.asarray([item[1]["repair_slot_index"] if item[1]["repair_slot_index"] is not None else -1 for item in flat], dtype=np.int64),
-            "projection_overlap_ql": np.asarray([item[1]["projection_overlap_ql"] if item[1]["projection_overlap_ql"] is not None else np.nan for item in flat], dtype=np.float32),
-            "projection_endpoint_error_ql": np.asarray([item[1]["projection_endpoint_error_ql"] if item[1]["projection_endpoint_error_ql"] is not None else np.nan for item in flat], dtype=np.float32),
-            "onset_residuals_ql": np.asarray([item[1]["onset_residual_ql"] for item in flat], dtype=np.float32),
-            "end_residuals_ql": np.asarray([item[1]["end_residual_ql"] for item in flat], dtype=np.float32),
+            "projection_overlap_ql": np.asarray([item[1]["projection_overlap_ql"] if item[1]["projection_overlap_ql"] is not None else np.nan for item in flat], dtype=np.float64),
+            "projection_endpoint_error_ql": np.asarray([item[1]["projection_endpoint_error_ql"] if item[1]["projection_endpoint_error_ql"] is not None else np.nan for item in flat], dtype=np.float64),
+            "onset_residuals_ql": np.asarray([item[1]["onset_residual_ql"] for item in flat], dtype=np.float64),
+            "end_residuals_ql": np.asarray([item[1]["end_residual_ql"] for item in flat], dtype=np.float64),
         }
         np.savez_compressed(path, **archive)
         arrays = {name: {"dtype": str(value.dtype), "shape": list(value.shape)} for name, value in archive.items()}
@@ -292,7 +292,7 @@ class FinalV2EvaluationRawCapture:
         if offsets.dtype != np.dtype("int64") or offsets.ndim != 1 or len(offsets) != len(source_ids) + 1:
             raise ValueError("quantization residual archive offsets are invalid")
         sample_arrays = (arrays["sample_tune_indexes"], arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["ordinary_quantized_local_start_ql"], arrays["ordinary_quantized_local_end_ql"], arrays["final_quantized_local_start_ql"], arrays["final_quantized_local_end_ql"], onset, end)
-        if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["sample_tune_indexes"].dtype != np.dtype("int64") or np.any(arrays["sample_tune_indexes"] < 0) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or arrays["canonical_bar_indexes"].dtype != np.dtype("int64") or any(value.dtype != np.dtype("float32") for value in sample_arrays[3:]):
+        if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["sample_tune_indexes"].dtype != np.dtype("int64") or np.any(arrays["sample_tune_indexes"] < 0) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or arrays["canonical_bar_indexes"].dtype != np.dtype("int64") or any(value.dtype != np.dtype("float64") for value in sample_arrays[3:]):
             raise ValueError("quantization residual archive residual arrays are invalid")
         if int(offsets[0]) != 0 or int(offsets[-1]) != len(onset) or np.any(np.diff(offsets) < 0):
             raise ValueError("quantization residual archive offsets do not align")
@@ -300,7 +300,7 @@ class FinalV2EvaluationRawCapture:
         repair_slots = arrays["repair_slot_indexes"]
         overlaps = arrays["projection_overlap_ql"]
         errors = arrays["projection_endpoint_error_ql"]
-        if any(value.ndim != 1 or len(value) != len(onset) for value in (repair_kinds, repair_slots, overlaps, errors)) or repair_kinds.dtype.kind not in {"U", "S"} or repair_slots.dtype != np.dtype("int64") or overlaps.dtype != np.dtype("float32") or errors.dtype != np.dtype("float32"):
+        if any(value.ndim != 1 or len(value) != len(onset) for value in (repair_kinds, repair_slots, overlaps, errors)) or repair_kinds.dtype.kind not in {"U", "S"} or repair_slots.dtype != np.dtype("int64") or overlaps.dtype != np.dtype("float64") or errors.dtype != np.dtype("float64"):
             raise ValueError("quantization residual archive repair arrays are invalid")
         for kind, slot, overlap, error in zip(repair_kinds.tolist(), repair_slots.tolist(), overlaps.tolist(), errors.tolist()):
             if kind == "none":

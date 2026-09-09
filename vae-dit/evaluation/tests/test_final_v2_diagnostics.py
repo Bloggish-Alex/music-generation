@@ -192,9 +192,48 @@ def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
         assert archive["group_offsets"].dtype == np.dtype("int64")
         assert archive["group_offsets"].tolist() == [0, 4]
         assert archive["sample_tune_indexes"].tolist() == [0, 0, 1, 1]
-        assert archive["onset_residuals_ql"].dtype == np.dtype("float32")
+        timing_arrays = {
+            "raw_local_start_ql", "raw_local_end_ql",
+            "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql",
+            "final_quantized_local_start_ql", "final_quantized_local_end_ql",
+            "projection_overlap_ql", "projection_endpoint_error_ql",
+            "onset_residuals_ql", "end_residuals_ql",
+        }
+        assert all(archive[name].dtype == np.dtype("float64") for name in timing_arrays)
+        assert all(payload["residual_samples"]["arrays"][name]["dtype"] == "float64" for name in timing_arrays)
     schema_path = __import__("pathlib").Path(__file__).resolve().parents[2] / "contracts" / "evaluation" / "v2" / "quantization_audit__raw_observation.v2.schema.json"
     Draft202012Validator(json.loads(schema_path.read_text())).validate(payload)
+
+
+def test_quantization_archive_preserves_residual_recomputation_precision(tmp_path) -> None:
+    sample = _samples()[0]
+    sample.update({
+        "raw_local_end_ql": 1.4979166666666666,
+        "ordinary_quantized_local_end_ql": 1.5,
+        "final_quantized_local_end_ql": 1.5,
+        "end_residual_ql": 0.002083333333333437,
+    })
+    bar = BarRecord("song", "song.mid", 0, 4.0, canonical_bar_index=0, time_signature="4/4")
+    payload = FinalV2EvaluationRawCapture._quantization({}, [_song([sample], [bar])], tmp_path)
+    archive_path = tmp_path / payload["residual_samples"]["path"]
+    with np.load(archive_path, allow_pickle=False) as archive:
+        assert archive["raw_local_end_ql"].dtype == np.dtype("float64")
+        recomputed = abs(archive["final_quantized_local_end_ql"][0] - archive["raw_local_end_ql"][0])
+        assert recomputed == pytest.approx(archive["end_residuals_ql"][0], abs=1e-15)
+
+
+def test_quantization_archive_rejects_float32_timing_arrays(tmp_path) -> None:
+    payload = FinalV2EvaluationRawCapture._quantization({}, [_song(_samples())], tmp_path)
+    archive_path = tmp_path / payload["residual_samples"]["path"]
+    with np.load(archive_path, allow_pickle=False) as archive:
+        arrays = {name: archive[name] for name in archive.files}
+    arrays["raw_local_start_ql"] = arrays["raw_local_start_ql"].astype(np.float32)
+    invalid_path = tmp_path / "float32_quantization_residual_samples.v2.npz"
+    np.savez_compressed(invalid_path, **arrays)
+    descriptors = dict(payload["residual_samples"]["arrays"])
+    descriptors["raw_local_start_ql"] = {"dtype": "float32", "shape": list(arrays["raw_local_start_ql"].shape)}
+    with pytest.raises(ValueError, match="residual arrays"):
+        FinalV2EvaluationRawCapture._validate_residual_archive(invalid_path, descriptors)
 
 
 @pytest.mark.parametrize("runtime", [{}, {"quantization_residual_samples": {"4/4": {"onset_residual_samples_ql": [.0], "end_residual_samples_ql": [.0]}}}])
