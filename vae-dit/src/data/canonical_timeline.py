@@ -95,6 +95,11 @@ class CanonicalBarSpan:
     numerator: int
     denominator: int
     time_signature_tick: int
+    is_partial: bool = False
+    partial_reason: str | None = None
+    nominal_meter: str | None = None
+    triggering_ts_tick: int | None = None
+    triggering_ts_provenance: tuple[int, int, int, int] | None = None
 
     @property
     def time_signature(self) -> str:
@@ -231,20 +236,6 @@ def build_canonical_spans(
     if not chain or chain[0].absolute_tick != 0:
         raise _failure("time_signature_initial_missing")
 
-    # Validate every resolved fact before terminal truncation.  A meter change
-    # after the last note produces no bar, but it is still part of the raw SMF
-    # authority and must land on an exact rational boundary.
-    validation_start = Fraction(0)
-    validation_active = chain[0]
-    for change in chain[1:]:
-        target = Fraction(change.absolute_tick, ppqn)
-        length = Fraction(validation_active.numerator * 4, validation_active.denominator)
-        while validation_start < target:
-            validation_start += length
-        if validation_start != target:
-            raise _failure("time_signature_mid_bar_change")
-        validation_active = change
-
     spans: list[CanonicalBarSpan] = []
     current_start = Fraction(0)
     active = chain[0]
@@ -253,7 +244,14 @@ def build_canonical_spans(
         next_change = Fraction(chain[chain_index].absolute_tick, ppqn) if chain_index < len(chain) else None
         length = Fraction(active.numerator * 4, active.denominator)
         end = current_start + length
-        spans.append(CanonicalBarSpan(len(spans), current_start, end, active.numerator, active.denominator, active.absolute_tick))
+        if next_change is not None and current_start < next_change < end:
+            if next_change <= terminal_end_ql:
+                change = chain[chain_index]
+                spans.append(CanonicalBarSpan(len(spans), current_start, next_change, active.numerator, active.denominator, active.absolute_tick, True, "time_signature_change", f"{active.numerator}/{active.denominator}", change.absolute_tick, (change.contributors[0].physical_track_index, change.contributors[0].event_ordinal, change.numerator, change.denominator)))
+            current_start = next_change
+            active = chain[chain_index]; chain_index += 1
+            continue
+        spans.append(CanonicalBarSpan(len(spans), current_start, end, active.numerator, active.denominator, active.absolute_tick, False, None, f"{active.numerator}/{active.denominator}"))
         current_start = end
         if next_change is not None and next_change == current_start:
             active = chain[chain_index]

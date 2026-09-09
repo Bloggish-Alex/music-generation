@@ -101,19 +101,20 @@ def test_invalid_raw_facts_fail_without_fallback(events, error) -> None:
         resolve_time_signature_chain(facts)
 
 
-def test_mid_bar_time_signature_change_fails_exactly() -> None:
+def test_mid_bar_time_signature_change_materializes_exact_partial_span() -> None:
     midi = _midi([_ts(4, 4), _ts(3, 4, 480)], [_note_on(60, 90), _note_off(60, 2400)])
     facts, notes = collect_raw_smf_facts(midi)
-    with pytest.raises(CanonicalTimelineError, match="time_signature_mid_bar_change"):
-        build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+    spans = build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+    assert [(span.start_ql, span.end_ql, span.time_signature, span.is_partial) for span in spans] == [(Fraction(0), Fraction(1), "4/4", True), (Fraction(1), Fraction(4), "3/4", False), (Fraction(4), Fraction(7), "3/4", False)]
+    assert spans[0].partial_reason == "time_signature_change"
 
 
-def test_terminal_does_not_hide_a_later_mid_bar_time_signature_change() -> None:
-    """A post-terminal fact is validated even though it emits no trailing bar."""
+def test_terminal_time_signature_change_materializes_the_preceding_partial_span() -> None:
+    """A TS exactly at terminal end closes the preceding partial span."""
     midi = _midi([_ts(4, 4), _ts(3, 4, 480)], [_note_on(60, 90), _note_off(60, 480)])
     facts, notes = collect_raw_smf_facts(midi)
-    with pytest.raises(CanonicalTimelineError, match="time_signature_mid_bar_change"):
-        build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+    spans = build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+    assert len(spans) == 1 and spans[0].is_partial and spans[0].end_ql == Fraction(1)
 
 
 @pytest.mark.parametrize("raw_start,raw_end,expected_slot,expected_end", [

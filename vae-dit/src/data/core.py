@@ -75,6 +75,11 @@ class BarRecord:
     canonical_bar_index: int | None = None
     meter_numerator: int | None = None
     meter_denominator: int | None = None
+    is_partial: bool = False
+    partial_reason: str | None = None
+    nominal_meter: str | None = None
+    triggering_ts_tick: int | None = None
+    triggering_ts_provenance: Dict[str, int] | None = None
     is_pickup: bool = False
     source_bar_count: Optional[int] = None
     form: Optional[str] = None
@@ -101,6 +106,11 @@ class BarRecord:
             "canonical_bar_index": self.canonical_bar_index,
             "meter_numerator": self.meter_numerator,
             "meter_denominator": self.meter_denominator,
+            "is_partial": self.is_partial,
+            "partial_reason": self.partial_reason,
+            "nominal_meter": self.nominal_meter,
+            "triggering_ts_tick": self.triggering_ts_tick,
+            "triggering_ts_provenance": self.triggering_ts_provenance,
             "is_pickup": self.is_pickup,
             "source_bar_count": self.source_bar_count,
             "form": self.form,

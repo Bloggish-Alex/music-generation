@@ -312,6 +312,11 @@ class MusicDirectoryParser:
             time_signature=span.time_signature,
             meter_numerator=span.numerator,
             meter_denominator=span.denominator,
+            is_partial=span.is_partial,
+            partial_reason=span.partial_reason,
+            nominal_meter=span.nominal_meter,
+            triggering_ts_tick=span.triggering_ts_tick,
+            triggering_ts_provenance=({"physical_track_index": span.triggering_ts_provenance[0], "event_ordinal": span.triggering_ts_provenance[1], "numerator": span.triggering_ts_provenance[2], "denominator": span.triggering_ts_provenance[3]} if span.triggering_ts_provenance is not None else None),
             source_bar_count=int(song.metadata["canonical_span_count"]),
             tracks=tracks,
         )
