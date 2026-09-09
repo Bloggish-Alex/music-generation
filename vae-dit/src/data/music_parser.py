@@ -209,7 +209,8 @@ class MusicDirectoryParser:
             ordered = sorted(values)
             return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
         fragment_count = sum(len(item["onset"]) for item in by_meter.values())
-        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
+        projected = sum(fragment.quantization_repair_kind is not None for fragment in fragments)
+        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "projected_fragment_count": projected, "projected_fragment_rate": projected / fragment_count if fragment_count else 0.0, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "projected_fragment_count": sum(fragment.meter == meter and fragment.quantization_repair_kind is not None for fragment in fragments), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
 
     @staticmethod
     def _canonical_fragment_samples(
@@ -230,8 +231,14 @@ class MusicDirectoryParser:
                 "meter": str(fragment.meter),
                 "raw_local_start_ql": raw_start,
                 "raw_local_end_ql": raw_end,
-                "quantized_local_start_ql": quantized_start,
-                "quantized_local_end_ql": quantized_end,
+                "ordinary_quantized_local_start_ql": float(fragment.ordinary_quantized_local_start_ql),
+                "ordinary_quantized_local_end_ql": float(fragment.ordinary_quantized_local_end_ql),
+                "final_quantized_local_start_ql": quantized_start,
+                "final_quantized_local_end_ql": quantized_end,
+                "quantization_repair_kind": fragment.quantization_repair_kind,
+                "repair_slot_index": fragment.repair_slot_index,
+                "projection_overlap_ql": float(fragment.projection_overlap_ql) if fragment.projection_overlap_ql is not None else None,
+                "projection_endpoint_error_ql": float(fragment.projection_endpoint_error_ql) if fragment.projection_endpoint_error_ql is not None else None,
                 "onset_residual_ql": abs(quantized_start - raw_start),
                 "end_residual_ql": abs(quantized_end - raw_end),
             })

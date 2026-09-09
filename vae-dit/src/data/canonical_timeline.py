@@ -93,8 +93,14 @@ class BarLocalQuantizedNote:
     meter: str
     raw_local_start_ql: Fraction
     raw_local_end_ql: Fraction
+    ordinary_quantized_local_start_ql: Fraction
+    ordinary_quantized_local_end_ql: Fraction
     quantized_local_start_ql: Fraction
     quantized_local_end_ql: Fraction
+    quantization_repair_kind: str | None
+    repair_slot_index: int | None
+    projection_overlap_ql: Fraction | None
+    projection_endpoint_error_ql: Fraction | None
     continues_from_previous_bar: bool
     continues_into_next_bar: bool
 
@@ -230,6 +236,31 @@ def _nearest_boundary(value: Fraction, boundaries: Sequence[Fraction]) -> Fracti
     return max(candidate for candidate in boundaries if abs(value - candidate) == distance)
 
 
+def _slot_boundaries(length: Fraction) -> tuple[tuple[Fraction, ...], tuple[Fraction, ...]]:
+    starts = tuple(
+        Fraction(index) * QUANTUM_QL
+        for index in range((length.numerator * 4 + length.denominator - 1) // length.denominator)
+        if Fraction(index) * QUANTUM_QL < length
+    )
+    return starts, (*starts, length)
+
+
+def _minimum_representable_slot_projection(
+    raw_start: Fraction, raw_end: Fraction, starts: Sequence[Fraction], ends: Sequence[Fraction]
+) -> tuple[int, Fraction, Fraction, Fraction, Fraction]:
+    """Select the frozen best-overlap bar-local slot for a collapsed fragment."""
+    candidates = []
+    for index, start in enumerate(starts):
+        end = ends[index + 1]
+        overlap = max(Fraction(0), min(raw_end, end) - max(raw_start, start))
+        error = abs(start - raw_start) + abs(end - raw_end)
+        candidates.append((overlap, error, index, start, end))
+    overlap, error, index, start, end = max(candidates, key=lambda item: (item[0], -item[1], item[2]))
+    if overlap <= 0:
+        raise _failure("quantization_projection_without_raw_overlap")
+    return index, start, end, overlap, error
+
+
 def fragment_note(note: RawSourceNote, span: CanonicalBarSpan, *, ppqn: int) -> BarLocalQuantizedNote | None:
     """Clip one raw note to one span and quantize it on that span's local grid."""
     source_start, source_end = note.start_ql(ppqn), note.end_ql(ppqn)
@@ -238,15 +269,18 @@ def fragment_note(note: RawSourceNote, span: CanonicalBarSpan, *, ppqn: int) -> 
         return None
     length = span.end_ql - span.start_ql
     raw_local_start, raw_local_end = start - span.start_ql, end - span.start_ql
-    starts = tuple(Fraction(index) * QUANTUM_QL for index in range((length.numerator * 4 + length.denominator - 1) // length.denominator) if Fraction(index) * QUANTUM_QL < length)
-    ends = (*starts, length)
-    quantized_start = _nearest_boundary(raw_local_start, starts)
-    quantized_end = _nearest_boundary(raw_local_end, ends)
+    starts, ends = _slot_boundaries(length)
+    ordinary_start = _nearest_boundary(raw_local_start, starts)
+    ordinary_end = _nearest_boundary(raw_local_end, ends)
+    quantized_start, quantized_end = ordinary_start, ordinary_end
+    repair_kind = None; repair_slot_index = None; overlap = None; endpoint_error = None
     if quantized_end <= quantized_start:
-        raise _failure("quantization_nonpositive_clipped_duration")
+        repair_slot_index, quantized_start, quantized_end, overlap, endpoint_error = _minimum_representable_slot_projection(raw_local_start, raw_local_end, starts, ends)
+        repair_kind = "minimum_representable_slot_projection"
     return BarLocalQuantizedNote(
         note, span.canonical_bar_index, span.time_signature, raw_local_start, raw_local_end,
-        quantized_start, quantized_end,
+        ordinary_start, ordinary_end, quantized_start, quantized_end,
+        repair_kind, repair_slot_index, overlap, endpoint_error,
         source_start < span.start_ql, source_end > span.end_ql,
     )
 

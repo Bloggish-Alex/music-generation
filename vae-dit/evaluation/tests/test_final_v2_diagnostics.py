@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 import numpy as np
 import pytest
@@ -21,13 +22,51 @@ def _digest(path):
 
 def _samples(prefix: str = "note") -> list[dict]:
     return [
-        {"source_note_id": f"{prefix}:0", "canonical_bar_index": 0, "meter": "4/4", "raw_local_start_ql": .0, "raw_local_end_ql": 1.0, "quantized_local_start_ql": .0, "quantized_local_end_ql": 1.0, "onset_residual_ql": .0, "end_residual_ql": .0},
-        {"source_note_id": f"{prefix}:1", "canonical_bar_index": 1, "meter": "4/4", "raw_local_start_ql": .1, "raw_local_end_ql": 1.2, "quantized_local_start_ql": .0, "quantized_local_end_ql": 1.0, "onset_residual_ql": .1, "end_residual_ql": .2},
+        {"source_note_id": f"{prefix}:0", "canonical_bar_index": 0, "meter": "4/4", "raw_local_start_ql": .0, "raw_local_end_ql": 1.0, "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": 1.0, "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": 1.0, "quantization_repair_kind": None, "repair_slot_index": None, "projection_overlap_ql": None, "projection_endpoint_error_ql": None, "onset_residual_ql": .0, "end_residual_ql": .0},
+        {"source_note_id": f"{prefix}:1", "canonical_bar_index": 1, "meter": "4/4", "raw_local_start_ql": .1, "raw_local_end_ql": 1.2, "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": 1.0, "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": 1.0, "quantization_repair_kind": None, "repair_slot_index": None, "projection_overlap_ql": None, "projection_endpoint_error_ql": None, "onset_residual_ql": .1, "end_residual_ql": .2},
     ]
 
 
 def _audit(samples: list[dict]) -> dict:
-    return {"audit_unit": "source_note_fragment", "fragment_count": len(samples), "by_meter": {"4/4": {"fragment_count": len(samples), "nonzero_residual_count": sum(value > 1e-9 for sample in samples for value in (sample["onset_residual_ql"], sample["end_residual_ql"])), "onset_residual_ql": {"max": .1, "p95": .1}, "end_residual_ql": {"max": .2, "p95": .2}}}}
+    def summary(values: list[float]) -> dict[str, float]:
+        ordered = sorted(values)
+        return {"max": max(ordered, default=0.0), "p95": ordered[max(0, math.ceil(.95 * len(ordered)) - 1)] if ordered else 0.0}
+
+    by_meter = {}
+    for meter in sorted({sample["meter"] for sample in samples}):
+        rows = [sample for sample in samples if sample["meter"] == meter]
+        onset = [sample["onset_residual_ql"] for sample in rows]
+        end = [sample["end_residual_ql"] for sample in rows]
+        by_meter[meter] = {
+            "fragment_count": len(rows),
+            "projected_fragment_count": sum(sample["quantization_repair_kind"] is not None for sample in rows),
+            "nonzero_residual_count": sum(value > 1e-9 for value in onset + end),
+            "onset_residual_ql": summary(onset),
+            "end_residual_ql": summary(end),
+        }
+    projected = sum(sample["quantization_repair_kind"] is not None for sample in samples)
+    return {"audit_unit": "source_note_fragment", "fragment_count": len(samples), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(samples) if samples else 0.0, "by_meter": by_meter}
+
+
+def _song(samples: list[dict], bars: list[BarRecord] | None = None) -> SongRecord:
+    return SongRecord(
+        "song", "song.mid",
+        metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)},
+        runtime_diagnostics={"quantization_fragment_samples": samples},
+        bars=bars or [BarRecord("song", "song.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)],
+    )
+
+
+def _repaired_sample() -> dict:
+    return {
+        "source_note_id": "projected:0", "canonical_bar_index": 0, "meter": "4/4",
+        "raw_local_start_ql": .11, "raw_local_end_ql": .12,
+        "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": .0,
+        "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": .25,
+        "quantization_repair_kind": "minimum_representable_slot_projection", "repair_slot_index": 0,
+        "projection_overlap_ql": .01, "projection_endpoint_error_ql": .24,
+        "onset_residual_ql": .11, "end_residual_ql": .13,
+    }
 
 
 def test_final_v2_diagnostic_raw_schema_rejects_available_without_capture(tmp_path) -> None:
@@ -96,7 +135,7 @@ def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
     archive_path = tmp_path / payload["residual_samples"]["path"]
     assert payload["residual_samples"]["sha256"] == _digest(archive_path)
     with np.load(archive_path, allow_pickle=False) as archive:
-        assert {"source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "quantized_local_end_ql"} <= set(archive.files)
+        assert {"source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_end_ql", "quantization_repair_kinds"} <= set(archive.files)
         assert archive["group_offsets"].dtype == np.dtype("int64")
         assert archive["group_offsets"].tolist() == [0, 4]
         assert archive["sample_tune_indexes"].tolist() == [0, 0, 1, 1]
@@ -120,7 +159,91 @@ def test_quantization_audit_rejects_summary_statistic_mismatch(tmp_path) -> None
         FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
 
 
-@pytest.mark.parametrize("field,value", [("meter", "3/4"), ("canonical_bar_index", 9), ("quantized_local_start_ql", .1), ("quantized_local_end_ql", .4), ("raw_local_end_ql", .0)])
+def test_quantization_audit_accepts_partial_final_slot_for_5_32_bar(tmp_path) -> None:
+    sample = {
+        "source_note_id": "partial:0", "canonical_bar_index": 0, "meter": "5/32",
+        "raw_local_start_ql": .51, "raw_local_end_ql": .625,
+        "ordinary_quantized_local_start_ql": .5, "ordinary_quantized_local_end_ql": .625,
+        "final_quantized_local_start_ql": .5, "final_quantized_local_end_ql": .625,
+        "quantization_repair_kind": None, "repair_slot_index": None,
+        "projection_overlap_ql": None, "projection_endpoint_error_ql": None,
+        "onset_residual_ql": .01, "end_residual_ql": .0,
+    }
+    bar = BarRecord("song", "song.mid", 0, .625, canonical_bar_index=0, time_signature="5/32")
+    payload = FinalV2EvaluationRawCapture._quantization({}, [_song([sample], [bar])], tmp_path)
+    assert payload["fragment_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repair_slot_index", 1),
+        ("projection_overlap_ql", .02),
+        ("projection_endpoint_error_ql", .23),
+        ("final_quantized_local_end_ql", .5),
+    ],
+)
+def test_quantization_audit_rejects_forged_projection_facts(tmp_path, field, value) -> None:
+    sample = _repaired_sample(); sample[field] = value
+    with pytest.raises(ValueError, match="sample values|repair facts"):
+        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+
+
+def test_quantization_audit_rejects_collapsed_fragment_without_repair(tmp_path) -> None:
+    sample = _repaired_sample()
+    sample.update({
+        "quantization_repair_kind": None,
+        "repair_slot_index": None,
+        "projection_overlap_ql": None,
+        "projection_endpoint_error_ql": None,
+        "final_quantized_local_end_ql": .0,
+        "end_residual_ql": .12,
+    })
+    with pytest.raises(ValueError, match="sample values|repair facts"):
+        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+
+
+def test_quantization_audit_rejects_normal_fragment_with_forged_repair(tmp_path) -> None:
+    sample = _samples()[0]
+    sample.update({
+        "quantization_repair_kind": "minimum_representable_slot_projection",
+        "repair_slot_index": 0,
+        "projection_overlap_ql": 1.0,
+        "projection_endpoint_error_ql": 0.0,
+    })
+    with pytest.raises(ValueError, match="repair facts"):
+        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+
+
+@pytest.mark.parametrize("path", [("projected_fragment_count",), ("by_meter", "4/4", "projected_fragment_count")])
+def test_quantization_audit_rejects_projection_summary_mismatch(tmp_path, path) -> None:
+    sample = _repaired_sample(); audit = _audit([sample])
+    target = audit
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = 0
+    song = _song([sample]); song.metadata["quantization_audit"] = audit
+    with pytest.raises(ValueError, match="projection summary"):
+        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+
+
+@pytest.mark.parametrize(
+    "array_name,value",
+    [("repair_slot_indexes", 0), ("projection_overlap_ql", 0.0)],
+)
+def test_quantization_audit_rejects_incoherent_none_archive_repair_fields(tmp_path, array_name, value) -> None:
+    payload = FinalV2EvaluationRawCapture._quantization({}, [_song(_samples())], tmp_path)
+    archive_path = tmp_path / payload["residual_samples"]["path"]
+    with np.load(archive_path, allow_pickle=False) as archive:
+        arrays = {name: archive[name] for name in archive.files}
+    arrays[array_name][0] = value
+    invalid_path = tmp_path / "invalid_quantization_residual_samples.v2.npz"
+    np.savez_compressed(invalid_path, **arrays)
+    with pytest.raises(ValueError, match="repair arrays"):
+        FinalV2EvaluationRawCapture._validate_residual_archive(invalid_path, payload["residual_samples"]["arrays"])
+
+
+@pytest.mark.parametrize("field,value", [("meter", "3/4"), ("canonical_bar_index", 9), ("ordinary_quantized_local_start_ql", .1), ("ordinary_quantized_local_end_ql", .4), ("final_quantized_local_start_ql", .1), ("final_quantized_local_end_ql", .4), ("raw_local_end_ql", .0)])
 def test_quantization_audit_rejects_fragments_outside_canonical_slot_grid(tmp_path, field, value) -> None:
     samples = _samples(); samples[0][field] = value
     song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=[BarRecord("song", "song.mid", 0, .625, canonical_bar_index=0, time_signature="5/32"), BarRecord("song", "song.mid", 1, 4.0, canonical_bar_index=1, time_signature="4/4")])

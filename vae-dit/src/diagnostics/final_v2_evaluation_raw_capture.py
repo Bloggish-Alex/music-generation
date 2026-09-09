@@ -76,7 +76,9 @@ class FinalV2EvaluationRawCapture:
         required_sample = {
             "source_note_id", "canonical_bar_index", "meter",
             "raw_local_start_ql", "raw_local_end_ql",
-            "quantized_local_start_ql", "quantized_local_end_ql",
+            "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql",
+            "final_quantized_local_start_ql", "final_quantized_local_end_ql",
+            "quantization_repair_kind", "repair_slot_index", "projection_overlap_ql", "projection_endpoint_error_ql",
             "onset_residual_ql", "end_residual_ql",
         }
         grouped: dict[tuple[str, str], list[tuple[int, Mapping[str, Any]]]] = {}
@@ -109,7 +111,7 @@ class FinalV2EvaluationRawCapture:
                 if bar is None or meter != str(bar.time_signature):
                     raise ValueError(f"quantization fragment canonical bar alignment is invalid for {song.song_id}")
                 try:
-                    raw_start, raw_end, quantized_start, quantized_end, onset_error, end_error = (float(sample[name]) for name in ("raw_local_start_ql", "raw_local_end_ql", "quantized_local_start_ql", "quantized_local_end_ql", "onset_residual_ql", "end_residual_ql"))
+                    raw_start, raw_end, ordinary_start, ordinary_end, quantized_start, quantized_end, onset_error, end_error = (float(sample[name]) for name in ("raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "onset_residual_ql", "end_residual_ql"))
                 except (TypeError, ValueError) as error:
                     raise ValueError(f"quantization fragment sample is non-numeric for {song.song_id}") from error
                 grid = SlotGrid.for_bar(float(bar.bar_length_ql))
@@ -118,6 +120,29 @@ class FinalV2EvaluationRawCapture:
                 epsilon = 1e-6
                 if (not all(math.isfinite(value) and value >= 0.0 for value in (raw_start, raw_end, quantized_start, quantized_end, onset_error, end_error)) or raw_end <= raw_start or raw_end > float(bar.bar_length_ql) + epsilon or quantized_end <= quantized_start or not any(math.isclose(quantized_start, value, abs_tol=epsilon) for value in starts) or not any(math.isclose(quantized_end, value, abs_tol=epsilon) for value in ends) or not math.isclose(onset_error, abs(quantized_start - raw_start), abs_tol=1e-9) or not math.isclose(end_error, abs(quantized_end - raw_end), abs_tol=1e-9)):
                     raise ValueError(f"quantization fragment sample values are invalid for {song.song_id}")
+                repaired = sample["quantization_repair_kind"] == "minimum_representable_slot_projection"
+                ordinary_start_valid = any(math.isclose(ordinary_start, value, abs_tol=epsilon) for value in starts)
+                ordinary_end_valid = any(math.isclose(ordinary_end, value, abs_tol=epsilon) for value in ends)
+                if not ordinary_start_valid or not ordinary_end_valid:
+                    raise ValueError(f"quantization fragment ordinary boundaries are invalid for {song.song_id}")
+                if sample["quantization_repair_kind"] not in {None, "minimum_representable_slot_projection"}:
+                    raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
+                if not repaired:
+                    if ordinary_end <= ordinary_start or not math.isclose(quantized_start, ordinary_start, abs_tol=epsilon) or not math.isclose(quantized_end, ordinary_end, abs_tol=epsilon) or any(sample[name] is not None for name in ("repair_slot_index", "projection_overlap_ql", "projection_endpoint_error_ql")):
+                        raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
+                else:
+                    slot = sample["repair_slot_index"]
+                    if ordinary_end > ordinary_start or not isinstance(slot, int) or not 0 <= slot < grid.valid_slot_count:
+                        raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
+                    candidates = []
+                    for index, start in enumerate(starts):
+                        end = ends[index + 1]
+                        overlap = max(0.0, min(raw_end, end) - max(raw_start, start))
+                        error = abs(start - raw_start) + abs(end - raw_end)
+                        candidates.append((overlap, error, index, start, end))
+                    overlap, error, expected_slot, expected_start, expected_end = max(candidates, key=lambda item: (item[0], -item[1], item[2]))
+                    if overlap <= 0 or slot != expected_slot or not math.isclose(quantized_start, expected_start, abs_tol=epsilon) or not math.isclose(quantized_end, expected_end, abs_tol=epsilon) or not math.isclose(float(sample["projection_overlap_ql"]), overlap, abs_tol=epsilon) or not math.isclose(float(sample["projection_endpoint_error_ql"]), error, abs_tol=epsilon):
+                        raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
                 per_meter.setdefault(meter, []).append(sample)
             for meter, summary in audit.get("by_meter", {}).items():
                 meter_samples = per_meter.get(meter, [])
@@ -125,12 +150,18 @@ class FinalV2EvaluationRawCapture:
                 end_values = [float(sample["end_residual_ql"]) for sample in meter_samples]
                 if int(summary.get("fragment_count", summary.get("event_count", -1))) != len(meter_samples) or int(summary.get("nonzero_residual_count", -1)) != sum(value > 1e-9 for value in onset_values + end_values):
                     raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}/{meter}")
+                projected_count = sum(sample["quantization_repair_kind"] is not None for sample in meter_samples)
+                if int(summary.get("projected_fragment_count", -1)) != projected_count:
+                    raise ValueError(f"quantization fragment projection summary disagrees for {song.song_id}/{meter}")
                 for field, values in (("onset_residual_ql", onset_values), ("end_residual_ql", end_values)):
                     declared = summary.get(field)
                     if not isinstance(declared, Mapping) or any(not math.isclose(float(declared.get(statistic, float("nan"))), residual(values)[statistic], abs_tol=1e-9) for statistic in ("max", "p95")):
                         raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}/{meter}")
             if set(per_meter) != set(audit.get("by_meter", {})):
                 raise ValueError(f"quantization fragment samples disagree with summary for {song.song_id}")
+            projected_count = sum(sample["quantization_repair_kind"] is not None for sample in samples)
+            if int(audit.get("projected_fragment_count", -1)) != projected_count or not math.isclose(float(audit.get("projected_fragment_rate", float("nan"))), projected_count / len(samples) if samples else 0.0, abs_tol=1e-9):
+                raise ValueError(f"quantization fragment projection summary disagrees for {song.song_id}")
             source = str(song.metadata.get("source_file_identity", song.song_id))
             tune_index = int(song.metadata.get("tune_index", 0))
             for meter, meter_samples in per_meter.items():
@@ -150,8 +181,14 @@ class FinalV2EvaluationRawCapture:
             "canonical_bar_indexes": np.asarray([item[1]["canonical_bar_index"] for item in flat], dtype=np.int64),
             "raw_local_start_ql": np.asarray([item[1]["raw_local_start_ql"] for item in flat], dtype=np.float32),
             "raw_local_end_ql": np.asarray([item[1]["raw_local_end_ql"] for item in flat], dtype=np.float32),
-            "quantized_local_start_ql": np.asarray([item[1]["quantized_local_start_ql"] for item in flat], dtype=np.float32),
-            "quantized_local_end_ql": np.asarray([item[1]["quantized_local_end_ql"] for item in flat], dtype=np.float32),
+            "ordinary_quantized_local_start_ql": np.asarray([item[1]["ordinary_quantized_local_start_ql"] for item in flat], dtype=np.float32),
+            "ordinary_quantized_local_end_ql": np.asarray([item[1]["ordinary_quantized_local_end_ql"] for item in flat], dtype=np.float32),
+            "final_quantized_local_start_ql": np.asarray([item[1]["final_quantized_local_start_ql"] for item in flat], dtype=np.float32),
+            "final_quantized_local_end_ql": np.asarray([item[1]["final_quantized_local_end_ql"] for item in flat], dtype=np.float32),
+            "quantization_repair_kinds": np.asarray([item[1]["quantization_repair_kind"] or "none" for item in flat], dtype=np.str_),
+            "repair_slot_indexes": np.asarray([item[1]["repair_slot_index"] if item[1]["repair_slot_index"] is not None else -1 for item in flat], dtype=np.int64),
+            "projection_overlap_ql": np.asarray([item[1]["projection_overlap_ql"] if item[1]["projection_overlap_ql"] is not None else np.nan for item in flat], dtype=np.float32),
+            "projection_endpoint_error_ql": np.asarray([item[1]["projection_endpoint_error_ql"] if item[1]["projection_endpoint_error_ql"] is not None else np.nan for item in flat], dtype=np.float32),
             "onset_residuals_ql": np.asarray([item[1]["onset_residual_ql"] for item in flat], dtype=np.float32),
             "end_residuals_ql": np.asarray([item[1]["end_residual_ql"] for item in flat], dtype=np.float32),
         }
@@ -163,13 +200,14 @@ class FinalV2EvaluationRawCapture:
             values = [item[1] for item in grouped[(source, meter)]]
             onset_values = [float(item["onset_residual_ql"]) for item in values]
             end_values = [float(item["end_residual_ql"]) for item in values]
-            rows.append({"source_file_identity": source, "meter": meter, "fragment_count": len(values), "nonzero_residual_count": sum(value > 1e-9 for value in onset_values + end_values), "onset_residual_ql": residual(onset_values), "end_residual_ql": residual(end_values)})
-        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "audit_unit": "source_note_fragment", "fragment_count": len(flat), "grid_policy": {"quantum_ql": .25, "epsilon_ql": 1e-6, "capacity": 48}, "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
+            rows.append({"source_file_identity": source, "meter": meter, "fragment_count": len(values), "projected_fragment_count": sum(item["quantization_repair_kind"] is not None for item in values), "nonzero_residual_count": sum(value > 1e-9 for value in onset_values + end_values), "onset_residual_ql": residual(onset_values), "end_residual_ql": residual(end_values)})
+        projected = sum(item[1]["quantization_repair_kind"] is not None for item in flat)
+        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "audit_unit": "source_note_fragment", "fragment_count": len(flat), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(flat) if flat else 0.0, "grid_policy": {"quantum_ql": .25, "epsilon_ql": 1e-6, "capacity": 48}, "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
 
     @staticmethod
     def _validate_residual_archive(path: Path, declared_arrays: Mapping[str, Mapping[str, Any]]) -> None:
         """Reject a non-canonical residual archive before publishing AVAILABLE."""
-        required = {"source_file_identities", "meters", "group_offsets", "sample_tune_indexes", "source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "raw_local_end_ql", "quantized_local_start_ql", "quantized_local_end_ql", "onset_residuals_ql", "end_residuals_ql"}
+        required = {"source_file_identities", "meters", "group_offsets", "sample_tune_indexes", "source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "quantization_repair_kinds", "repair_slot_indexes", "projection_overlap_ql", "projection_endpoint_error_ql", "onset_residuals_ql", "end_residuals_ql"}
         with np.load(path, allow_pickle=False) as archive:
             if set(archive.files) != required:
                 raise ValueError("quantization residual archive has an invalid array set")
@@ -187,12 +225,24 @@ class FinalV2EvaluationRawCapture:
             raise ValueError("quantization residual archive string arrays are invalid")
         if offsets.dtype != np.dtype("int64") or offsets.ndim != 1 or len(offsets) != len(source_ids) + 1:
             raise ValueError("quantization residual archive offsets are invalid")
-        sample_arrays = (arrays["sample_tune_indexes"], arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["quantized_local_start_ql"], arrays["quantized_local_end_ql"], onset, end)
+        sample_arrays = (arrays["sample_tune_indexes"], arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["ordinary_quantized_local_start_ql"], arrays["ordinary_quantized_local_end_ql"], arrays["final_quantized_local_start_ql"], arrays["final_quantized_local_end_ql"], onset, end)
         if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["sample_tune_indexes"].dtype != np.dtype("int64") or np.any(arrays["sample_tune_indexes"] < 0) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or arrays["canonical_bar_indexes"].dtype != np.dtype("int64") or any(value.dtype != np.dtype("float32") for value in sample_arrays[3:]):
             raise ValueError("quantization residual archive residual arrays are invalid")
         if int(offsets[0]) != 0 or int(offsets[-1]) != len(onset) or np.any(np.diff(offsets) < 0):
             raise ValueError("quantization residual archive offsets do not align")
-        if not all(np.isfinite(value).all() for value in sample_arrays[3:]) or any(np.any(value < 0.0) for value in sample_arrays[3:]) or np.any(arrays["raw_local_end_ql"] <= arrays["raw_local_start_ql"]) or np.any(arrays["quantized_local_end_ql"] <= arrays["quantized_local_start_ql"]) or not np.allclose(onset, np.abs(arrays["quantized_local_start_ql"] - arrays["raw_local_start_ql"])) or not np.allclose(end, np.abs(arrays["quantized_local_end_ql"] - arrays["raw_local_end_ql"])):
+        repair_kinds = arrays["quantization_repair_kinds"]
+        repair_slots = arrays["repair_slot_indexes"]
+        overlaps = arrays["projection_overlap_ql"]
+        errors = arrays["projection_endpoint_error_ql"]
+        if any(value.ndim != 1 or len(value) != len(onset) for value in (repair_kinds, repair_slots, overlaps, errors)) or repair_kinds.dtype.kind not in {"U", "S"} or repair_slots.dtype != np.dtype("int64") or overlaps.dtype != np.dtype("float32") or errors.dtype != np.dtype("float32"):
+            raise ValueError("quantization residual archive repair arrays are invalid")
+        for kind, slot, overlap, error in zip(repair_kinds.tolist(), repair_slots.tolist(), overlaps.tolist(), errors.tolist()):
+            if kind == "none":
+                if slot != -1 or not math.isnan(overlap) or not math.isnan(error):
+                    raise ValueError("quantization residual archive repair arrays are invalid")
+            elif kind != "minimum_representable_slot_projection" or slot < 0 or not math.isfinite(overlap) or not math.isfinite(error) or overlap < 0 or error < 0:
+                raise ValueError("quantization residual archive repair arrays are invalid")
+        if not all(np.isfinite(value).all() for value in sample_arrays[3:]) or any(np.any(value < 0.0) for value in sample_arrays[3:]) or np.any(arrays["raw_local_end_ql"] <= arrays["raw_local_start_ql"]) or np.any(arrays["final_quantized_local_end_ql"] <= arrays["final_quantized_local_start_ql"]) or not np.allclose(onset, np.abs(arrays["final_quantized_local_start_ql"] - arrays["raw_local_start_ql"])) or not np.allclose(end, np.abs(arrays["final_quantized_local_end_ql"] - arrays["raw_local_end_ql"])):
             raise ValueError("quantization residual archive values are invalid")
 
     @staticmethod

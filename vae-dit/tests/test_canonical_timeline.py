@@ -99,3 +99,18 @@ def test_terminal_does_not_hide_a_later_mid_bar_time_signature_change() -> None:
     facts, notes = collect_raw_smf_facts(midi)
     with pytest.raises(CanonicalTimelineError, match="time_signature_mid_bar_change"):
         build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))
+
+
+@pytest.mark.parametrize("raw_start,raw_end,expected_slot,expected_end", [
+    (53, 58, 0, Fraction(1, 4)),
+    (96, 144, 1, Fraction(1, 2)),
+    (115, 125, 1, Fraction(1, 2)),
+])
+def test_collapsed_fragment_projects_to_frozen_best_local_slot(raw_start, raw_end, expected_slot, expected_end) -> None:
+    midi = _midi([_ts(4, 4)], [_note_on(60, 90, raw_start), _note_off(60, raw_end - raw_start)])
+    facts, notes = collect_raw_smf_facts(midi)
+    span = build_canonical_spans(resolve_time_signature_chain(facts), ppqn=480, terminal_end_ql=notes[0].end_ql(480))[0]
+    fragment = fragment_notes(notes, [span], ppqn=480)[0]
+    assert fragment.quantization_repair_kind == "minimum_representable_slot_projection"
+    assert fragment.repair_slot_index == expected_slot
+    assert fragment.quantized_local_end_ql == expected_end
