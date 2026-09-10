@@ -4,13 +4,36 @@ import hashlib
 import json
 
 import numpy as np
+import pytest
 
-from diagnostics.codec_fidelity_raw_capture import CodecFidelityV2RawCaptureRequest, JsonNpzCodecFidelityV2RawCapture
+from diagnostics.codec_fidelity_raw_capture import CodecFidelityV2RawCaptureRequest, JsonNpzCodecFidelityV2RawCapture, _tensor_schema
 from export.codec_fidelity_artifact_export import CodecFidelityArtifactExportConfig, export_codec_fidelity_artifacts
 
 
 def _digest(path):
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_final_v2_tensor_schema_executes_capacity_validation() -> None:
+    config = {"bar_tensor": {"backend": "semantic_harmony_set_v2", "pitch_scale": 24.0, "slot_grid": {"quantum_ql": .25, "capacity": 92, "epsilon_ql": 1e-6}}}
+    schema = _tensor_schema(config, (18, 92, 6))
+    assert len(schema["track_names"]) == 18
+    with pytest.raises(ValueError, match="configured slot capacity"):
+        _tensor_schema(config, (18, 48, 6))
+    with pytest.raises(ValueError, match="supported public tensor schema"):
+        _tensor_schema({"bar_tensor": {"backend": "legacy_physical"}}, (3, 48, 6))
+
+
+@pytest.mark.parametrize("slot_grid", [
+    {"quantum_ql": .5, "capacity": 92, "epsilon_ql": 1e-6},
+    {"quantum_ql": .25, "capacity": 92, "epsilon_ql": 0.0},
+    {"quantum_ql": .25, "capacity": 92},
+    {"quantum_ql": .25, "capacity": 92, "epsilon_ql": 1e-6, "unexpected": 1},
+])
+def test_final_v2_tensor_schema_rejects_invalid_slot_grid_policy(slot_grid) -> None:
+    config = {"bar_tensor": {"backend": "semantic_harmony_set_v2", "slot_grid": slot_grid}}
+    with pytest.raises(ValueError, match="slot_grid"):
+        _tensor_schema(config, (18, 92, 6))
 
 
 def _source(path, split, song, bars=None):

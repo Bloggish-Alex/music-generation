@@ -14,6 +14,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 import numpy as np
 
+from codec.slot_grid import SlotGridPolicy
 from data.core import BarTensorRecord, SongRecord
 
 
@@ -391,44 +392,27 @@ def _tensor_schema(config: Mapping[str, Any], shape: Sequence[int]) -> Mapping[s
         raise ValueError("codec tensor shape must be [track, step, feature]")
     track_count, step_count, feature_count = (int(value) for value in shape)
     section = config.get("bar_tensor") if isinstance(config.get("bar_tensor"), Mapping) else {}
-    backend = str(section.get("backend", "legacy_physical")).strip().lower()
+    backend = str(section.get("backend", "")).strip().lower()
     pitch_scale = float(section.get("pitch_scale", 24.0))
     if not math.isfinite(pitch_scale) or pitch_scale <= 0:
         raise ValueError("codec pitch_scale must be finite and positive")
-    if backend in {"semantic_3voice", "semantic", "melody_harmony_bass"}:
-        if track_count != len(SEMANTIC_TRACK_NAMES) or feature_count != len(SEMANTIC_FEATURE_NAMES):
-            raise ValueError("semantic codec configuration does not match runtime tensor shape")
-        feature_names = list(SEMANTIC_FEATURE_NAMES)
-        track_names = list(SEMANTIC_TRACK_NAMES)
-        feature_units = {
-            "relative_pitch": "normalized by pitch_scale_semitones",
-            "is_rest": "binary 1=rest",
-            "is_note_on": "binary 1=note onset",
-            "is_hold": "binary 1=held note",
-            "normalized_velocity": "unit interval MIDI velocity",
-            "velocity_ratio": "slot-local velocity share",
-            "density_gradient": "normalized per-track slot density change",
-            "relative_chroma_embedding": "relative chroma projection coordinates",
-        }
-    elif backend in {"legacy", "legacy_physical", "physical"}:
-        if feature_count != len(FEATURE_NAMES):
-            raise ValueError("legacy codec configuration does not match runtime tensor shape")
-        feature_names = list(FEATURE_NAMES)
-        track_names = [f"track_{index}" for index in range(track_count)]
-        feature_units = {
-            "relative_pitch": "normalized by pitch_scale_semitones",
-            "is_rest": "binary 1=rest",
-            "is_note_on": "binary 1=note onset",
-            "is_hold": "binary 1=held note",
-            "normalized_velocity": "unit interval MIDI velocity",
-            "chord_embedding": "relative chord projection coordinates",
-        }
-    else:
+    if backend != "semantic_harmony_set_v2":
         raise ValueError("runtime codec has no supported public tensor schema")
-    if backend in {"semantic_harmony_set_v2", "semantic_harmony_set", "semantic"}:
-        slot_grid = section.get("slot_grid")
-        if not isinstance(slot_grid, Mapping) or type(slot_grid.get("capacity")) is not int or slot_grid["capacity"] != step_count:
-            raise ValueError("runtime tensor step count does not match configured slot capacity")
+    policy = SlotGridPolicy.from_bar_tensor_config(section)
+    if policy.capacity != step_count:
+        raise ValueError("runtime tensor step count does not match configured slot capacity")
+    feature_names = ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normalized_velocity", "velocity_ratio"]
+    track_names = ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"]
+    if track_count != len(track_names) or feature_count != len(feature_names):
+        raise ValueError("semantic_harmony_set_v2 configuration does not match runtime tensor shape")
+    feature_units = {
+        "relative_pitch": "normalized by pitch_scale_semitones",
+        "is_rest": "binary 1=rest",
+        "is_note_on": "binary 1=note onset",
+        "is_hold": "binary 1=held note",
+        "normalized_velocity": "unit interval MIDI velocity",
+        "velocity_ratio": "slot-local velocity share",
+    }
     return {
         "axis_order": ["bar", "track", "step", "feature"],
         "feature_names": feature_names,
