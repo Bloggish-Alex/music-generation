@@ -18,6 +18,15 @@ from codec.slot_grid import SlotGrid, SlotGridPolicy
 MODULES = ("parser_integrity", "quantization_audit", "performance_controls", "form_action_alignment")
 
 
+def _control_coverage(facts: Sequence[Mapping[str, Any]], name: str) -> dict[str, int]:
+    """Aggregate readable/present source-control facts without inventing controls."""
+    return {
+        "song_count": len(facts),
+        "readable_song_count": sum(bool(item.get(f"{name}_readable")) for item in facts),
+        "present_song_count": sum(bool(item.get(f"{name}_present")) for item in facts),
+    }
+
+
 def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -334,23 +343,20 @@ class FinalV2EvaluationRawCapture:
     def _controls(common: Mapping[str, Any], songs: Sequence[SongRecord]) -> dict[str, Any]:
         facts = [song.metadata.get("performance_controls", {}) for song in songs]
         velocities = [note.velocity for song in songs for bar in song.bars for track in bar.tracks for note in track.notes]
-        tempo_available = all(bool(item.get("tempo_available")) for item in facts)
-        key_available = all(bool(item.get("key_available")) for item in facts)
-        cc64_available = all(bool(item.get("cc64_available")) for item in facts)
+        tempo_available = bool(facts) and all(bool(item.get("tempo_readable")) for item in facts)
+        key_available = bool(facts) and all(bool(item.get("key_readable")) for item in facts)
+        cc64_available = bool(facts) and all(bool(item.get("cc64_readable")) for item in facts)
         velocity_available = bool(velocities)
-        reasons = [str(item.get("cc64_unavailable_reason")) for item in facts if item.get("cc64_unavailable_reason")]
-        if not cc64_available and not reasons:
-            reasons = ["canonical_raw_controls_pending"]
-        unavailable_reasons = ([{"field": "tempo", "reason": "canonical_raw_controls_pending"}] if not tempo_available else []) + ([{"field": "key", "reason": "canonical_raw_controls_pending"}] if not key_available else []) + ([{"field": "velocity", "reason": "no_note_velocity_facts"}] if not velocity_available else []) + ([{"field": "cc64", "reason": reason} for reason in reasons] if not cc64_available else [])
+        unavailable_reasons = ([{"field": "tempo", "reason": "raw_smf_controls_unreadable"}] if not tempo_available else []) + ([{"field": "key", "reason": "raw_smf_controls_unreadable"}] if not key_available else []) + ([{"field": "velocity", "reason": "no_note_velocity_facts"}] if not velocity_available else []) + ([{"field": "cc64", "reason": "raw_smf_controls_unreadable"}] if not cc64_available else [])
         payload = {"schema_version": "performance_controls_raw_observation.v2", "status": "AVAILABLE" if tempo_available and key_available and velocity_available and cc64_available else "UNAVAILABLE", **common, "availability": {"raw_capture": True, "tempo": tempo_available, "key": key_available, "velocity": velocity_available, "cc64": cc64_available}, "unavailable_reasons": unavailable_reasons}
         if velocities:
             payload["velocity"] = {"note_count": len(velocities), "mean": float(sum(velocities) / len(velocities))}
         if tempo_available:
-            payload["tempo"] = {"song_count": len(songs)}
+            payload["tempo"] = {"format_coverage": _control_coverage(facts, "tempo"), "event_count": sum(len(item.get("tempo_events", [])) for item in facts)}
         if key_available:
-            payload["key"] = {"song_count": len(songs)}
+            payload["key"] = {"format_coverage": _control_coverage(facts, "key"), "event_count": sum(len(item.get("key_signature_events", [])) for item in facts)}
         if cc64_available:
-            payload["cc64"] = {"available": True, "format_coverage": {"song_count": len(songs), "available_song_count": len(songs)}, "unavailable_reasons": []}
+            payload["cc64"] = {"readable": True, "present": any(bool(item.get("cc64_present")) for item in facts), "format_coverage": _control_coverage(facts, "cc64"), "event_count": sum(int(item.get("cc64_event_count", 0)) for item in facts), "interval_count": sum(len(item.get("cc64_intervals", [])) for item in facts), "unterminated_interval_count": sum(int(item.get("cc64_diagnostics", {}).get("unterminated_interval_count", 0)) for item in facts), "orphan_release_count": sum(int(item.get("cc64_diagnostics", {}).get("orphan_release_count", 0)) for item in facts), "unavailable_reasons": []}
         return payload
 
     @staticmethod

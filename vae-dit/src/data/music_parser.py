@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from common.config_loader import ConfigView
 from data.core import BarRecord, MeasureSpan, NoteEvent, SongRecord, TrackRecord
 from data.measure_map import extract_measure_spans, split_tunes
-from data.performance_controls import collect_controls
+from data.performance_controls import collect_raw_smf_controls
 from data.canonical_timeline import (
     CanonicalBarSpan,
     RawSourceNote,
@@ -137,6 +137,7 @@ class MusicDirectoryParser:
         if not self.config.quantize_input or self.config.quantize_divisors != (4,):
             raise ValueError("canonical_quantization_policy_invalid")
         midi = mido.MidiFile(str(path))
+        performance_controls = collect_raw_smf_controls(midi)
         source_identity = self._source_file_identity(path, dataset_root)
         repairs = []
         signatures, source_notes = collect_raw_smf_facts(midi, repairs=repairs)
@@ -168,12 +169,7 @@ class MusicDirectoryParser:
                 "canonical_span_count": len(spans),
                 "track_retention": retention,
                 "form_mapping_unavailable": bool(metadata),
-                "performance_controls": {
-                    "tempo_available": False,
-                    "key_available": False,
-                    "cc64_available": False,
-                    "cc64_unavailable_reason": "canonical_raw_controls_pending",
-                },
+                "performance_controls": performance_controls,
                 "quantization_audit": self._canonical_quantization_audit(fragments),
                 "raw_pairing_repairs": [self._pairing_repair_fact(source_identity, path, dataset_root, midi, repair) for repair in repairs],
             },

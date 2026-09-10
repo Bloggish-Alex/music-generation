@@ -45,6 +45,10 @@ def test_parser_uses_bar_local_grid_and_preserves_raw_note_identity(tmp_path: Pa
     assert audit["audit_unit"] == "source_note_fragment"
     assert audit["fragment_count"] == 1
     assert audit["by_meter"]["5/32"]["fragment_count"] == 1
+    controls = song.metadata["performance_controls"]
+    assert controls["collector_version"] == "raw_smf_performance_controls.v1"
+    assert controls["cc64_readable"] is True
+    assert controls["cc64_present"] is False
     samples = song.runtime_diagnostics["quantization_fragment_samples"]
     assert samples == [{
         "source_note_id": note.source_note_id,

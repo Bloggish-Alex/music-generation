@@ -121,10 +121,12 @@ def test_controls_capture_requires_velocity_for_available_status() -> None:
     Draft202012Validator(schema).validate(payload)
 
 
-def test_controls_capture_adds_cc64_reason_when_source_omits_it() -> None:
-    song = SongRecord("song", "song.mid", metadata={"performance_controls": {"tempo_available": True, "key_available": True, "cc64_available": False}}, bars=[BarRecord("song", "song.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [NoteEvent(60, 0.0, 1.0, 80)])])])
+def test_controls_capture_reports_absent_cc64_as_readable_coverage() -> None:
+    song = SongRecord("song", "song.mid", metadata={"performance_controls": {"tempo_readable": True, "tempo_present": False, "tempo_events": [], "key_readable": True, "key_present": False, "key_signature_events": [], "cc64_readable": True, "cc64_present": False, "cc64_event_count": 0, "cc64_intervals": [], "cc64_diagnostics": {"unterminated_interval_count": 0, "orphan_release_count": 0}}}, bars=[BarRecord("song", "song.mid", 0, 4.0, tracks=[TrackRecord(0, "track", [NoteEvent(60, 0.0, 1.0, 80)])])])
     payload = FinalV2EvaluationRawCapture._controls({}, [song])
-    assert {"field": "cc64", "reason": "canonical_raw_controls_pending"} in payload["unavailable_reasons"]
+    assert payload["status"] == "AVAILABLE"
+    assert payload["cc64"]["present"] is False
+    assert payload["cc64"]["format_coverage"] == {"song_count": 1, "readable_song_count": 1, "present_song_count": 0}
 
 
 def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:

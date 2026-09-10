@@ -1,83 +1,57 @@
-"""Typed source-only performance-control observations for Codec V2."""
+"""Raw-SMF performance controls used only by diagnostics and evaluation."""
 from __future__ import annotations
-from dataclasses import dataclass, field
-from pathlib import Path
+
 from typing import Any
 
-@dataclass(frozen=True)
-class ControlAvailability:
-    """Raw control availability without creating a generated control target."""
-    cc64_available: bool
-    cc64_intervals: tuple[tuple[float, float, int, int], ...] = ()
-    unavailable_reason: str | None = None
 
-@dataclass(frozen=True)
-class PerformanceControls:
-    """Format-neutral parser facts used only by diagnostics and evaluation."""
-    tempo_bpm: tuple[tuple[float, float], ...] = ()
-    key_signature: str | None = None
-    key_confidence: float | None = None
-    cc64: ControlAvailability = field(default_factory=lambda: ControlAvailability(False, (), "not_collected"))
-
-
-def collect_controls(score: Any, source_path: Path) -> PerformanceControls:
-    """Collect source-only tempo, key, and MIDI CC64 availability facts."""
-    from music21 import key, tempo
-    tempos = tuple((float(item.offset), float(item.number)) for item in score.recurse().getElementsByClass(tempo.MetronomeMark) if item.number is not None)
-    keys = list(score.recurse().getElementsByClass(key.KeySignature))
-    key_name = str(keys[0]) if keys else None
-    if source_path.suffix.lower() not in {".mid", ".midi"}:
-        return PerformanceControls(tempos, key_name, None, ControlAvailability(False, (), "format_cc64_unavailable"))
-    try:
-        return PerformanceControls(tempos, key_name, None, ControlAvailability(True, tuple(_cc64_intervals(source_path)), None))
-    except ValueError as error:
-        return PerformanceControls(tempos, key_name, None, ControlAvailability(False, (), str(error)))
-
-
-def _cc64_intervals(path: Path) -> list[tuple[float, float, int, int]]:
-    """Read sustain-pedal intervals from Standard MIDI control-change events."""
-    data = path.read_bytes()
-    if data[:4] != b"MThd":
-        raise ValueError("midi_header_unavailable")
-    header_size = int.from_bytes(data[4:8], "big")
-    division = int.from_bytes(data[12:14], "big")
-    if division <= 0 or division & 0x8000:
-        raise ValueError("midi_division_unavailable")
-    position, intervals, track_index = 8 + header_size, [], 0
-    while position + 8 <= len(data) and data[position:position + 4] == b"MTrk":
-        size = int.from_bytes(data[position + 4:position + 8], "big"); track = data[position + 8:position + 8 + size]; position += 8 + size
-        cursor = tick = 0; running = None; pedal_start: dict[int, float] = {}
-        while cursor < len(track):
-            delta, cursor = _varlen(track, cursor); tick += delta
-            if cursor >= len(track): break
-            first = track[cursor]
-            if first < 0x80:
-                if running is None: break
-                status = running
-            else:
-                status = first; cursor += 1
-                if status < 0xF0: running = status
-            if status == 0xFF:
-                cursor += 1; length, cursor = _varlen(track, cursor); cursor += length; continue
-            if status in {0xF0, 0xF7}:
-                length, cursor = _varlen(track, cursor); cursor += length; continue
-            width = 1 if status & 0xF0 in {0xC0, 0xD0} else 2
-            if cursor + width > len(track): break
-            values = track[cursor:cursor + width]; cursor += width
-            if status & 0xF0 == 0xB0 and values[0] == 64:
-                time = tick / division
-                channel = status & 0x0F
-                if values[1] >= 64 and channel not in pedal_start: pedal_start[channel] = time
-                if values[1] < 64 and channel in pedal_start:
-                    intervals.append((pedal_start.pop(channel), time, track_index, channel))
-        for channel, start in pedal_start.items(): intervals.append((start, tick / division, track_index, channel))
-        track_index += 1
-    return intervals
+def collect_raw_smf_controls(midi: Any) -> dict[str, Any]:
+    """Collect authored tempo, key-signature and CC64 facts from a mido MIDI."""
+    ppqn = int(midi.ticks_per_beat)
+    if ppqn <= 0:
+        raise ValueError("midi_ppqn_unavailable")
+    tempo_events: list[dict[str, Any]] = []
+    key_events: list[dict[str, Any]] = []
+    intervals: list[dict[str, Any]] = []
+    cc64_event_count = orphan_release_count = repeated_down_count = 0
+    for track_index, track in enumerate(midi.tracks):
+        absolute_tick = 0
+        active: dict[int, tuple[int, int, int]] = {}
+        for event_ordinal, message in enumerate(track):
+            absolute_tick += int(message.time)
+            common = {"absolute_tick": absolute_tick, "ql_offset": absolute_tick / ppqn, "physical_track_index": track_index, "event_ordinal": event_ordinal}
+            if message.type == "set_tempo":
+                import mido
+                tempo_events.append({**common, "microseconds_per_beat": int(message.tempo), "bpm": float(mido.tempo2bpm(message.tempo))})
+            elif message.type == "key_signature":
+                key_events.append({**common, "key": str(message.key)})
+            elif message.type == "control_change" and int(message.control) == 64:
+                cc64_event_count += 1
+                channel, value = int(message.channel), int(message.value)
+                if value >= 64:
+                    if channel in active:
+                        repeated_down_count += 1
+                    else:
+                        active[channel] = (absolute_tick, event_ordinal, value)
+                elif channel in active:
+                    start_tick, start_ordinal, start_value = active.pop(channel)
+                    intervals.append(_interval(track_index, channel, start_tick, absolute_tick, ppqn, start_ordinal, event_ordinal, start_value, value, "cc64_release"))
+                else:
+                    orphan_release_count += 1
+        for channel, (start_tick, start_ordinal, start_value) in sorted(active.items()):
+            intervals.append(_interval(track_index, channel, start_tick, absolute_tick, ppqn, start_ordinal, None, start_value, None, "physical_track_end"))
+    return {
+        "collector_version": "raw_smf_performance_controls.v1",
+        "tempo_readable": True, "tempo_present": bool(tempo_events), "tempo_events": tempo_events,
+        "key_readable": True, "key_present": bool(key_events), "key_signature_events": key_events,
+        "cc64_readable": True, "cc64_present": cc64_event_count > 0, "cc64_event_count": cc64_event_count,
+        "cc64_intervals": intervals,
+        "cc64_diagnostics": {
+            "unterminated_interval_count": sum(item["end_rule"] == "physical_track_end" for item in intervals),
+            "orphan_release_count": orphan_release_count, "repeated_down_count": repeated_down_count,
+            "unterminated_end_rule": "physical_track_end",
+        },
+    }
 
 
-def _varlen(data: bytes, position: int) -> tuple[int, int]:
-    value = 0
-    while position < len(data):
-        byte = data[position]; position += 1; value = (value << 7) | (byte & 0x7F)
-        if not byte & 0x80: return value, position
-    raise ValueError("midi_truncated_variable_length")
+def _interval(track: int, channel: int, start: int, end: int, ppqn: int, start_ordinal: int, end_ordinal: int | None, start_value: int, end_value: int | None, end_rule: str) -> dict[str, Any]:
+    return {"physical_track_index": track, "channel": channel, "start_tick": start, "end_tick": end, "start_ql": start / ppqn, "end_ql": end / ppqn, "start_event_ordinal": start_ordinal, "end_event_ordinal": end_ordinal, "start_value": start_value, "end_value": end_value, "end_rule": end_rule}
