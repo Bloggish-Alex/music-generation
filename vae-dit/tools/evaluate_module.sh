@@ -5,11 +5,13 @@ source "$(dirname "$0")/../bin/init_env.sh"
 
 usage() {
     cat <<'EOF'
-Usage: evaluate_module.sh <module> (--model <model-name> | --source-dir <directory>) [--run-dir <directory>]
+Usage: evaluate_module.sh <module> (--model <model-name> | --source-dir <directory>) [--encoded-run-id <run-id>] [--run-dir <directory>]
 
 Exports one diagnostics module and writes its report into a flat run directory.
-`--model` resolves to $OUTPUT_DIR/models/<model-name>; use `--source-dir` for
-generation-run diagnostics such as renderer consistency and attribution.
+For encode-time modules, `--model NAME` resolves to
+$OUTPUT_DIR/models/NAME/encoded/NAME-v2-r001 by default. Use
+`--encoded-run-id` to select a different immutable encoded run. Use
+`--source-dir` for an explicit artifact directory or generation-run diagnostics.
 EOF
 }
 
@@ -17,6 +19,7 @@ MODULE=""
 MODEL=""
 SOURCE_DIR=""
 RUN_DIR=""
+ENCODED_RUN_ID=""
 
 [[ $# -gt 0 ]] || { usage >&2; exit 2; }
 MODULE="$1"
@@ -26,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --model) MODEL="${2:?--model requires a name}"; shift 2 ;;
         --source-dir) SOURCE_DIR="${2:?--source-dir requires a directory}"; shift 2 ;;
+        --encoded-run-id) ENCODED_RUN_ID="${2:?--encoded-run-id requires an id}"; shift 2 ;;
         --run-dir) RUN_DIR="${2:?--run-dir requires a directory}"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -37,6 +41,7 @@ case "$MODULE" in
     *) echo "Unsupported module: $MODULE" >&2; exit 2 ;;
 esac
 [[ -z "$MODEL" || -z "$SOURCE_DIR" ]] || { echo "Use either --model or --source-dir." >&2; exit 2; }
+[[ -z "$ENCODED_RUN_ID" || -n "$MODEL" ]] || { echo "--encoded-run-id requires --model." >&2; exit 2; }
 case "$MODULE" in
     renderer_consistency|attribution)
         [[ -z "$MODEL" ]] || { echo "$MODULE requires --source-dir <generation-run-dir>; it cannot be evaluated from a model directory." >&2; exit 2; }
@@ -44,9 +49,21 @@ case "$MODULE" in
 esac
 if [[ -n "$MODEL" ]]; then
     SOURCE_DIR="${OUTPUT_DIR}/models/${MODEL}"
-    [[ "$MODULE" != "physical_trajectory_objective" ]] || SOURCE_DIR="${SOURCE_DIR}/physical_trajectory"
+    case "$MODULE" in
+        codec_fidelity|dataset_tonality|parser_integrity|quantization_audit|performance_controls|form_action_alignment)
+            ENCODED_RUN_ID="${ENCODED_RUN_ID:-${MODEL}-v2-r001}"
+            SOURCE_DIR="${SOURCE_DIR}/encoded/${ENCODED_RUN_ID}"
+            ;;
+        physical_trajectory_objective)
+            [[ -z "$ENCODED_RUN_ID" ]] || { echo "--encoded-run-id is only valid for encode-time modules." >&2; exit 2; }
+            SOURCE_DIR="${SOURCE_DIR}/physical_trajectory"
+            ;;
+        *)
+            [[ -z "$ENCODED_RUN_ID" ]] || { echo "--encoded-run-id is only valid for encode-time modules." >&2; exit 2; }
+            ;;
+    esac
 fi
-[[ -n "$SOURCE_DIR" && -d "$SOURCE_DIR" ]] || { echo "An existing source directory is required." >&2; exit 2; }
+[[ -n "$SOURCE_DIR" && -d "$SOURCE_DIR" ]] || { echo "An existing source directory is required: ${SOURCE_DIR:-<unset>}" >&2; exit 2; }
 
 if [[ -z "$RUN_DIR" ]]; then
     if [[ -n "$MODEL" ]]; then
