@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -27,10 +28,16 @@ def _digest(path):
 
 
 def _samples(prefix: str = "note") -> list[dict]:
-    return [
+    samples = [
         {"source_note_id": f"{prefix}:0", "canonical_bar_index": 0, "meter": "4/4", "raw_local_start_ql": .0, "raw_local_end_ql": 1.0, "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": 1.0, "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": 1.0, "quantization_repair_kind": None, "repair_slot_index": None, "projection_overlap_ql": None, "projection_endpoint_error_ql": None, "onset_residual_ql": .0, "end_residual_ql": .0},
         {"source_note_id": f"{prefix}:1", "canonical_bar_index": 1, "meter": "4/4", "raw_local_start_ql": .1, "raw_local_end_ql": 1.2, "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": 1.0, "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": 1.0, "quantization_repair_kind": None, "repair_slot_index": None, "projection_overlap_ql": None, "projection_endpoint_error_ql": None, "onset_residual_ql": .1, "end_residual_ql": .2},
     ]
+    for sample in samples:
+        start = Fraction(str(sample["raw_local_start_ql"])).limit_denominator(1000)
+        end = Fraction(str(sample["raw_local_end_ql"])).limit_denominator(1000)
+        ppqn = math.lcm(start.denominator, end.denominator)
+        sample.update(raw_local_start_tick=int(start * ppqn), raw_local_end_tick=int(end * ppqn), ppqn=ppqn)
+    return samples
 
 
 def _audit(samples: list[dict]) -> dict:
@@ -55,6 +62,12 @@ def _audit(samples: list[dict]) -> dict:
 
 
 def _song(samples: list[dict], bars: list[BarRecord] | None = None) -> SongRecord:
+    for sample in samples:
+        if "ppqn" not in sample:
+            start = Fraction(str(sample["raw_local_start_ql"])).limit_denominator(10000)
+            end = Fraction(str(sample["raw_local_end_ql"])).limit_denominator(10000)
+            ppqn = math.lcm(start.denominator, end.denominator)
+            sample.update(raw_local_start_tick=int(start * ppqn), raw_local_end_tick=int(end * ppqn), ppqn=ppqn)
     return SongRecord(
         "song", "song.mid",
         metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)},
@@ -66,6 +79,7 @@ def _song(samples: list[dict], bars: list[BarRecord] | None = None) -> SongRecor
 def _repaired_sample() -> dict:
     return {
         "source_note_id": "projected:0", "canonical_bar_index": 0, "meter": "4/4",
+        "raw_local_start_tick": 11, "raw_local_end_tick": 12, "ppqn": 100,
         "raw_local_start_ql": .11, "raw_local_end_ql": .12,
         "ordinary_quantized_local_start_ql": .0, "ordinary_quantized_local_end_ql": .0,
         "final_quantized_local_start_ql": .0, "final_quantized_local_end_ql": .25,
@@ -214,6 +228,9 @@ def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
 def test_quantization_archive_preserves_residual_recomputation_precision(tmp_path) -> None:
     sample = _samples()[0]
     sample.update({
+        "raw_local_start_tick": 0,
+        "raw_local_end_tick": 719,
+        "ppqn": 480,
         "raw_local_end_ql": 1.4979166666666666,
         "ordinary_quantized_local_end_ql": 1.5,
         "final_quantized_local_end_ql": 1.5,
@@ -228,6 +245,22 @@ def test_quantization_archive_preserves_residual_recomputation_precision(tmp_pat
         assert recomputed == pytest.approx(archive["end_residuals_ql"][0], abs=1e-15)
 
 
+def test_projection_tie_break_uses_exact_hammerklavier_ticks(tmp_path) -> None:
+    sample = {
+        "source_note_id": "hammerklavier:2:498", "canonical_bar_index": 48, "meter": "3/8",
+        "raw_local_start_tick": 80, "raw_local_end_tick": 160, "ppqn": 480,
+        "raw_local_start_ql": 1 / 6, "raw_local_end_ql": 1 / 3,
+        "ordinary_quantized_local_start_ql": .25, "ordinary_quantized_local_end_ql": .25,
+        "final_quantized_local_start_ql": .25, "final_quantized_local_end_ql": .5,
+        "quantization_repair_kind": "minimum_representable_slot_projection", "repair_slot_index": 1,
+        "projection_overlap_ql": 1 / 12, "projection_endpoint_error_ql": .25,
+        "onset_residual_ql": 1 / 12, "end_residual_ql": 1 / 6,
+    }
+    bar = BarRecord("song", "hammerklavier.mid", 48, 1.5, canonical_bar_index=48, time_signature="3/8", canonical_start_tick=0, canonical_end_tick=720, ppqn=480)
+    payload = _quantization({}, [_song([sample], [bar])], tmp_path)
+    assert payload["projected_fragment_count"] == 1
+
+
 def test_quantization_archive_rejects_float32_timing_arrays(tmp_path) -> None:
     payload = _quantization({}, [_song(_samples())], tmp_path)
     archive_path = tmp_path / payload["residual_samples"]["path"]
@@ -240,6 +273,18 @@ def test_quantization_archive_rejects_float32_timing_arrays(tmp_path) -> None:
     descriptors["raw_local_start_ql"] = {"dtype": "float32", "shape": list(arrays["raw_local_start_ql"].shape)}
     with pytest.raises(ValueError, match="residual arrays"):
         FinalV2EvaluationRawCapture._validate_residual_archive(invalid_path, descriptors)
+
+
+def test_quantization_archive_rejects_tick_ql_mismatch(tmp_path) -> None:
+    payload = _quantization({}, [_song(_samples())], tmp_path)
+    archive_path = tmp_path / payload["residual_samples"]["path"]
+    with np.load(archive_path, allow_pickle=False) as archive:
+        arrays = {name: archive[name] for name in archive.files}
+    arrays["raw_local_start_ticks"][1] += 1
+    invalid_path = tmp_path / "invalid_tick_provenance.npz"
+    np.savez_compressed(invalid_path, **arrays)
+    with pytest.raises(ValueError, match="tick provenance"):
+        FinalV2EvaluationRawCapture._validate_residual_archive(invalid_path, payload["residual_samples"]["arrays"])
 
 
 @pytest.mark.parametrize("runtime", [{}, {"quantization_residual_samples": {"4/4": {"onset_residual_samples_ql": [.0], "end_residual_samples_ql": [.0]}}}])

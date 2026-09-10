@@ -116,6 +116,9 @@ class BarLocalQuantizedNote:
     source_note: RawSourceNote
     canonical_bar_index: int
     meter: str
+    raw_local_start_tick: int
+    raw_local_end_tick: int
+    ppqn: int
     raw_local_start_ql: Fraction
     raw_local_end_ql: Fraction
     ordinary_quantized_local_start_ql: Fraction
@@ -317,10 +320,14 @@ def fragment_note(note: RawSourceNote, span: CanonicalBarSpan, *, ppqn: int) -> 
         repair_slot_index, quantized_start, quantized_end, overlap, endpoint_error = _minimum_representable_slot_projection(raw_local_start, raw_local_end, starts, ends)
         repair_kind = "minimum_representable_slot_projection"
     return BarLocalQuantizedNote(
-        note, span.canonical_bar_index, span.time_signature, raw_local_start, raw_local_end,
-        ordinary_start, ordinary_end, quantized_start, quantized_end,
-        repair_kind, repair_slot_index, overlap, endpoint_error,
-        source_start < span.start_ql, source_end > span.end_ql,
+        source_note=note, canonical_bar_index=span.canonical_bar_index, meter=span.time_signature,
+        raw_local_start_tick=int(raw_local_start * ppqn), raw_local_end_tick=int(raw_local_end * ppqn), ppqn=ppqn,
+        raw_local_start_ql=raw_local_start, raw_local_end_ql=raw_local_end,
+        ordinary_quantized_local_start_ql=ordinary_start, ordinary_quantized_local_end_ql=ordinary_end,
+        quantized_local_start_ql=quantized_start, quantized_local_end_ql=quantized_end,
+        quantization_repair_kind=repair_kind, repair_slot_index=repair_slot_index,
+        projection_overlap_ql=overlap, projection_endpoint_error_ql=endpoint_error,
+        continues_from_previous_bar=source_start < span.start_ql, continues_into_next_bar=source_end > span.end_ql,
     )
 
 

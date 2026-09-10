@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from fractions import Fraction
 import numpy as np
 from jsonschema import Draft202012Validator, ValidationError
 from collections import Counter
@@ -142,6 +143,7 @@ class FinalV2EvaluationRawCapture:
 
         required_sample = {
             "source_note_id", "canonical_bar_index", "meter",
+            "raw_local_start_tick", "raw_local_end_tick", "ppqn",
             "raw_local_start_ql", "raw_local_end_ql",
             "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql",
             "final_quantized_local_start_ql", "final_quantized_local_end_ql",
@@ -181,6 +183,12 @@ class FinalV2EvaluationRawCapture:
                     raw_start, raw_end, ordinary_start, ordinary_end, quantized_start, quantized_end, onset_error, end_error = (float(sample[name]) for name in ("raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "onset_residual_ql", "end_residual_ql"))
                 except (TypeError, ValueError) as error:
                     raise ValueError(f"quantization fragment sample is non-numeric for {song.song_id}") from error
+                raw_start_tick, raw_end_tick, ppqn = sample["raw_local_start_tick"], sample["raw_local_end_tick"], sample["ppqn"]
+                if any(type(value) is not int for value in (raw_start_tick, raw_end_tick, ppqn)) or ppqn <= 0 or raw_end_tick <= raw_start_tick or (bar.ppqn is not None and ppqn != bar.ppqn):
+                    raise ValueError(f"quantization fragment tick provenance is invalid for {song.song_id}")
+                exact_raw_start, exact_raw_end = Fraction(raw_start_tick, ppqn), Fraction(raw_end_tick, ppqn)
+                if not math.isclose(raw_start, float(exact_raw_start), abs_tol=1e-12) or not math.isclose(raw_end, float(exact_raw_end), abs_tol=1e-12):
+                    raise ValueError(f"quantization fragment tick provenance is invalid for {song.song_id}")
                 grid = SlotGrid.for_bar(float(bar.bar_length_ql), policy)
                 starts = [grid.interval(slot)[0] for slot in range(grid.valid_slot_count)]
                 ends = [*starts, float(bar.bar_length_ql)]
@@ -202,13 +210,16 @@ class FinalV2EvaluationRawCapture:
                     if ordinary_end > ordinary_start or not isinstance(slot, int) or not 0 <= slot < grid.valid_slot_count:
                         raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
                     candidates = []
-                    for index, start in enumerate(starts):
-                        end = ends[index + 1]
-                        overlap = max(0.0, min(raw_end, end) - max(raw_start, start))
-                        error = abs(start - raw_start) + abs(end - raw_end)
+                    exact_length = Fraction(bar.canonical_end_tick - bar.canonical_start_tick, bar.ppqn) if bar.canonical_start_tick is not None and bar.canonical_end_tick is not None and bar.ppqn else Fraction(str(bar.bar_length_ql))
+                    exact_starts = [Fraction(index, 4) for index in range(grid.valid_slot_count)]
+                    exact_ends = [*exact_starts, exact_length]
+                    for index, start in enumerate(exact_starts):
+                        end = exact_ends[index + 1]
+                        overlap = max(Fraction(0), min(exact_raw_end, end) - max(exact_raw_start, start))
+                        error = abs(start - exact_raw_start) + abs(end - exact_raw_end)
                         candidates.append((overlap, error, index, start, end))
                     overlap, error, expected_slot, expected_start, expected_end = max(candidates, key=lambda item: (item[0], -item[1], item[2]))
-                    if overlap <= 0 or slot != expected_slot or not math.isclose(quantized_start, expected_start, abs_tol=epsilon) or not math.isclose(quantized_end, expected_end, abs_tol=epsilon) or not math.isclose(float(sample["projection_overlap_ql"]), overlap, abs_tol=epsilon) or not math.isclose(float(sample["projection_endpoint_error_ql"]), error, abs_tol=epsilon):
+                    if overlap <= 0 or slot != expected_slot or not math.isclose(quantized_start, float(expected_start), abs_tol=epsilon) or not math.isclose(quantized_end, float(expected_end), abs_tol=epsilon) or not math.isclose(float(sample["projection_overlap_ql"]), float(overlap), abs_tol=epsilon) or not math.isclose(float(sample["projection_endpoint_error_ql"]), float(error), abs_tol=epsilon):
                         raise ValueError(f"quantization fragment repair facts are invalid for {song.song_id}")
                 per_meter.setdefault(meter, []).append(sample)
             for meter, summary in audit.get("by_meter", {}).items():
@@ -246,6 +257,9 @@ class FinalV2EvaluationRawCapture:
             "sample_tune_indexes": np.asarray([item[0] for item in flat], dtype=np.int64),
             "source_note_ids": np.asarray([item[1]["source_note_id"] for item in flat], dtype=np.str_),
             "canonical_bar_indexes": np.asarray([item[1]["canonical_bar_index"] for item in flat], dtype=np.int64),
+            "raw_local_start_ticks": np.asarray([item[1]["raw_local_start_tick"] for item in flat], dtype=np.int64),
+            "raw_local_end_ticks": np.asarray([item[1]["raw_local_end_tick"] for item in flat], dtype=np.int64),
+            "ppqn": np.asarray([item[1]["ppqn"] for item in flat], dtype=np.int64),
             "raw_local_start_ql": np.asarray([item[1]["raw_local_start_ql"] for item in flat], dtype=np.float64),
             "raw_local_end_ql": np.asarray([item[1]["raw_local_end_ql"] for item in flat], dtype=np.float64),
             "ordinary_quantized_local_start_ql": np.asarray([item[1]["ordinary_quantized_local_start_ql"] for item in flat], dtype=np.float64),
@@ -274,7 +288,7 @@ class FinalV2EvaluationRawCapture:
     @staticmethod
     def _validate_residual_archive(path: Path, declared_arrays: Mapping[str, Mapping[str, Any]]) -> None:
         """Reject a non-canonical residual archive before publishing AVAILABLE."""
-        required = {"source_file_identities", "meters", "group_offsets", "sample_tune_indexes", "source_note_ids", "canonical_bar_indexes", "raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "quantization_repair_kinds", "repair_slot_indexes", "projection_overlap_ql", "projection_endpoint_error_ql", "onset_residuals_ql", "end_residuals_ql"}
+        required = {"source_file_identities", "meters", "group_offsets", "sample_tune_indexes", "source_note_ids", "canonical_bar_indexes", "raw_local_start_ticks", "raw_local_end_ticks", "ppqn", "raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "quantization_repair_kinds", "repair_slot_indexes", "projection_overlap_ql", "projection_endpoint_error_ql", "onset_residuals_ql", "end_residuals_ql"}
         with np.load(path, allow_pickle=False) as archive:
             if set(archive.files) != required:
                 raise ValueError("quantization residual archive has an invalid array set")
@@ -292,11 +306,15 @@ class FinalV2EvaluationRawCapture:
             raise ValueError("quantization residual archive string arrays are invalid")
         if offsets.dtype != np.dtype("int64") or offsets.ndim != 1 or len(offsets) != len(source_ids) + 1:
             raise ValueError("quantization residual archive offsets are invalid")
-        sample_arrays = (arrays["sample_tune_indexes"], arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["ordinary_quantized_local_start_ql"], arrays["ordinary_quantized_local_end_ql"], arrays["final_quantized_local_start_ql"], arrays["final_quantized_local_end_ql"], onset, end)
-        if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["sample_tune_indexes"].dtype != np.dtype("int64") or np.any(arrays["sample_tune_indexes"] < 0) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or arrays["canonical_bar_indexes"].dtype != np.dtype("int64") or any(value.dtype != np.dtype("float64") for value in sample_arrays[3:]):
+        sample_arrays = (arrays["sample_tune_indexes"], arrays["source_note_ids"], arrays["canonical_bar_indexes"], arrays["raw_local_start_ticks"], arrays["raw_local_end_ticks"], arrays["ppqn"], arrays["raw_local_start_ql"], arrays["raw_local_end_ql"], arrays["ordinary_quantized_local_start_ql"], arrays["ordinary_quantized_local_end_ql"], arrays["final_quantized_local_start_ql"], arrays["final_quantized_local_end_ql"], onset, end)
+        if any(value.ndim != 1 or len(value) != len(onset) for value in sample_arrays) or arrays["sample_tune_indexes"].dtype != np.dtype("int64") or np.any(arrays["sample_tune_indexes"] < 0) or arrays["source_note_ids"].dtype.kind not in {"U", "S"} or any(arrays[name].dtype != np.dtype("int64") for name in ("canonical_bar_indexes", "raw_local_start_ticks", "raw_local_end_ticks", "ppqn")) or np.any(arrays["raw_local_end_ticks"] <= arrays["raw_local_start_ticks"]) or np.any(arrays["ppqn"] <= 0) or any(value.dtype != np.dtype("float64") for value in sample_arrays[6:]):
             raise ValueError("quantization residual archive residual arrays are invalid")
         if int(offsets[0]) != 0 or int(offsets[-1]) != len(onset) or np.any(np.diff(offsets) < 0):
             raise ValueError("quantization residual archive offsets do not align")
+        exact_starts = arrays["raw_local_start_ticks"].astype(np.float64) / arrays["ppqn"]
+        exact_ends = arrays["raw_local_end_ticks"].astype(np.float64) / arrays["ppqn"]
+        if not np.array_equal(arrays["raw_local_start_ql"], exact_starts) or not np.array_equal(arrays["raw_local_end_ql"], exact_ends):
+            raise ValueError("quantization residual archive tick provenance is invalid")
         repair_kinds = arrays["quantization_repair_kinds"]
         repair_slots = arrays["repair_slot_indexes"]
         overlaps = arrays["projection_overlap_ql"]
