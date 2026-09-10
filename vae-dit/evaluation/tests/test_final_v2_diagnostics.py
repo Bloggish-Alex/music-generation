@@ -412,7 +412,7 @@ def test_form_action_alignment_exports_mid_song_return_through_framework(tmp_pat
             form="A" if is_a else "B",
             tracks=[TrackRecord(0, "track", [NoteEvent(60 if is_a else 67, 0.0, 1.0)])],
         ))
-    song = SongRecord("abaca", "fixture.mid", bars=bars)
+    song = SongRecord("abaca", "fixture.mid", metadata={"form_mapping_status": "mapped"}, bars=bars)
     ActionLabeler(ActionLabelerConfig(
         theme_anchor_bars=4,
         return_min_consecutive=2,
@@ -437,3 +437,13 @@ def test_form_action_alignment_exports_mid_song_return_through_framework(tmp_pat
     bundle = FinalV2DiagnosticExporter("form_action_alignment").export(ExportContext("run", public, run))
     result = FinalV2DiagnosticEvaluator("form_action_alignment").evaluate(EvaluationContext("run", public, run), bundle)
     assert {"form": "A", "action": "RETURN", "count": 2} in result.report["metrics"]["observation"]["confusion_table"]
+
+
+def test_form_action_alignment_reports_unmapped_and_partial_canonical_coverage() -> None:
+    mapped = SongRecord("mapped", "mapped.mid", metadata={"form_mapping_status": "mapped"}, bars=[BarRecord("mapped", "mapped.mid", 0, 4.0, form="A")])
+    partial = SongRecord("partial", "partial.mid", metadata={"form_mapping_status": "mapped"}, bars=[BarRecord("partial", "partial.mid", 0, 4.0, form="B"), BarRecord("partial", "partial.mid", 1, 4.0)])
+    legacy = SongRecord("legacy", "legacy.mid", metadata={"form_mapping_status": "unavailable_legacy_measure_index"}, bars=[BarRecord("legacy", "legacy.mid", 0, 4.0)])
+    payload = FinalV2EvaluationRawCapture._form_action({}, [mapped, partial, legacy])
+    assert payload["status"] == "UNAVAILABLE"
+    assert payload["mapping_status_counts"] == {"mapped": 2, "unavailable_legacy_measure_index": 1}
+    assert {"field": "form_metadata", "reason": "unavailable_legacy_measure_index"} in payload["unavailable_reasons"]

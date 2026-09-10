@@ -10,7 +10,7 @@ import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from common.config_loader import ConfigView
 from data.core import BarRecord, MeasureSpan, NoteEvent, SongRecord, TrackRecord
@@ -146,6 +146,7 @@ class MusicDirectoryParser:
         chain = resolve_time_signature_chain(signatures)
         ppqn = int(midi.ticks_per_beat)
         spans = build_canonical_spans(chain, ppqn=ppqn, terminal_end_ql=max(note.end_ql(ppqn) for note in source_notes))
+        timeline_hash = self._canonical_timeline_hash(spans, ppqn)
         fragments = fragment_notes(source_notes, spans, ppqn=ppqn)
         retained_tracks, retention = self._canonical_track_retention(source_notes)
         retained = set(retained_tracks)
@@ -168,7 +169,8 @@ class MusicDirectoryParser:
                 "ppqn": ppqn,
                 "canonical_span_count": len(spans),
                 "track_retention": retention,
-                "form_mapping_unavailable": bool(metadata),
+                "form_mapping_status": self._form_mapping_status(metadata, source_identity, timeline_hash),
+                "canonical_timeline_sha256": timeline_hash,
                 "performance_controls": performance_controls,
                 "quantization_audit": self._canonical_quantization_audit(fragments),
                 "raw_pairing_repairs": [self._pairing_repair_fact(source_identity, path, dataset_root, midi, repair) for repair in repairs],
@@ -181,7 +183,61 @@ class MusicDirectoryParser:
             by_span[fragment.canonical_bar_index].append(fragment)
         for span in spans:
             song.bars.append(self._build_canonical_bar(song, span, by_span.get(span.canonical_bar_index, []), retained_tracks, transpose_semitones, ppqn))
+        self._apply_canonical_form_metadata(song, metadata)
         return [song]
+
+    @staticmethod
+    def _canonical_timeline_hash(spans: Sequence[CanonicalBarSpan], ppqn: int) -> str:
+        """Hash canonical span authority using exact ticks, never display floats."""
+        payload = [{"canonical_bar_index": span.canonical_bar_index, "start_tick": span.canonical_start_tick, "end_tick": span.canonical_end_tick, "meter": span.time_signature, "is_partial": span.is_partial} for span in spans]
+        encoded = json.dumps({"canonical_parser_version": "raw_smf_v1", "ppqn": ppqn, "spans": payload}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _form_mapping_status(metadata: Mapping[str, Any], source_identity: str, timeline_hash: str) -> str:
+        if not metadata:
+            return "absent"
+        if metadata.get("coordinate_system") != "canonical_bar_index.v1":
+            return "unavailable_legacy_measure_index"
+        if metadata.get("source_file_identity") != source_identity or metadata.get("canonical_parser_version") != "raw_smf_v1" or metadata.get("canonical_timeline_sha256") != timeline_hash:
+            return "unavailable_timeline_mismatch"
+        return "mapped"
+
+    def _apply_canonical_form_metadata(self, song: SongRecord, metadata: Mapping[str, Any]) -> None:
+        """Attach only bound canonical-bar sections; fail closed on malformed ranges."""
+        if song.metadata["form_mapping_status"] != "mapped":
+            return
+        def reject(status: str) -> None:
+            song.metadata["form_mapping_status"] = status
+            song.form = None
+            for bar in song.bars:
+                bar.form = bar.section_label = bar.section_index = None
+
+        sections = metadata.get("sections")
+        if not isinstance(sections, list):
+            reject("unavailable_timeline_mismatch")
+            return
+        if not sections:
+            reject("unavailable_empty_canonical_sections")
+            return
+        assignments: dict[int, tuple[str, int]] = {}
+        for section_index, section in enumerate(sections):
+            if not isinstance(section, Mapping):
+                reject("unavailable_timeline_mismatch"); return
+            start, end = section.get("canonical_start_bar_index"), section.get("canonical_end_bar_index")
+            if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start:
+                reject("unavailable_timeline_mismatch"); return
+            matches = [bar for bar in song.bars if bar.canonical_bar_index is not None and start <= int(bar.canonical_bar_index) < end]
+            if len(matches) != end - start or any(int(bar.canonical_bar_index) in assignments for bar in matches):
+                reject("unavailable_timeline_mismatch"); return
+            for bar in matches:
+                assignments[int(bar.canonical_bar_index)] = (str(section.get("name", f"section_{section_index}")), section_index)
+        for bar in song.bars:
+            assignment = assignments.get(int(bar.canonical_bar_index)) if bar.canonical_bar_index is not None else None
+            if assignment is not None:
+                bar.form, bar.section_index = assignment
+                bar.section_label = bar.form
+        song.form = str(metadata.get("form")) if metadata.get("form") is not None else None
 
     @staticmethod
     def _pairing_repair_fact(source_file_identity: str, path: Path, dataset_root: str | Path | None, midi: Any, repair: Any) -> Dict[str, Any]:

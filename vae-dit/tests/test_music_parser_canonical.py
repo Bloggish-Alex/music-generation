@@ -81,6 +81,44 @@ def test_parser_discovers_only_canonical_smf_inputs(tmp_path: Path) -> None:
     assert [path.name for path in parser.discover_files(tmp_path)] == ["canonical.mid"]
 
 
+def test_form_metadata_fails_closed_for_legacy_indexes_and_maps_bound_canonical_sections(tmp_path: Path) -> None:
+    path = tmp_path / "canonical.mid"; _write_five_thirty_second_midi(path)
+    parser = MusicDirectoryParser(MusicParserConfig())
+    legacy = parser.parse_file(path, {"sections": [{"start_bar": 0, "end_bar": 2, "name": "A"}]}, dataset_root=tmp_path)[0]
+    assert legacy.metadata["form_mapping_status"] == "unavailable_legacy_measure_index"
+    assert all(bar.form is None for bar in legacy.bars)
+
+    bound = parser.parse_file(path, {}, dataset_root=tmp_path)[0]
+    metadata = {
+        "coordinate_system": "canonical_bar_index.v1",
+        "source_file_identity": bound.metadata["source_file_identity"],
+        "canonical_parser_version": "raw_smf_v1",
+        "canonical_timeline_sha256": bound.metadata["canonical_timeline_sha256"],
+        "form": "binary",
+        "sections": [{"name": "A", "canonical_start_bar_index": 0, "canonical_end_bar_index": 1}, {"name": "B", "canonical_start_bar_index": 1, "canonical_end_bar_index": 2}],
+    }
+    mapped = parser.parse_file(path, metadata, dataset_root=tmp_path)[0]
+    assert mapped.metadata["form_mapping_status"] == "mapped"
+    assert mapped.form == "binary"
+    assert [(bar.form, bar.section_label, bar.section_index) for bar in mapped.bars] == [("A", "A", 0), ("B", "B", 1)]
+
+    metadata["canonical_timeline_sha256"] = "sha256:" + "0" * 64
+    mismatch = parser.parse_file(path, metadata, dataset_root=tmp_path)[0]
+    assert mismatch.metadata["form_mapping_status"] == "unavailable_timeline_mismatch"
+    assert all(bar.form is None for bar in mismatch.bars)
+
+    metadata["canonical_timeline_sha256"] = bound.metadata["canonical_timeline_sha256"]
+    metadata["sections"] = []
+    empty = parser.parse_file(path, metadata, dataset_root=tmp_path)[0]
+    assert empty.metadata["form_mapping_status"] == "unavailable_empty_canonical_sections"
+
+    metadata["sections"] = [{"name": "A", "canonical_start_bar_index": 0, "canonical_end_bar_index": 1}, {"name": "B", "canonical_start_bar_index": 0, "canonical_end_bar_index": 2}]
+    overlap = parser.parse_file(path, metadata, dataset_root=tmp_path)[0]
+    assert overlap.metadata["form_mapping_status"] == "unavailable_timeline_mismatch"
+    assert overlap.form is None
+    assert all((bar.form, bar.section_label, bar.section_index) == (None, None, None) for bar in overlap.bars)
+
+
 def test_cross_five_thirty_second_bar_keeps_raw_continuation_and_hold(tmp_path: Path) -> None:
     """A continuation is physical even when its later local onset is zero."""
     import mido

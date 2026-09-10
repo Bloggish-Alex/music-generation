@@ -358,7 +358,9 @@ class FormJsonGenerator:
         for file_path in MusicFileDiscoverer().discover(music_dir):
             try:
                 candidates, bar_count = self._classify_file(file_path)
-                result[file_path.name] = self.record_builder.build(file_path, candidates, bar_count)
+                record = self.record_builder.build(file_path, candidates, bar_count)
+                self._mark_legacy_coordinates(record)
+                result[file_path.name] = record
                 self.diagnostics["files"].append({
                     "file_name": file_path.name,
                     "selected_form": result[file_path.name]["form"],
@@ -378,9 +380,19 @@ class FormJsonGenerator:
                     "bar_count": None,
                     "candidates": [],
                     "sections": self.record_builder._template_sections("ternary"),
+                    "coordinate_system": "legacy_measure_index",
                     "error": message,
                 }
         return result
+
+    @staticmethod
+    def _mark_legacy_coordinates(record: Dict[str, Any]) -> None:
+        """Do not relabel legacy music21-grid sections as canonical coordinates.
+
+        Canonical form classification needs a dedicated canonical-bar adapter;
+        until that exists these review hints intentionally fail closed in V2.
+        """
+        record["coordinate_system"] = "legacy_measure_index"
 
     def _classify_file(self, file_path: Path) -> tuple[List[FormCandidate], Optional[int]]:
         """Prefer filename evidence, otherwise classify the parsed bar SSM."""
