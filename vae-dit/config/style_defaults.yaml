@@ -14,7 +14,6 @@ bar_tensor:
   backend: semantic_harmony_set_v2
   schema_version: bar_tensor_schema.v2
   overflow_policy: error
-  steps_per_bar: 48
   pitch_scale: 24.0
   velocity_scale: 127.0
   melody_continuity_tolerance: 7

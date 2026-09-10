@@ -2,7 +2,9 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import pytest
 from codec.slot_grid import CodecCapacityError, SlotGrid, SlotGridPolicy
+from common.config_loader import ConfigLoader
 
 POLICY = SlotGridPolicy(.25, 48, 1e-6)
 ROOT=Path(__file__).resolve().parents[1]
@@ -24,6 +26,25 @@ def test_grid_capacity_and_partial_slot_policy():
     try: SlotGrid.for_bar(cases["over_capacity"]["bar_length_ql"], POLICY)
     except CodecCapacityError as error: assert error.details["reason"]=="slot_capacity_exceeded"
     else: raise AssertionError("over-capacity measure must fail")
+
+
+@pytest.mark.parametrize("capacity", [92.9, True, "92", None])
+def test_slot_grid_policy_rejects_non_integer_capacity(capacity):
+    section = {"slot_grid": {"quantum_ql": .25, "capacity": capacity, "epsilon_ql": 1e-6}}
+    with pytest.raises(ValueError, match="slot_grid"):
+        SlotGridPolicy.from_bar_tensor_config(section)
+
+
+def test_slot_grid_policy_rejects_missing_fields():
+    with pytest.raises(ValueError, match="explicitly define"):
+        SlotGridPolicy.from_bar_tensor_config({"slot_grid": {"capacity": 92}})
+
+
+def test_final_codec_config_has_one_capacity_authority():
+    config = ConfigLoader(ROOT / "config" / "codec_v2.yaml").load()
+    section = config["bar_tensor"]
+    assert "steps_per_bar" not in section
+    assert SlotGridPolicy.from_bar_tensor_config(section) == SlotGridPolicy(.25, 92, 1e-6)
 def test_opus_track_and_quantization_policy():
     parser={case["name"]:case for case in load("opus_and_track_cases.json")}
     audit={case["name"]:case for case in load("quantization_audit_cases.json")}

@@ -20,7 +20,9 @@ class SlotGridPolicy:
         raw = section.get("slot_grid")
         if not isinstance(raw, Mapping) or set(raw) != {"quantum_ql", "capacity", "epsilon_ql"}:
             raise ValueError("bar_tensor.slot_grid must explicitly define quantum_ql, capacity, and epsilon_ql")
-        policy = cls(float(raw["quantum_ql"]), int(raw["capacity"]), float(raw["epsilon_ql"]))
+        if type(raw["capacity"]) is not int or isinstance(raw["quantum_ql"], bool) or not isinstance(raw["quantum_ql"], (int, float)) or isinstance(raw["epsilon_ql"], bool) or not isinstance(raw["epsilon_ql"], (int, float)):
+            raise ValueError("bar_tensor.slot_grid configuration is invalid")
+        policy = cls(float(raw["quantum_ql"]), raw["capacity"], float(raw["epsilon_ql"]))
         if policy.quantum_ql != 0.25 or policy.capacity <= 0 or not 0 < policy.epsilon_ql < policy.quantum_ql:
             raise ValueError("bar_tensor.slot_grid configuration is invalid")
         return policy

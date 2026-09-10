@@ -425,8 +425,10 @@ def _tensor_schema(config: Mapping[str, Any], shape: Sequence[int]) -> Mapping[s
         }
     else:
         raise ValueError("runtime codec has no supported public tensor schema")
-    if int(section.get("steps_per_bar", step_count)) != step_count:
-        raise ValueError("runtime tensor step count does not match codec configuration")
+    if backend in {"semantic_harmony_set_v2", "semantic_harmony_set", "semantic"}:
+        slot_grid = section.get("slot_grid")
+        if not isinstance(slot_grid, Mapping) or type(slot_grid.get("capacity")) is not int or slot_grid["capacity"] != step_count:
+            raise ValueError("runtime tensor step count does not match configured slot capacity")
     return {
         "axis_order": ["bar", "track", "step", "feature"],
         "feature_names": feature_names,
