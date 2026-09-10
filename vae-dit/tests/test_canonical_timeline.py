@@ -101,6 +101,19 @@ def test_invalid_raw_facts_fail_without_fallback(events, error) -> None:
         resolve_time_signature_chain(facts)
 
 
+def test_resolve_time_signature_chain_can_explicitly_inject_smf_default_4_4() -> None:
+    facts, _ = collect_raw_smf_facts(_midi([_ts(3, 4, 480)]))
+    chain = resolve_time_signature_chain(facts, initial_time_signature_policy="smf_default_4_4")
+    assert [(item.absolute_tick, item.numerator, item.denominator, item.origin) for item in chain] == [(0, 4, 4, "smf_default"), (480, 3, 4, "smf")]
+
+
+def test_resolve_time_signature_chain_can_inject_when_smf_has_no_ts_events() -> None:
+    chain = resolve_time_signature_chain([], initial_time_signature_policy="smf_default_4_4")
+    assert [(item.absolute_tick, item.numerator, item.denominator, item.origin) for item in chain] == [(0, 4, 4, "smf_default")]
+    with pytest.raises(CanonicalTimelineError, match="time_signature_initial_missing"):
+        resolve_time_signature_chain([])
+
+
 def test_mid_bar_time_signature_change_materializes_exact_partial_span() -> None:
     midi = _midi([_ts(4, 4), _ts(3, 4, 480)], [_note_on(60, 90), _note_off(60, 2400)])
     facts, notes = collect_raw_smf_facts(midi)

@@ -41,6 +41,7 @@ class MusicParserConfig:
     hard_safety_limit: int = 48
     track_retention_policy: str = "error"
     default_velocity: int = 64
+    initial_time_signature_policy: str = "error"
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MusicParserConfig":
@@ -54,6 +55,7 @@ class MusicParserConfig:
             hard_safety_limit=int(section.get("hard_safety_limit", 48)),
             track_retention_policy=str(section.get("track_retention_policy", "error")),
             default_velocity=int(section.get("default_velocity", 64)),
+            initial_time_signature_policy=str(section.get("initial_time_signature_policy", "error")),
         )
 
 
@@ -143,7 +145,7 @@ class MusicDirectoryParser:
         signatures, source_notes = collect_raw_smf_facts(midi, repairs=repairs)
         if not source_notes:
             raise ValueError("no_note_events")
-        chain = resolve_time_signature_chain(signatures)
+        chain = resolve_time_signature_chain(signatures, initial_time_signature_policy=self.config.initial_time_signature_policy)
         ppqn = int(midi.ticks_per_beat)
         spans = build_canonical_spans(chain, ppqn=ppqn, terminal_end_ql=max(note.end_ql(ppqn) for note in source_notes))
         timeline_hash = self._canonical_timeline_hash(spans, ppqn)
@@ -168,6 +170,7 @@ class MusicDirectoryParser:
                 "canonical_parser_version": "raw_smf_v1",
                 "ppqn": ppqn,
                 "canonical_span_count": len(spans),
+                "initial_time_signature": {"policy": self.config.initial_time_signature_policy, "origin": chain[0].origin, "injected_at_tick": 0 if chain[0].origin == "smf_default" else None, "meter": f"{chain[0].numerator}/{chain[0].denominator}", "first_real_ts_tick": min((fact.absolute_tick for fact in signatures), default=None)},
                 "track_retention": retention,
                 "form_mapping_status": self._form_mapping_status(metadata, source_identity, timeline_hash),
                 "canonical_timeline_sha256": timeline_hash,

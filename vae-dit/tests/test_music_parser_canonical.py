@@ -138,3 +138,28 @@ def test_cross_five_thirty_second_bar_keeps_raw_continuation_and_hold(tmp_path: 
     record = SemanticHarmonySetCodec.from_config(config).encode_song(song)[1]
     assert record.tensor[0, 0, 2] == 0.0
     assert record.tensor[0, 0, 3] == 1.0
+
+
+def test_missing_tick_zero_time_signature_is_default_error_or_explicitly_provenanced(tmp_path: Path) -> None:
+    import mido
+    path = tmp_path / "late_ts.mid"
+    midi = mido.MidiFile(ticks_per_beat=480)
+    meta = mido.MidiTrack(); meta.append(mido.MetaMessage("time_signature", numerator=3, denominator=4, time=480))
+    notes = mido.MidiTrack(); notes.extend([mido.Message("note_on", note=60, velocity=90, time=0), mido.Message("note_off", note=60, velocity=0, time=1920)])
+    midi.tracks.extend([meta, notes]); midi.save(path)
+    with __import__("pytest").raises(ValueError, match="time_signature_initial_missing"):
+        MusicDirectoryParser(MusicParserConfig()).parse_file(path, {}, dataset_root=tmp_path)
+    song = MusicDirectoryParser(MusicParserConfig(initial_time_signature_policy="smf_default_4_4")).parse_file(path, {}, dataset_root=tmp_path)[0]
+    assert song.metadata["initial_time_signature"] == {"policy": "smf_default_4_4", "origin": "smf_default", "injected_at_tick": 0, "meter": "4/4", "first_real_ts_tick": 480}
+
+
+def test_no_time_signature_events_can_only_use_explicit_smf_default(tmp_path: Path) -> None:
+    import mido
+    path = tmp_path / "no_ts.mid"
+    midi = mido.MidiFile(ticks_per_beat=480)
+    notes = mido.MidiTrack(); notes.extend([mido.Message("note_on", note=60, velocity=90, time=0), mido.Message("note_off", note=60, velocity=0, time=480)])
+    midi.tracks.append(notes); midi.save(path)
+    with __import__("pytest").raises(ValueError, match="time_signature_initial_missing"):
+        MusicDirectoryParser(MusicParserConfig()).parse_file(path, {}, dataset_root=tmp_path)
+    song = MusicDirectoryParser(MusicParserConfig(initial_time_signature_policy="smf_default_4_4")).parse_file(path, {}, dataset_root=tmp_path)[0]
+    assert song.metadata["initial_time_signature"]["first_real_ts_tick"] is None

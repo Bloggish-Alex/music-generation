@@ -10,6 +10,9 @@
     "dataset": {"type": "object", "required": ["identity", "content_sha256"]},
     "availability": {"type": "object", "required": ["raw_capture", "measure_map"], "properties": {"raw_capture": {"type": "boolean"}, "measure_map": {"type": "boolean"}}},
     "measure_map": {"type": "object", "required": ["song_count", "measure_count", "meter_distribution", "opus_tune_count", "over_capacity_count"]},
+    "initial_time_signature_policy": {"enum": ["error", "smf_default_4_4"]},
+    "initial_time_signature_origin_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "initial_time_signature_injections": {"type": "array", "items": {"type": "object", "required": ["source_file_identity", "origin", "injected_at_tick", "meter", "first_real_ts_tick"], "properties": {"source_file_identity": {"type": "string"}, "origin": {"const": "smf_default"}, "injected_at_tick": {"const": 0}, "meter": {"const": "4/4"}, "first_real_ts_tick": {"type": ["integer", "null"], "minimum": 1}}, "additionalProperties": true}},
     "track_retention": {"type": "object", "required": ["hard_safety_limit", "policy", "dropped_part_count", "dropped_note_count", "dropped_note_ratio"]},
     "normalization_policy_version": {"const": "raw_pairing_normalization.v1"},
     "repair_artifact": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
@@ -23,7 +26,7 @@
     "unavailable_reasons": {"type": "array"}
   },
   "allOf": [
-    {"if": {"properties": {"status": {"const": "AVAILABLE"}}}, "then": {"required": ["measure_map", "track_retention", "normalization_policy_version", "repair_artifact", "repair_count", "repair_counts_by_kind", "repair_affected_file_count", "partial_span_count", "partial_reason_counts", "partial_spans", "parser_failures"], "properties": {"availability": {"properties": {"raw_capture": {"const": true}, "measure_map": {"const": true}}}}}},
+    {"if": {"properties": {"status": {"const": "AVAILABLE"}}}, "then": {"required": ["measure_map", "initial_time_signature_policy", "initial_time_signature_origin_counts", "initial_time_signature_injections", "track_retention", "normalization_policy_version", "repair_artifact", "repair_count", "repair_counts_by_kind", "repair_affected_file_count", "partial_span_count", "partial_reason_counts", "partial_spans", "parser_failures"], "properties": {"availability": {"properties": {"raw_capture": {"const": true}, "measure_map": {"const": true}}}}}},
     {"if": {"properties": {"status": {"const": "UNAVAILABLE"}}}, "then": {"required": ["unavailable_reasons"], "properties": {"availability": {"properties": {"raw_capture": {"const": false}}}}}}
   ],
   "$defs": {

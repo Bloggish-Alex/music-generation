@@ -9,6 +9,7 @@ music_parser:
   hard_safety_limit: 48
   track_retention_policy: error
   default_velocity: 64
+  initial_time_signature_policy: error
 
 bar_tensor:
   backend: semantic_harmony_set_v2

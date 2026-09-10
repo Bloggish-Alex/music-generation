@@ -79,6 +79,7 @@ class ResolvedTimeSignature:
     numerator: int
     denominator_exponent: int
     contributors: tuple[RawTimeSignatureFact, ...]
+    origin: str = "smf"
 
     @property
     def denominator(self) -> int:
@@ -211,13 +212,19 @@ def collect_raw_smf_facts(midi: Any, *, tune_index: int = 0, repairs: list[RawPa
     return signatures, notes
 
 
-def resolve_time_signature_chain(facts: Iterable[RawTimeSignatureFact]) -> tuple[ResolvedTimeSignature, ...]:
+def resolve_time_signature_chain(facts: Iterable[RawTimeSignatureFact], *, initial_time_signature_policy: str = "error") -> tuple[ResolvedTimeSignature, ...]:
     """Merge duplicate raw declarations and reject same-tick meter conflicts."""
+    if initial_time_signature_policy not in {"error", "smf_default_4_4"}:
+        raise _failure("time_signature_initial_policy_invalid")
     by_tick: dict[int, list[RawTimeSignatureFact]] = defaultdict(list)
     for fact in facts:
         by_tick[int(fact.absolute_tick)].append(fact)
-    if not by_tick or 0 not in by_tick:
-        raise _failure("time_signature_initial_missing")
+    injected = False
+    if 0 not in by_tick:
+        if initial_time_signature_policy == "error":
+            raise _failure("time_signature_initial_missing")
+        by_tick[0].append(RawTimeSignatureFact(-1, -1, 0, 4, 2))
+        injected = True
     resolved: list[ResolvedTimeSignature] = []
     for tick in sorted(by_tick):
         contributors = tuple(sorted(by_tick[tick], key=lambda item: (item.physical_track_index, item.event_ordinal)))
@@ -225,7 +232,7 @@ def resolve_time_signature_chain(facts: Iterable[RawTimeSignatureFact]) -> tuple
         if len(meters) != 1:
             raise _failure("time_signature_conflict")
         numerator, exponent = next(iter(meters))
-        resolved.append(ResolvedTimeSignature(tick, numerator, exponent, contributors))
+        resolved.append(ResolvedTimeSignature(tick, numerator, exponent, contributors, "smf_default" if injected and tick == 0 else "smf"))
     return tuple(resolved)
 
 

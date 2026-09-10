@@ -182,8 +182,16 @@ Proposed validation is `1 <= nn <= 255` and `0 <= dd <= 7`; otherwise raise
    `(track, ordinal)` entries and increase `duplicate_merge_count` by `n-1`.
 3. Different meters at one tick cause `time_signature_conflict`; the diagnostic
    includes every conflicting fact, regardless of whether they share a track.
-4. Proposed first-release rule: exactly one resolved TS must exist at tick 0.
-   Otherwise fail `time_signature_initial_missing`; do not synthesize 4/4.
+4. The default training policy is `initial_time_signature_policy=error`:
+   exactly one resolved TS must exist at tick 0, otherwise fail
+   `time_signature_initial_missing`.
+5. The explicit compatibility policy is `smf_default_4_4`.  Only when tick 0
+   has no TS (including an SMF with no TS events at all), inject a synthetic
+   4/4 declaration at tick 0.  It is never silent: parser provenance records
+   `origin="smf_default"`, `injected_at_tick=0`, `meter="4/4"`, and the first
+   real TS tick (or `null` when no real TS exists).  Parser-integrity reports
+   the policy, origin counts, and every injected source.  This compatibility
+   mode does not alter the default training boundary.
 
 For a resolved meter `(nn,dd)` and PPQN `P`:
 
@@ -219,8 +227,9 @@ For example, if a 3/4 bar starts at QL 1380 and a raw 4/4 TS occurs at QL 1382:
 [1382, 1386) -> new full 4/4 span
 ```
 
-`time_signature_mid_bar_change` is therefore no longer a failure.  Missing
-initial TS, same-tick conflicts, and invalid TS values remain fail-fast. Tempo
+`time_signature_mid_bar_change` is therefore no longer a failure. Under the
+default `error` policy missing initial TS, same-tick conflicts, and invalid TS
+values remain fail-fast. Tempo
 at the same tick retains its own ordinal but cannot change the QL grid. TS facts
 after the terminal bar remain provenance facts; they do not create a trailing bar.
 
