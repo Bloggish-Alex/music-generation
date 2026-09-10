@@ -89,7 +89,7 @@ def test_cross_five_thirty_second_bar_keeps_raw_continuation_and_hold(tmp_path: 
     first, second = song.bars
     assert first.tracks[0].notes[0].continues_into_next_bar is True
     assert second.tracks[0].notes[0].continues_from_previous_bar is True
-    config = {"bar_tensor": {"backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "overflow_policy": "error", "steps_per_bar": 48, "pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0}}
+    config = {"bar_tensor": {"backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "overflow_policy": "error", "slot_grid": {"quantum_ql": .25, "capacity": 48, "epsilon_ql": 1e-6}, "pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0}}
     record = SemanticHarmonySetCodec.from_config(config).encode_song(song)[1]
     assert record.tensor[0, 0, 2] == 0.0
     assert record.tensor[0, 0, 3] == 1.0

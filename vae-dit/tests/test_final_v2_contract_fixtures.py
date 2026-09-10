@@ -2,7 +2,9 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from codec.slot_grid import SlotGrid
+from codec.slot_grid import CodecCapacityError, SlotGrid, SlotGridPolicy
+
+POLICY = SlotGridPolicy(.25, 48, 1e-6)
 ROOT=Path(__file__).resolve().parents[1]
 def load(name): return json.loads((ROOT/"tests"/"fixtures"/"final_v2_parser"/name).read_text(encoding="utf-8"))
 def test_grid_capacity_and_partial_slot_policy():
@@ -14,13 +16,13 @@ def test_grid_capacity_and_partial_slot_policy():
     for name, case in cases.items():
         if "encoding_error" in case:
             continue
-        grid=SlotGrid.for_bar(case["bar_length_ql"])
+        grid=SlotGrid.for_bar(case["bar_length_ql"], POLICY)
         assert grid.valid_slot_count==case["valid_slot_count"], name
         assert len(grid.slot_valid_mask)==48 and len(grid.slot_durations_ql)==48
         assert sum(grid.slot_durations_ql)==case["bar_length_ql"]
-    assert SlotGrid.for_bar(3.0).valid_slot_count==12
-    try: SlotGrid.for_bar(cases["over_capacity"]["bar_length_ql"])
-    except ValueError as error: assert str(error)=="slot_capacity_exceeded"
+    assert SlotGrid.for_bar(3.0, POLICY).valid_slot_count==12
+    try: SlotGrid.for_bar(cases["over_capacity"]["bar_length_ql"], POLICY)
+    except CodecCapacityError as error: assert error.details["reason"]=="slot_capacity_exceeded"
     else: raise AssertionError("over-capacity measure must fail")
 def test_opus_track_and_quantization_policy():
     parser={case["name"]:case for case in load("opus_and_track_cases.json")}
@@ -36,7 +38,7 @@ def test_frozen_schema_documents_lane_and_chroma_semantics():
     assert "velocity_ratio =" in text and "(pitch-base_pitch) mod 12" in text
 
 def test_grid_snaps_only_boundary_noise_and_keeps_true_partial_duration():
-    assert SlotGrid.for_bar(4.0+5e-7).bar_length_ql==4.0
-    assert SlotGrid.for_bar(6.375).slot_durations_ql[25]==0.125
-    tiny=SlotGrid.for_bar(5e-7)
+    assert SlotGrid.for_bar(4.0+5e-7, POLICY).bar_length_ql==4.0
+    assert SlotGrid.for_bar(6.375, POLICY).slot_durations_ql[25]==0.125
+    tiny=SlotGrid.for_bar(5e-7, POLICY)
     assert tiny.valid_slot_count==1 and tiny.slot_durations_ql[0]>0

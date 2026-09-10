@@ -11,7 +11,7 @@ from codec.relative_chroma import bass_anchor_pitch, relative_chromagram
 from common.config_loader import ConfigView
 from data.core import BarRecord, BarTensorRecord, NoteEvent, SongRecord
 from codec.semantic_harmony_assignment import SemanticCodecSequenceState, assign
-from codec.slot_grid import CAPACITY, SlotGrid
+from codec.slot_grid import SlotGrid, SlotGridPolicy
 
 
 VOICE_NAMES = ["melody", *[f"harmony_{index:02d}" for index in range(16)], "bass"]
@@ -20,7 +20,7 @@ FEATURE_NAMES = ["relative_pitch", "is_rest", "is_note_on", "is_hold", "normaliz
 
 @dataclass(frozen=True)
 class SemanticHarmonySetConfig:
-    steps_per_bar: int = 48
+    slot_grid: SlotGridPolicy
     pitch_scale: float = 24.0
     velocity_scale: float = 127.0
     max_harmony_notes: int = 16
@@ -33,8 +33,9 @@ class SemanticHarmonySetConfig:
         section = ConfigView(dict(config)).section("bar_tensor")
         if section.get("schema_version") != "bar_tensor_schema.v2" or section.get("overflow_policy") != "error":
             raise ValueError("semantic_harmony_set_v2 requires bar_tensor_schema.v2 and overflow_policy=error")
-        result = cls(**{name: section.get(name, getattr(cls(), name)) for name in cls.__dataclass_fields__})
-        if result.max_harmony_notes != 16 or result.steps_per_bar != CAPACITY or result.pitch_scale <= 0:
+        defaults = {"pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0, "melody_continuity_tolerance": 7, "slot_time_epsilon_ql": 1.0e-6}
+        result = cls(slot_grid=SlotGridPolicy.from_bar_tensor_config(section), **{name: section.get(name, value) for name, value in defaults.items()})
+        if result.max_harmony_notes != 16 or result.pitch_scale <= 0:
             raise ValueError("semantic_harmony_set_v2 configuration is invalid")
         return result
 
@@ -52,9 +53,10 @@ class SemanticHarmonySetCodec:
     def encode_song(self, song: SongRecord) -> list[BarTensorRecord]:
         """Canonical sequence API; preserves continuity across adjacent bars."""
         state = SemanticCodecSequenceState()
-        return [self.encode(bar, state) for bar in song.bars]
+        provenance = {"source_file_identity": song.metadata.get("source_file_identity"), "file_path": song.file_path, "tune_index": int(song.metadata.get("tune_index", 0))}
+        return [self.encode(bar, state, provenance) for bar in song.bars]
 
-    def encode(self, bar: BarRecord, state: SemanticCodecSequenceState | None = None) -> BarTensorRecord:
+    def encode(self, bar: BarRecord, state: SemanticCodecSequenceState | None = None, provenance: Mapping[str, Any] | None = None) -> BarTensorRecord:
         """Encode one independent bar; callers must not loop it for a multi-bar song."""
         canonical_bar_index = (
             int(bar.canonical_bar_index)
@@ -63,8 +65,9 @@ class SemanticHarmonySetCodec:
         )
         notes = [note for track in bar.tracks for note in track.notes]
         base_pitch = bass_anchor_pitch(notes)
-        grid = SlotGrid.for_bar(float(bar.bar_length_ql))
-        tensor = np.zeros((18, self.config.steps_per_bar, 6), dtype=np.float32)
+        context = {"song_id": bar.song_id, "source_file_identity": next((note.source_file_identity for note in notes if note.source_file_identity), None), "file_path": bar.file_path, "tune_index": 0, "canonical_bar_index": canonical_bar_index, "canonical_start_tick": bar.canonical_start_tick, "canonical_end_tick": bar.canonical_end_tick, "meter": bar.time_signature, **dict(provenance or {})}
+        grid = SlotGrid.for_bar(float(bar.bar_length_ql), self.config.slot_grid, context)
+        tensor = np.zeros((18, grid.capacity, 6), dtype=np.float32)
         tensor[:, np.asarray(grid.slot_valid_mask), 1] = 1.0
         if base_pitch is not None and max(int(note.pitch) for note in notes) - base_pitch > self.config.relative_pitch_max_semitones:
             raise ValueError("relative_pitch_range_overflow")

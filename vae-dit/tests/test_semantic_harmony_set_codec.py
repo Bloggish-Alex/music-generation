@@ -4,11 +4,30 @@ import numpy as np
 import pytest
 
 from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
+from codec.slot_grid import CodecCapacityError
 from data.core import BarRecord, NoteEvent, SongRecord, TrackRecord
 
 
-def _config() -> dict:
-    return {"bar_tensor": {"backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "overflow_policy": "error", "steps_per_bar": 48, "pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0}}
+def _config(capacity: int = 48) -> dict:
+    return {"bar_tensor": {"backend": "semantic_harmony_set_v2", "schema_version": "bar_tensor_schema.v2", "overflow_policy": "error", "slot_grid": {"quantum_ql": .25, "capacity": capacity, "epsilon_ql": 1e-6}, "pitch_scale": 24.0, "velocity_scale": 127.0, "max_harmony_notes": 16, "relative_pitch_max_semitones": 96.0}}
+
+
+@pytest.mark.parametrize(("meter", "length", "valid"), [("20/4", 20.0, 80), ("41/8", 20.5, 82), ("4/4", 4.0, 16)])
+def test_configured_92_slot_capacity_is_run_fixed(meter, length, valid) -> None:
+    bar = BarRecord("song", "fixture.mid", 7, length, time_signature=meter, canonical_bar_index=7, canonical_start_tick=10, canonical_end_tick=20)
+    record = SemanticHarmonySetCodec.from_config(_config(92)).encode(bar)
+    assert record.tensor.shape == (18, 92, 6)
+    assert record.diagnostics["slot_valid_mask"][:valid] == [True] * valid
+    assert not record.tensor[:, valid:, :].any()
+
+
+@pytest.mark.parametrize(("capacity", "length", "required"), [(92, 23.25, 93), (48, 20.0, 80)])
+def test_capacity_overflow_is_structured(capacity, length, required) -> None:
+    bar = BarRecord("song", "fixture.mid", 7, length, time_signature="20/4", canonical_bar_index=7, canonical_start_tick=10, canonical_end_tick=20)
+    song = SongRecord("song", "fixture.mid", metadata={"source_file_identity": "identity", "tune_index": 2}, bars=[bar])
+    with pytest.raises(CodecCapacityError) as caught:
+        SemanticHarmonySetCodec.from_config(_config(capacity)).encode_song(song)
+    assert caught.value.details == {"reason": "slot_capacity_exceeded", "song_id": "song", "source_file_identity": "identity", "file_path": "fixture.mid", "tune_index": 2, "canonical_bar_index": 7, "canonical_start_tick": 10, "canonical_end_tick": 20, "meter": "20/4", "bar_length_ql": length, "quantum_ql": .25, "required_slot_count": required, "configured_slot_capacity": capacity}
 
 
 def _note(pitch: int, ordinal: int, track: int = 0) -> NoteEvent:
