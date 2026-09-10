@@ -18,23 +18,23 @@ def _source(path, split, song, bars=None):
     path.write_text(json.dumps({"schema_version": "dataset_tonality_raw_source.v1", "dataset": {"split": split}, "availability": {"bar_note_events": True, "split_membership": True}, "songs": [{"song_id": song, "base_song_id": song, "applied_transpose_semitones": 0, "bars": bars}]}), encoding="utf-8")
 
 
-def _canonical(tmp_path, rows):
+def _canonical(tmp_path, rows, capacity=48):
     count = len(rows)
-    voices = np.zeros((count, 18, 48, 6), dtype=np.float32)
-    mask = np.zeros((count, 48), dtype=bool); mask[:, :16] = True
+    voices = np.zeros((count, 18, capacity, 6), dtype=np.float32)
+    mask = np.zeros((count, capacity), dtype=bool); mask[:, :16] = True
     voices[:, :, :16, 1] = 1.0
-    durations = np.zeros((count, 48), dtype=np.float32); durations[:, :16] = .25
+    durations = np.zeros((count, capacity), dtype=np.float32); durations[:, :16] = .25
     arrays = tmp_path / "voice_tensors.npz"
     np.savez_compressed(arrays, voice_tensors=voices, slot_valid_mask=mask, slot_durations_ql=durations, bar_contexts=np.zeros((count, 12), dtype=np.float32), base_pitches=np.full(count, 60, dtype=np.int16), base_pitch_valid=np.ones(count, dtype=bool))
     index = tmp_path / "bar_tensor_index.json"; index.write_text(json.dumps(rows), encoding="utf-8")
-    manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": count, "voice_names": [], "feature_names": [], "arrays": {"path": arrays.name, "sha256": _digest(arrays)}, "index": {"sha256": _digest(index)}, "slot_grid_policy": {"quantum_ql": .25, "capacity": 48, "epsilon_ql": 1e-6}}
+    manifest = {"schema_version": "bar_tensor_schema.v2", "row_count": count, "voice_names": [], "feature_names": [], "arrays": {"path": arrays.name, "sha256": _digest(arrays)}, "index": {"sha256": _digest(index)}, "slot_grid_policy": {"quantum_ql": .25, "capacity": capacity, "epsilon_ql": 1e-6}}
     (tmp_path / "encoding_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return arrays
 
 
 def test_v2_capture_and_export_use_canonical_masked_arrays(tmp_path) -> None:
     rows = [{"row": 0, "song_id": "train_song", "base_song_id": "train_song", "source_bar_index": 0}, {"row": 1, "song_id": "validation_song", "base_song_id": "validation_song", "source_bar_index": 0}]
-    _canonical(tmp_path, rows)
+    _canonical(tmp_path, rows, capacity=92)
     train, validation = tmp_path / "train.json", tmp_path / "validation.json"; _source(train, "train", "train_song"); _source(validation, "validation", "validation_song")
     result = JsonNpzCodecFidelityV2RawCapture().capture(CodecFidelityV2RawCaptureRequest(tmp_path, "fixture", None, {"train": train, "validation": validation}, frozenset({"train_song"}), frozenset({"validation_song"})))
     assert set(result.artifacts) == {"train", "validation"}

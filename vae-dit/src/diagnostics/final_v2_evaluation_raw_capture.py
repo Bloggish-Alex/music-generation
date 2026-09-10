@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from data.core import SongRecord
-from codec.slot_grid import SlotGrid
+from codec.slot_grid import SlotGrid, SlotGridPolicy
 
 
 MODULES = ("parser_integrity", "quantization_audit", "performance_controls", "form_action_alignment")
@@ -35,7 +35,7 @@ class FinalV2EvaluationRawCapture:
         common = {"run": run, "dataset": {"identity": dataset["identity"], "content_sha256": dataset.get("content_sha256")}}
         payloads = {
             "parser_integrity": self._parser_integrity(common, songs, parser_failures, manifest, output_dir),
-            "quantization_audit": self._quantization(common, songs, output_dir),
+            "quantization_audit": self._quantization(common, songs, output_dir, SlotGridPolicy.from_bar_tensor_config({"slot_grid": manifest["slot_grid_policy"]})),
             "performance_controls": self._controls(common, songs),
             "form_action_alignment": self._form_action(common, songs),
         }
@@ -115,9 +115,10 @@ class FinalV2EvaluationRawCapture:
                 raise ValueError("canonical partial artifacts are unavailable")
             return
         rows = json.loads(index_path.read_text(encoding="utf-8"))
+        policy = SlotGridPolicy.from_bar_tensor_config({"slot_grid": manifest.get("slot_grid_policy")})
         with np.load(arrays_path, allow_pickle=False) as archive:
             masks, durations = archive["slot_valid_mask"], archive["slot_durations_ql"]
-        if len(rows) != len(masks) or len(rows) != len(durations):
+        if len(rows) != len(masks) or len(rows) != len(durations) or masks.shape[1:] != (policy.capacity,) or durations.shape[1:] != (policy.capacity,):
             raise ValueError("canonical partial artifact rows are misaligned")
         for position, row in enumerate(rows):
             if row.get("row") != position:
@@ -129,11 +130,11 @@ class FinalV2EvaluationRawCapture:
             expected = (bar.canonical_start_tick, bar.canonical_end_tick, bar.ppqn, bool(bar.is_partial), bar.partial_reason, float(bar.bar_length_ql), bar.nominal_meter or bar.time_signature, bar.triggering_ts_tick)
             observed = (row.get("canonical_start_tick"), row.get("canonical_end_tick"), row.get("ppqn"), row.get("is_partial"), row.get("partial_reason"), float(row.get("actual_bar_length_ql", -1)), row.get("nominal_meter"), row.get("triggering_ts_tick"))
             mask = np.asarray(masks[position], dtype=bool); duration = np.asarray(durations[position], dtype=float)
-            if observed != expected or not np.array_equal(mask, np.arange(len(mask)) < int(mask.sum())) or np.any(duration[~mask] != 0) or np.any(duration[mask] <= 0) or not math.isclose(float(duration[mask].sum()), float(bar.bar_length_ql), abs_tol=1e-6):
+            if observed != expected or row.get("voice_tensor_shape") not in (None, [18, policy.capacity, 6]) or not np.array_equal(mask, np.arange(len(mask)) < int(mask.sum())) or np.any(duration[~mask] != 0) or np.any(duration[mask] <= 0) or not math.isclose(float(duration[mask].sum()), float(bar.bar_length_ql), abs_tol=policy.epsilon_ql):
                 raise ValueError("canonical partial index/slot alignment is invalid")
 
     @staticmethod
-    def _quantization(common: Mapping[str, Any], songs: Sequence[SongRecord], output_dir: Path) -> dict[str, Any]:
+    def _quantization(common: Mapping[str, Any], songs: Sequence[SongRecord], output_dir: Path, policy: SlotGridPolicy) -> dict[str, Any]:
         """Capture only complete local-fragment timing facts; no legacy fallback."""
         def residual(values: list[float]) -> dict[str, float]:
             ordered = sorted(values)
@@ -180,7 +181,7 @@ class FinalV2EvaluationRawCapture:
                     raw_start, raw_end, ordinary_start, ordinary_end, quantized_start, quantized_end, onset_error, end_error = (float(sample[name]) for name in ("raw_local_start_ql", "raw_local_end_ql", "ordinary_quantized_local_start_ql", "ordinary_quantized_local_end_ql", "final_quantized_local_start_ql", "final_quantized_local_end_ql", "onset_residual_ql", "end_residual_ql"))
                 except (TypeError, ValueError) as error:
                     raise ValueError(f"quantization fragment sample is non-numeric for {song.song_id}") from error
-                grid = SlotGrid.for_bar(float(bar.bar_length_ql))
+                grid = SlotGrid.for_bar(float(bar.bar_length_ql), policy)
                 starts = [grid.interval(slot)[0] for slot in range(grid.valid_slot_count)]
                 ends = [*starts, float(bar.bar_length_ql)]
                 epsilon = 1e-6
@@ -268,7 +269,7 @@ class FinalV2EvaluationRawCapture:
             end_values = [float(item["end_residual_ql"]) for item in values]
             rows.append({"source_file_identity": source, "meter": meter, "fragment_count": len(values), "projected_fragment_count": sum(item["quantization_repair_kind"] is not None for item in values), "nonzero_residual_count": sum(value > 1e-9 for value in onset_values + end_values), "onset_residual_ql": residual(onset_values), "end_residual_ql": residual(end_values)})
         projected = sum(item[1]["quantization_repair_kind"] is not None for item in flat)
-        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "audit_unit": "source_note_fragment", "fragment_count": len(flat), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(flat) if flat else 0.0, "grid_policy": {"quantum_ql": .25, "epsilon_ql": 1e-6, "capacity": 48}, "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
+        return {"schema_version": "quantization_audit_raw_observation.v2", "status": "AVAILABLE", **common, "availability": {"raw_capture": True, "source_boundaries": True, "residual_samples": True}, "audit_unit": "source_note_fragment", "fragment_count": len(flat), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(flat) if flat else 0.0, "grid_policy": policy.to_dict(), "by_file_meter": rows, "residual_samples":{"path":path.name,"sha256":_sha256(path),"arrays":arrays}, "unavailable_reasons": []}
 
     @staticmethod
     def _validate_residual_archive(path: Path, declared_arrays: Mapping[str, Mapping[str, Any]]) -> None:

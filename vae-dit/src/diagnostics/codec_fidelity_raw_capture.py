@@ -83,15 +83,16 @@ class JsonNpzCodecFidelityV2RawCapture:
             if manifest.get("index", {}).get("sha256") != _sha256(index_path):
                 raise ValueError("V2 manifest index.sha256 does not match bar_tensor_index.json")
             policy = manifest.get("slot_grid_policy", {})
-            if policy != {"quantum_ql": 0.25, "capacity": 48, "epsilon_ql": 1e-6}:
+            if set(policy) != {"quantum_ql", "capacity", "epsilon_ql"} or policy.get("quantum_ql") != 0.25 or not isinstance(policy.get("capacity"), int) or policy["capacity"] <= 0 or policy.get("epsilon_ql") != 1e-6:
                 raise ValueError("V2 manifest slot_grid_policy is not canonical")
+            capacity = int(policy["capacity"])
             with np.load(arrays_path, allow_pickle=False) as archive:
                 values = {name: np.asarray(archive[name]) for name in ("voice_tensors", "slot_valid_mask", "slot_durations_ql", "bar_contexts", "base_pitches", "base_pitch_valid")}
             count = len(rows)
-            if any(array.shape[0] != count for array in values.values()) or values["voice_tensors"].shape[1:] != (18, 48, 6) or values["slot_valid_mask"].shape[1:] != (48,) or values["slot_durations_ql"].shape[1:] != (48,) or values["bar_contexts"].shape[1:] != (12,) or not np.isfinite(values["voice_tensors"]).all() or not np.isfinite(values["slot_durations_ql"]).all() or not np.isfinite(values["bar_contexts"]).all():
+            if any(array.shape[0] != count for array in values.values()) or values["voice_tensors"].shape[1:] != (18, capacity, 6) or values["slot_valid_mask"].shape[1:] != (capacity,) or values["slot_durations_ql"].shape[1:] != (capacity,) or values["bar_contexts"].shape[1:] != (12,) or not np.isfinite(values["voice_tensors"]).all() or not np.isfinite(values["slot_durations_ql"]).all() or not np.isfinite(values["bar_contexts"]).all():
                 raise ValueError("V2 arrays are non-finite or misaligned")
             masks = values["slot_valid_mask"]; durations = values["slot_durations_ql"]
-            if any(not np.array_equal(mask, np.r_[np.ones(int(mask.sum()), dtype=bool), np.zeros(48 - int(mask.sum()), dtype=bool)]) for mask in masks) or np.any(durations[~masks] != 0) or np.any(durations[masks] <= 0) or np.any(durations[masks] > 0.25 + 1e-6):
+            if any(not np.array_equal(mask, np.r_[np.ones(int(mask.sum()), dtype=bool), np.zeros(capacity - int(mask.sum()), dtype=bool)]) for mask in masks) or np.any(durations[~masks] != 0) or np.any(durations[masks] <= 0) or np.any(durations[masks] > policy["quantum_ql"] + policy["epsilon_ql"]):
                 raise ValueError("V2 slot_valid_mask or slot_durations_ql violates canonical grid invariants")
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
             return self._unavailable_all(request, str(error))

@@ -13,6 +13,12 @@ from evaluation_framework.evaluation_context import EvaluationContext, ExportCon
 from evaluation_framework.evaluation_final_v2_diagnostics import FinalV2DiagnosticEvaluator, FinalV2DiagnosticExporter
 from codec.action_labeler import ACTION_RETURN, ActionLabeler, ActionLabelerConfig
 from diagnostics.final_v2_evaluation_raw_capture import FinalV2EvaluationRawCapture
+from codec.slot_grid import SlotGridPolicy
+
+TEST_GRID_POLICY = SlotGridPolicy(.25, 48, 1e-6)
+
+def _quantization(common, songs, output_dir):
+    return FinalV2EvaluationRawCapture._quantization(common, songs, output_dir, TEST_GRID_POLICY)
 from data.core import BarRecord, NoteEvent, SongRecord, TrackRecord
 
 
@@ -170,7 +176,7 @@ def test_parser_integrity_rejects_partial_index_raw_or_slot_tampering(tmp_path, 
     if tamper == "trigger_tick": bar.triggering_ts_tick = 961
     index_path = tmp_path / "bar_tensor_index.json"; index_path.write_text(json.dumps(rows), encoding="utf-8")
     arrays_path = tmp_path / "voice_tensors.npz"; np.savez_compressed(arrays_path, slot_valid_mask=masks, slot_durations_ql=durations)
-    manifest = {"normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": repair_path.name, "sha256": _digest(repair_path)}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 0, "index": {"path": index_path.name}, "arrays": {"path": arrays_path.name, "sha256": _digest(arrays_path)}}
+    manifest = {"normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": repair_path.name, "sha256": _digest(repair_path)}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 0, "slot_grid_policy": {"quantum_ql": .25, "capacity": 48, "epsilon_ql": 1e-6}, "index": {"path": index_path.name}, "arrays": {"path": arrays_path.name, "sha256": _digest(arrays_path)}}
     if tamper == "arrays_hash": manifest["arrays"]["sha256"] = "sha256:" + "0" * 64
     with pytest.raises(ValueError, match="canonical partial"):
         FinalV2EvaluationRawCapture._parser_integrity({"dataset": {"identity": "fixture"}}, [song], [], manifest, tmp_path)
@@ -181,7 +187,7 @@ def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
     bars = [BarRecord("opus", "opus.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)]
     songs = [SongRecord("opus__tune_000", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 0, "quantization_audit": _audit(first)}, runtime_diagnostics={"quantization_fragment_samples": first}, bars=bars), SongRecord("opus__tune_001", "opus.mid", metadata={"source_file_identity": "same", "tune_index": 1, "quantization_audit": _audit(second)}, runtime_diagnostics={"quantization_fragment_samples": second}, bars=bars)]
     common = {"run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "fixture", "content_sha256": None}}
-    payload = FinalV2EvaluationRawCapture._quantization(common, songs, tmp_path)
+    payload = _quantization(common, songs, tmp_path)
     assert payload["audit_unit"] == "source_note_fragment"
     assert payload["fragment_count"] == 4
     assert len(payload["by_file_meter"]) == 1
@@ -214,7 +220,7 @@ def test_quantization_archive_preserves_residual_recomputation_precision(tmp_pat
         "end_residual_ql": 0.002083333333333437,
     })
     bar = BarRecord("song", "song.mid", 0, 4.0, canonical_bar_index=0, time_signature="4/4")
-    payload = FinalV2EvaluationRawCapture._quantization({}, [_song([sample], [bar])], tmp_path)
+    payload = _quantization({}, [_song([sample], [bar])], tmp_path)
     archive_path = tmp_path / payload["residual_samples"]["path"]
     with np.load(archive_path, allow_pickle=False) as archive:
         assert archive["raw_local_end_ql"].dtype == np.dtype("float64")
@@ -223,7 +229,7 @@ def test_quantization_archive_preserves_residual_recomputation_precision(tmp_pat
 
 
 def test_quantization_archive_rejects_float32_timing_arrays(tmp_path) -> None:
-    payload = FinalV2EvaluationRawCapture._quantization({}, [_song(_samples())], tmp_path)
+    payload = _quantization({}, [_song(_samples())], tmp_path)
     archive_path = tmp_path / payload["residual_samples"]["path"]
     with np.load(archive_path, allow_pickle=False) as archive:
         arrays = {name: archive[name] for name in archive.files}
@@ -241,14 +247,14 @@ def test_quantization_audit_rejects_missing_or_legacy_runtime_samples(tmp_path, 
     samples = _samples()
     song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)}, runtime_diagnostics=runtime)
     with pytest.raises(ValueError, match="quantization fragment samples"):
-        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+        _quantization({}, [song], tmp_path)
 
 
 def test_quantization_audit_rejects_summary_statistic_mismatch(tmp_path) -> None:
     samples = _samples(); audit = _audit(samples); audit["by_meter"]["4/4"]["onset_residual_ql"]["max"] = .09
     song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": audit}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=[BarRecord("song", "song.mid", index, 4.0, canonical_bar_index=index, time_signature="4/4") for index in range(2)])
     with pytest.raises(ValueError, match="quantization fragment samples disagree with summary"):
-        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+        _quantization({}, [song], tmp_path)
 
 
 def test_quantization_audit_accepts_partial_final_slot_for_5_32_bar(tmp_path) -> None:
@@ -262,7 +268,7 @@ def test_quantization_audit_accepts_partial_final_slot_for_5_32_bar(tmp_path) ->
         "onset_residual_ql": .01, "end_residual_ql": .0,
     }
     bar = BarRecord("song", "song.mid", 0, .625, canonical_bar_index=0, time_signature="5/32")
-    payload = FinalV2EvaluationRawCapture._quantization({}, [_song([sample], [bar])], tmp_path)
+    payload = _quantization({}, [_song([sample], [bar])], tmp_path)
     assert payload["fragment_count"] == 1
 
 
@@ -278,7 +284,7 @@ def test_quantization_audit_accepts_partial_final_slot_for_5_32_bar(tmp_path) ->
 def test_quantization_audit_rejects_forged_projection_facts(tmp_path, field, value) -> None:
     sample = _repaired_sample(); sample[field] = value
     with pytest.raises(ValueError, match="sample values|repair facts"):
-        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+        _quantization({}, [_song([sample])], tmp_path)
 
 
 def test_quantization_audit_rejects_collapsed_fragment_without_repair(tmp_path) -> None:
@@ -292,7 +298,7 @@ def test_quantization_audit_rejects_collapsed_fragment_without_repair(tmp_path) 
         "end_residual_ql": .12,
     })
     with pytest.raises(ValueError, match="sample values|repair facts"):
-        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+        _quantization({}, [_song([sample])], tmp_path)
 
 
 def test_quantization_audit_rejects_normal_fragment_with_forged_repair(tmp_path) -> None:
@@ -304,7 +310,7 @@ def test_quantization_audit_rejects_normal_fragment_with_forged_repair(tmp_path)
         "projection_endpoint_error_ql": 0.0,
     })
     with pytest.raises(ValueError, match="repair facts"):
-        FinalV2EvaluationRawCapture._quantization({}, [_song([sample])], tmp_path)
+        _quantization({}, [_song([sample])], tmp_path)
 
 
 @pytest.mark.parametrize("path", [("projected_fragment_count",), ("by_meter", "4/4", "projected_fragment_count")])
@@ -316,7 +322,7 @@ def test_quantization_audit_rejects_projection_summary_mismatch(tmp_path, path) 
     target[path[-1]] = 0
     song = _song([sample]); song.metadata["quantization_audit"] = audit
     with pytest.raises(ValueError, match="projection summary"):
-        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+        _quantization({}, [song], tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -324,7 +330,7 @@ def test_quantization_audit_rejects_projection_summary_mismatch(tmp_path, path) 
     [("repair_slot_indexes", 0), ("projection_overlap_ql", 0.0)],
 )
 def test_quantization_audit_rejects_incoherent_none_archive_repair_fields(tmp_path, array_name, value) -> None:
-    payload = FinalV2EvaluationRawCapture._quantization({}, [_song(_samples())], tmp_path)
+    payload = _quantization({}, [_song(_samples())], tmp_path)
     archive_path = tmp_path / payload["residual_samples"]["path"]
     with np.load(archive_path, allow_pickle=False) as archive:
         arrays = {name: archive[name] for name in archive.files}
@@ -340,7 +346,7 @@ def test_quantization_audit_rejects_fragments_outside_canonical_slot_grid(tmp_pa
     samples = _samples(); samples[0][field] = value
     song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "quantization_audit": _audit(samples)}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=[BarRecord("song", "song.mid", 0, .625, canonical_bar_index=0, time_signature="5/32"), BarRecord("song", "song.mid", 1, 4.0, canonical_bar_index=1, time_signature="4/4")])
     with pytest.raises(ValueError, match="canonical bar alignment|sample values"):
-        FinalV2EvaluationRawCapture._quantization({}, [song], tmp_path)
+        _quantization({}, [song], tmp_path)
 
 
 def test_song_json_excludes_quantization_runtime_samples() -> None:
