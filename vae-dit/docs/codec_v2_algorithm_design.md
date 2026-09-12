@@ -1,4 +1,4 @@
-# Codec V2 Algorithm Design: Current Tensor Contract and Target Canonical Parser
+# Codec V2 Algorithm Design: Current Tensor Contract and Canonical Raw-SMF Parser
 
 ## 1. Purpose and status
 
@@ -32,10 +32,10 @@ semantic tensor without silently dropping notes. It does **not** encode pedal,
 tempo, key signature, or a separate phrase-level dynamics target. Those are
 source facts captured by the evaluation framework.
 
-> Important parser boundary: this document starts with a validated `BarRecord`.
-> The current parser requires a trustworthy global measure map before it may
-> create these records. The unresolved multi-part measure-map canonicalization
-> work is a parser concern; it must not be hidden inside the codec.
+> Important parser boundary: `raw_smf_v1` is the implemented parser authority.
+> It builds validated `CanonicalBarSpan` records from raw PPQN SMF ticks and
+> emits `BarRecord` values only from that timeline. No music21 Part/Measure map
+> is a production fallback or bar authority.
 
 ### Configurable slot capacity: frozen per encoding and training run
 
@@ -120,7 +120,7 @@ Implementation propagation rules:
    41/8, ordinary 4/4 padding, capacity overflow with structured context, and
    manifest/index/NPZ/evaluation/training-loader agreement.
 
-### 1.1 Target canonical raw-MIDI parser specification — not implemented
+### 1.1 Implemented canonical raw-SMF parser specification
 
 #### Status and non-negotiable boundary
 
@@ -128,9 +128,9 @@ This document deliberately describes two layers:
 
 | Layer | Status | Contract |
 |---|---|---|
-| `[18,C,6]` V2 tensor, `SlotGrid`, lane and feature semantics | Capacity-config implementation pending | `bar_tensor_schema.v2` semantics remain; `C` is the explicit run configuration above. |
-| Raw SMF to `CanonicalBarSpan[]` | Target design | Replaces the current music21 Part/Measure map as bar authority. |
-| Controls, form metadata, diagnostics, CLI acceptance | Target integration | Must move to the canonical timeline together with the parser. |
+| `[18,C,6]` V2 tensor, `SlotGrid`, lane and feature semantics | Implemented | `bar_tensor_schema.v2` semantics remain; `C` is the explicit run configuration above. |
+| Raw SMF to `CanonicalBarSpan[]` | Implemented as `raw_smf_v1` | The sole production bar authority. |
+| Controls, form metadata, diagnostics, CLI acceptance | Implemented boundary | Controls remain evaluation-only; legacy form coordinates fail closed. |
 
 Standard MIDI has no physical Part or Measure object.  A music21 Measure list
 is therefore diagnostic evidence only, never an authority for accepting,
@@ -144,17 +144,24 @@ raw SMF (Standard MIDI File) header/tracks
 → unchanged V2 codec → canonical artifacts and framework diagnostics
 ```
 
-The rules below are proposed freeze rules for design review.  An implementation
-must not replace them with convenience defaults.
+The rules below are the implemented frozen behavior. Production code must not
+replace them with convenience defaults.
 
 #### Supported input and exact time
 
-The proposed first release accepts PPQN (Pulses Per Quarter Note) SMF format 0 and 1 only.  Format 2
+Production encoding accepts PPQN (Pulses Per Quarter Note) SMF format 0 and 1
+only. Format 2
 fails with `smf_format_2_unsupported`; SMPTE (Society of Motion Picture and Television Engineers) division fails with
-`smpte_division_unsupported`.  Format-2 tracks are independent patterns, not
-parallel parts of one song.  A music21 `Opus` is not assumed to mean format 2:
-an explicitly supplied multi-tune source emits one `SongRecord` per tune with
-the same file identity and a distinct `tune_index`.
+`smpte_division_unsupported`. Format-2 tracks are independent patterns, not
+parallel parts of one song. The current production parser emits exactly one
+`SongRecord` for each Type 0/1 source file and fixes `tune_index=0`. SMF Type 2
+and music21 `Opus` are outside its support boundary. A same-file multi-tune
+identity requires a separately designed parser/API before it can be enabled.
+
+ABC, KRN, MusicXML, and other symbolic score formats are outside the V2
+canonical parser boundary, not failed MIDI inputs. The encoding manifest
+records `supported_source_formats=["smf_ppqn_type_0", "smf_ppqn_type_1"]` and
+`canonical_parser_version="raw_smf_v1"`.
 
 `physical_track_index` is always the zero-based raw SMF track index.  It is
 never renumbered when a conductor track is omitted from notes.  The 48-track
@@ -251,12 +258,11 @@ paired end < start: note_nonpositive_duration.
 
 Each listed error is a song parser failure.  FIFO is intentional for overlapping
 same-pitch notes.  A chord is stable because same-tick order is the raw track
-event ordinal and cross-track notes have distinct physical track indexes.  To
-prevent collisions when one source file emits multiple tunes, ordinal is neither
-track-scoped nor tune-scoped: after collecting successful non-zero Note Ons,
-assign one monotonically increasing raw-file ordinal using
-`(tune_index,absolute_tick,physical_track_index,event_ordinal)`.  The existing
-three-part ID consequently remains unique over the entire raw file.
+event ordinal and cross-track notes have distinct physical track indexes. After
+collecting successful non-zero Note Ons, assign one monotonically increasing
+raw-file ordinal using `(absolute_tick,physical_track_index,event_ordinal)`.
+The current production parser has `tune_index=0`, so the three-part ID remains
+unique within its one-file/one-song boundary.
 The identity is created before quantization, sorting or clipping:
 
 ```text
@@ -328,7 +334,7 @@ duration, or a dangling On, it requires a new design decision.
 `source_note_ordinal` remains raw-file scoped but now numbers only Note Ons
 that successfully form positive-duration `RawSourceNote`s after normalization.
 Collect those candidate ons and sort them by
-`(tune_index, absolute_tick, physical_track_index, event_ordinal)` into `0..K-1`.
+`(absolute_tick, physical_track_index, event_ordinal)` into `0..K-1`.
 Discarded pairs consume no ordinal and cannot affect source identity or
 cross-bar continuity.
 
@@ -442,8 +448,8 @@ reflecting its independent local representations.
 
 #### Pickup, terminal bar, silence, and partial slots
 
-The proposed first parser never infers pickup from the first note and accepts
-no pickup metadata yet.  It starts the initial nominal bar at tick/QL zero;
+The implemented parser never infers pickup from the first note and currently
+accepts no pickup metadata. It starts the initial nominal bar at tick/QL zero;
 leading silence is valid rest and `is_pickup=false`.  For initial 4/4 and a
 first note at QL 1.5, bar 0 remains `[0,4)` and slots 0--5 are rests.  A later,
 separately versioned metadata mode may use an exact `pickup_length_ql` bound to
@@ -487,39 +493,76 @@ can emit a partial canonical span.
 
 #### Form mapping, diagnostics, and implementation scope
 
-Form metadata must bind file identity and tune to absolute half-open QL
-intervals, e.g. `{form:"A",start_ql:"0/1",end_ql:"16/1"}`.  `start_ql` and
-`end_ql` are exact rational strings such as `"13/4"`, never JSON numbers or
-binary floats; parse them as fractions and require `0 <= start < end`.  Assign
-a form only when one section fully covers the canonical bar.  A crossing bar, overlap, or
-unbound metadata gives `form=null` and `form_mapping_unavailable`.  Actions
-may be computed without form; alignment reports partial coverage honestly.
-`ActionLabeler` currently derives a legacy `bar_length/16` rhythm profile.  It
-must migrate to valid `SlotGrid` slots or be explicitly UNAVAILABLE.
+The implemented parser accepts only **bound canonical-bar metadata**. Its
+coordinate system is `canonical_bar_index.v1`; a valid payload binds the exact
+source identity, `raw_smf_v1` parser version, and canonical-timeline hash:
 
-`parser_integrity` must add `canonical_parser_version`, `ts_fact_count`,
-`ts_duplicate_merge_count`, `ts_conflict_count`, `initial_ts_source`,
-`canonical_span_count`, `partial_span_count`, `partial_spans` (canonical index,
-exact start/end, actual length, old meter, reason, and triggering TS provenance),
-`partial_reason_counts`, `empty_bar_count`, `terminal_bar_policy`,
-`pickup_policy`, `pickup_status`, `note_pairing_policy`,
-`quantization_policy`, `retained_note_track_count`, and structured failures.
-The quantization-audit raw observation must additionally declare
-`audit_unit="source_note_fragment"` and `fragment_count`.  Every sample key is
+```json
+{
+  "coordinate_system": "canonical_bar_index.v1",
+  "source_file_identity": "...",
+  "canonical_parser_version": "raw_smf_v1",
+  "canonical_timeline_sha256": "sha256:...",
+  "form": "binary",
+  "sections": [{"name": "A", "canonical_start_bar_index": 0, "canonical_end_bar_index": 8}]
+}
+```
+
+Each section must be a non-empty, non-overlapping range of existing canonical
+bar indexes. Only after the full payload validates does the parser set
+`song.form` to the global template and `bar.form`/`section_label` to the local
+section label. The complete status vocabulary is `absent`, `mapped`,
+`unavailable_legacy_measure_index`, `unavailable_timeline_mismatch`, and
+`unavailable_empty_canonical_sections`.
+
+The current offline form generator produces only
+`coordinate_system=legacy_measure_index`. It cannot produce the bound
+canonical contract above, so Codec V2 deliberately fails closed: it applies no
+form labels and `form_action_alignment` is `UNAVAILABLE`. A canonical form
+classifier/adapter is future independent work. A QL-interval form contract is
+also only a future proposal; it is not accepted by the current parser.
+
+`ActionLabeler` remains a legacy 16-bin diagnostic heuristic: it normalizes
+each bar into `bar_length_ql / 16` rhythm bins. It neither determines the V2
+tensor nor forms training input. Until a canonical form classifier/adapter is
+enabled, it must migrate to `SlotGrid` valid-slot semantics or
+`form_action_alignment` must remain `UNAVAILABLE`; it must not be represented
+as an implemented SlotGrid consumer.
+
+### Parser-integrity publication status
+
+The current `parser_integrity_raw_observation.v2` publishes only the fields
+that the runtime capture actually materializes:
+
+| Current published group | Fields |
+|---|---|
+| Measure map | `measure_map` (song/measure counts, meter distribution, Opus-tune count, over-capacity count) |
+| Initial TS | `initial_time_signature_policy`, `initial_time_signature_origin_counts`, `initial_time_signature_injections` |
+| Partial spans | `partial_span_count`, `partial_reason_counts`, `partial_spans` |
+| Track retention | `track_retention` |
+| Pairing normalization | `normalization_policy_version`, `repair_artifact`, `repair_count`, `repair_counts_by_kind`, `raw_pairing_repair_counts`, pairing-loss counts/ratio, affected-file count |
+| Failures | `parser_failures` |
+
+The quantization-audit observation currently declares
+`audit_unit="source_note_fragment"`, fragment/projection counts, pairing-loss
+summary, grid policy, and per-file/meter residuals. Every sample key is
 `(source_note_id, canonical_bar_index)` and carries meter, raw-local and
-quantized-local start/end, and onset/end residuals.  It must not publish or
+quantized-local start/end, and onset/end residuals. It does not publish or
 consume global quantized onset/end fields.
-Parser failure means no apparently AVAILABLE partial encoding.  `UNAVAILABLE`
-is reserved for evaluation capture with missing/unaligned materialized inputs.
-`time_signature_change` is the only permitted partial reason in this release.
 
-Implementation order: contracts and real-MIDI fixtures; independent
-`canonical_timeline.py`; `music_parser.py`/`measure_map.py` replacement;
-controls, source raw, pipeline and fidelity migration; action/form migration;
-then framework schema/export/evaluator changes and corpus acceptance.  Rename
-`source_measure_index` to `canonical_bar_index` (or retain it only as an
-explicit same-value serialized compatibility alias).  No codec algorithm may
-use it as music21 Measure authority.  Do not alter V2 tensor semantics.
+The following are **future parser-integrity extensions**, not current raw
+observation fields: `canonical_parser_version`, TS fact/duplicate/conflict
+counts, `initial_ts_source`, `canonical_span_count`, `empty_bar_count`,
+terminal/pickup policy and status, note-pairing/quantization policy, and
+retained-note-track count. They require a schema and capture implementation
+before evaluators may consume them.
+
+Parser failure means no apparently AVAILABLE partial encoding. `UNAVAILABLE`
+is reserved for evaluation capture with missing or unaligned materialized
+inputs. `time_signature_change` is the only currently published partial reason.
+`source_measure_index` remains only a same-value serialized compatibility alias
+of `canonical_bar_index`; no codec algorithm may use it as music21 Measure
+authority. V2 tensor semantics remain unchanged.
 
 ## 2. Terms and units
 

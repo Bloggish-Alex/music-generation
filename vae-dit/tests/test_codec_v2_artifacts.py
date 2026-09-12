@@ -35,4 +35,6 @@ def test_v2_artifacts_use_canonical_row_aligned_array_names(tmp_path) -> None:
     assert index[0]["voice_tensor_shape"] == [18, 92, 6]
     assert manifest["arrays"]["names"]["slot_valid_mask"]["shape"] == [1, 92]
     assert manifest["slot_grid_policy"]["capacity"] == 92
+    assert manifest["canonical_parser_version"] == "raw_smf_v1"
+    assert manifest["supported_source_formats"] == ["smf_ppqn_type_0", "smf_ppqn_type_1"]
     assert summary["feature_count"] == 31
