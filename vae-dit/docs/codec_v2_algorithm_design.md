@@ -132,6 +132,53 @@ This document deliberately describes two layers:
 | Raw SMF to `CanonicalBarSpan[]` | Implemented as `raw_smf_v1` | The sole production bar authority. |
 | Controls, form metadata, diagnostics, CLI acceptance | Implemented boundary | Controls remain evaluation-only; legacy form coordinates fail closed. |
 
+#### Why production parsing moved from music21 to Mido
+
+This is not a judgement that music21 is generally inferior.  music21 remains a
+valuable score-oriented toolkit and can still be used by isolated **offline**
+authoring utilities.  The change is about which facts may define a training
+tensor's time coordinate.
+
+An SMF physically contains a header, tracks, delta-timed events, and meta
+events.  It does **not** physically contain a universal `Part` object or a
+shared list of `Measure` objects.  Score applications export those facts in
+different ways: a time signature may occur only in a conductor track, be
+duplicated in every note track, or be absent from a silent track.  When
+music21 builds `Part` and `Measure` objects from such a file, it necessarily
+uses reconstruction heuristics.  Those heuristics are useful for score work,
+but a valid file can consequently yield unequal or non-contiguous per-part
+measure lists.  Treating those reconstructed lists as the codec's bar
+authority would either reject valid musical data or make bar alignment depend
+on an exporter-specific guess.
+
+Mido is used at the production boundary because it exposes the SMF facts we
+need without first imposing score structure: physical track order, raw delta
+ticks, event order, time-signature meta events, MIDI note messages, and control
+changes.  The codec then performs one explicit, testable reconstruction:
+
+```text
+Mido raw SMF events
+→ exact absolute ticks and a resolved global TS chain
+→ gap-free CanonicalBarSpan[]
+→ clip every physical-track note against those shared spans
+→ V2 tensor
+```
+
+Mido does **not** magically supply bars, parts, pickup labels, or musical
+form.  `raw_smf_v1` deliberately constructs canonical bars itself from raw
+ticks using exact rational arithmetic; unsupported or ambiguous inputs fail
+with a named reason instead of being silently repaired.  The resulting
+`physical_track_index` is the original SMF track index, and every retained
+note is aligned to the same global bar timeline regardless of which track
+carried its time-signature event.
+
+The trade-off is intentionally explicit.  Production V2 accepts only PPQN SMF
+Type 0/1 MIDI; it does not gain music21's broad score-format import support,
+and it does not support SMF Type 2.  ABC, KRN, and MusicXML need a separately
+designed canonical conversion before they can enter this path.  Likewise, an
+offline tool may still use music21 to propose form metadata, but that metadata
+cannot label V2 bars unless it is bound to the canonical timeline contract.
+
 Standard MIDI has no physical Part or Measure object.  A music21 Measure list
 is therefore diagnostic evidence only, never an authority for accepting,
 rejecting, or defining a V2 bar.  Raw SMF events are facts; the resolved global
