@@ -15,12 +15,13 @@ from evaluation_framework.evaluation_final_v2_diagnostics import FinalV2Diagnost
 from codec.action_labeler import ACTION_RETURN, ActionLabeler, ActionLabelerConfig
 from diagnostics.final_v2_evaluation_raw_capture import FinalV2EvaluationRawCapture
 from codec.slot_grid import SlotGridPolicy
+from pipeline.encoding_pipeline import EncodingPipeline
 
 TEST_GRID_POLICY = SlotGridPolicy(.25, 48, 1e-6)
 
 def _quantization(common, songs, output_dir):
     return FinalV2EvaluationRawCapture._quantization(common, songs, output_dir, TEST_GRID_POLICY)
-from data.core import BarRecord, NoteEvent, SongRecord, TrackRecord
+from data.core import BarRecord, BarTensorRecord, NoteEvent, SongRecord, TrackRecord
 
 
 def _digest(path):
@@ -139,6 +140,33 @@ def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:
     result = FinalV2DiagnosticEvaluator("parser_integrity").evaluate(EvaluationContext("run", public, run), bundle)
     assert result.report["status"] == "MONITOR"
     assert result.report["metrics"]["observation"]["partial_span_count"] == 0
+
+
+def test_all_final_v2_diagnostics_export_and_evaluate_from_actual_raw_capture(tmp_path) -> None:
+    """Capture-created observations, rather than hand-built JSON, reach every evaluator."""
+    run = EvaluationArtifactStore.create(tmp_path, "run")
+    config = {"bar_tensor": {"schema_version": "bar_tensor_schema.v2", "backend": "semantic_harmony_set_v2", "slot_grid": {"quantum_ql": .25, "capacity": 48, "epsilon_ql": 1e-6}}, "evaluation_splits": {"train_base_song_ids": ["song"], "validation_base_song_ids": []}}
+    samples = _samples()
+    for sample in samples:
+        sample["ppqn"] = 480
+        sample["raw_local_start_tick"] = round(sample["raw_local_start_ql"] * 480)
+        sample["raw_local_end_tick"] = round(sample["raw_local_end_ql"] * 480)
+    controls = {"tempo_readable": True, "tempo_present": True, "tempo_events": [{"absolute_tick": 0}], "key_readable": True, "key_present": True, "key_signature_events": [{"absolute_tick": 0, "key": "C"}], "cc64_readable": True, "cc64_present": False, "cc64_event_count": 0, "cc64_intervals": [], "cc64_diagnostics": {"unterminated_interval_count": 0, "orphan_release_count": 0}}
+    bars = [BarRecord("song", "song.mid", index, 4.0, time_signature="4/4", canonical_bar_index=index, canonical_start_tick=index * 1920, canonical_end_tick=(index + 1) * 1920, ppqn=480, form="A", action="INTRODUCE", tracks=[TrackRecord(0, "track", [NoteEvent(60, 0.0, 1.0, 80)])]) for index in range(2)]
+    song = SongRecord("song", "song.mid", metadata={"source_file_identity": "source", "raw_pairing_repairs": [], "initial_time_signature": {"policy": "error", "origin": "smf"}, "form_mapping_status": "mapped", "performance_controls": controls, "quantization_audit": _audit(samples)}, runtime_diagnostics={"quantization_fragment_samples": samples}, bars=bars)
+    tensor = np.zeros((18, 48, 6), dtype=np.float32)
+    diagnostics = {"base_pitch": None, "base_pitch_valid": False, "bar_context": [0.0] * 12, "slot_valid_mask": [True] * 16 + [False] * 32, "slot_durations_ql": [.25] * 16 + [0.0] * 32}
+    tensors = [BarTensorRecord("song", index, [18, 48, 6], tensor, diagnostics) for index in range(2)]
+    provenance = {"identity": "fixture", "identity_kind": "test", "content_sha256": None}
+    EncodingPipeline(config)._write_outputs(tmp_path, [song], tensors, provenance)
+    paths = FinalV2EvaluationRawCapture().capture(tmp_path, [song], provenance, [])
+    for module, path in paths.items():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["status"] == "AVAILABLE"
+        bundle = FinalV2DiagnosticExporter(module).export(ExportContext("run", tmp_path, run))
+        result = FinalV2DiagnosticEvaluator(module).evaluate(EvaluationContext("run", tmp_path, run), bundle)
+        assert result.report["status"] == "MONITOR"
+        assert "observation" in result.report["metrics"]
 
 
 @pytest.mark.parametrize("mutation", ["bad_hash", "capture_false", "incomplete_measure_map"])
