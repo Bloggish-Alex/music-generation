@@ -58,7 +58,7 @@ def _audit(samples: list[dict]) -> dict:
             "end_residual_ql": summary(end),
         }
     projected = sum(sample["quantization_repair_kind"] is not None for sample in samples)
-    return {"audit_unit": "source_note_fragment", "fragment_count": len(samples), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(samples) if samples else 0.0, "by_meter": by_meter}
+    return {"audit_unit": "source_note_fragment", "fragment_count": len(samples), "projected_fragment_count": projected, "projected_fragment_rate": projected / len(samples) if samples else 0.0, "raw_pairing_repair_counts": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "paired_source_note_count": len(samples), "dropped_source_note_count": 0, "dropped_source_note_ratio": 0.0, "by_meter": by_meter}
 
 
 def _song(samples: list[dict], bars: list[BarRecord] | None = None) -> SongRecord:
@@ -131,7 +131,7 @@ def test_controls_capture_reports_absent_cc64_as_readable_coverage() -> None:
 
 def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:
     public = tmp_path / "public"; public.mkdir(); run = EvaluationArtifactStore.create(tmp_path, "run")
-    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {"4/4": 1}, "opus_tune_count": 0, "over_capacity_count": 0}, "initial_time_signature_policy": "error", "initial_time_signature_origin_counts": {"smf": 1}, "initial_time_signature_injections": [], "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": "raw_pairing_repairs.v1.json", "sha256": "sha256:" + "2" * 64}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "repair_affected_file_count": 0, "partial_span_count": 0, "partial_reason_counts": {"time_signature_change": 0}, "partial_spans": [], "parser_failures": [], "unavailable_reasons": []}
+    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {"4/4": 1}, "opus_tune_count": 0, "over_capacity_count": 0}, "initial_time_signature_policy": "error", "initial_time_signature_origin_counts": {"smf": 1}, "initial_time_signature_injections": [], "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": "raw_pairing_repairs.v1.json", "sha256": "sha256:" + "2" * 64}, "repair_count": 0, "repair_counts_by_kind": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "raw_pairing_repair_counts": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "paired_source_note_count": 0, "dropped_source_note_count": 0, "dropped_source_note_ratio": 0.0, "repair_affected_file_count": 0, "partial_span_count": 0, "partial_reason_counts": {"time_signature_change": 0}, "partial_spans": [], "parser_failures": [], "unavailable_reasons": []}
     schema = json.loads((__import__("pathlib").Path(__file__).resolve().parents[2] / "contracts" / "evaluation" / "v2" / "parser_integrity__raw_observation.v2.schema.json").read_text())
     Draft202012Validator(schema).validate(raw)
     path = public / "parser_integrity__raw_observation.v2.json"; path.write_text(json.dumps(raw))
@@ -145,7 +145,7 @@ def test_final_v2_diagnostic_export_and_evaluate(tmp_path) -> None:
 def test_parser_integrity_schema_preserves_existing_gates(mutation) -> None:
     root = __import__("pathlib").Path(__file__).resolve().parents[2]
     schema = json.loads((root / "contracts" / "evaluation" / "v2" / "parser_integrity__raw_observation.v2.schema.json").read_text())
-    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {}, "opus_tune_count": 0, "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": "raw_pairing_repairs.v1.json", "sha256": "sha256:" + "2" * 64}, "repair_count": 0, "repair_counts_by_kind": {}, "repair_affected_file_count": 0, "partial_span_count": 0, "partial_reason_counts": {"time_signature_change": 0}, "partial_spans": [], "parser_failures": []}
+    raw = {"schema_version": "parser_integrity_raw_observation.v2", "status": "AVAILABLE", "run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "x", "content_sha256": None}, "availability": {"raw_capture": True, "measure_map": True}, "measure_map": {"song_count": 1, "measure_count": 1, "meter_distribution": {}, "opus_tune_count": 0, "over_capacity_count": 0}, "track_retention": {"hard_safety_limit": 48, "policy": "retain_all", "dropped_part_count": 0, "dropped_note_count": 0, "dropped_note_ratio": 0.0}, "normalization_policy_version": "raw_pairing_normalization.v1", "repair_artifact": {"path": "raw_pairing_repairs.v1.json", "sha256": "sha256:" + "2" * 64}, "repair_count": 0, "repair_counts_by_kind": {}, "raw_pairing_repair_counts": {"same_tick_zero_duration_pair": 0, "redundant_orphan_note_off": 0}, "paired_source_note_count": 0, "dropped_source_note_count": 0, "dropped_source_note_ratio": 0.0, "repair_affected_file_count": 0, "partial_span_count": 0, "partial_reason_counts": {"time_signature_change": 0}, "partial_spans": [], "parser_failures": []}
     if mutation == "bad_hash": raw["run"]["encoding_manifest_sha256"] = "bad"
     elif mutation == "capture_false": raw["availability"]["raw_capture"] = False
     else: del raw["measure_map"]["measure_count"]
@@ -225,6 +225,23 @@ def test_quantization_audit_merges_same_opus_source_and_meter(tmp_path) -> None:
         assert all(payload["residual_samples"]["arrays"][name]["dtype"] == "float64" for name in timing_arrays)
     schema_path = __import__("pathlib").Path(__file__).resolve().parents[2] / "contracts" / "evaluation" / "v2" / "quantization_audit__raw_observation.v2.schema.json"
     Draft202012Validator(json.loads(schema_path.read_text())).validate(payload)
+
+
+def test_quantization_audit_reports_pairing_loss_separately_from_orphan_offs(tmp_path) -> None:
+    samples = _samples()
+    song = _song(samples)
+    audit = song.metadata["quantization_audit"]
+    audit.update({
+        "raw_pairing_repair_counts": {"same_tick_zero_duration_pair": 3, "redundant_orphan_note_off": 7},
+        "paired_source_note_count": 25,
+        "dropped_source_note_count": 3,
+        "dropped_source_note_ratio": 3 / 28,
+    })
+    payload = _quantization({"run": {"encoding_manifest_sha256": "sha256:" + "0" * 64, "bar_tensor_index_sha256": "sha256:" + "1" * 64, "tensor_schema_version": "bar_tensor_schema.v2"}, "dataset": {"identity": "fixture", "content_sha256": None}}, [song], tmp_path)
+    assert payload["raw_pairing_repair_counts"] == audit["raw_pairing_repair_counts"]
+    assert payload["paired_source_note_count"] == 25
+    assert payload["dropped_source_note_count"] == 3
+    assert payload["dropped_source_note_ratio"] == pytest.approx(3 / 28)
 
 
 def test_quantization_archive_preserves_residual_recomputation_precision(tmp_path) -> None:

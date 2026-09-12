@@ -72,6 +72,34 @@ def test_parser_uses_bar_local_grid_and_preserves_raw_note_identity(tmp_path: Pa
     }]
 
 
+def test_parser_audit_separates_dropped_pairs_from_orphan_offs(tmp_path: Path) -> None:
+    """Only normalized same-tick pairs count as discarded source notes."""
+    import mido
+
+    path = tmp_path / "pairing-loss.mid"
+    midi = mido.MidiFile(type=1, ticks_per_beat=480)
+    meta = mido.MidiTrack()
+    meta.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
+    notes = mido.MidiTrack()
+    notes.append(mido.Message("note_on", channel=0, note=60, velocity=80, time=0))
+    notes.append(mido.Message("note_off", channel=0, note=60, velocity=0, time=0))
+    notes.append(mido.Message("note_off", channel=0, note=61, velocity=0, time=0))
+    notes.append(mido.Message("note_on", channel=0, note=62, velocity=80, time=0))
+    notes.append(mido.Message("note_off", channel=0, note=62, velocity=0, time=480))
+    midi.tracks.extend([meta, notes])
+    midi.save(str(path))
+
+    song = MusicDirectoryParser(MusicParserConfig()).parse_file(path, {}, dataset_root=tmp_path)[0]
+    audit = song.metadata["quantization_audit"]
+    assert audit["raw_pairing_repair_counts"] == {
+        "same_tick_zero_duration_pair": 1,
+        "redundant_orphan_note_off": 1,
+    }
+    assert audit["paired_source_note_count"] == 1
+    assert audit["dropped_source_note_count"] == 1
+    assert audit["dropped_source_note_ratio"] == 0.5
+
+
 def test_parser_discovers_only_canonical_smf_inputs(tmp_path: Path) -> None:
     """First-release canonical parsing must not silently route text scores."""
     _write_five_thirty_second_midi(tmp_path / "canonical.mid")

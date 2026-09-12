@@ -44,6 +44,22 @@
             "minimum": 0,
             "maximum": 1
         },
+        "raw_pairing_repair_counts": {
+            "$ref": "#/$defs/rawPairingRepairCounts"
+        },
+        "paired_source_note_count": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "dropped_source_note_count": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "dropped_source_note_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+        },
         "grid_policy": {
             "$ref": "#/$defs/gridPolicy"
         },
@@ -78,6 +94,10 @@
                     "fragment_count",
                     "projected_fragment_count",
                     "projected_fragment_rate",
+                    "raw_pairing_repair_counts",
+                    "paired_source_note_count",
+                    "dropped_source_note_count",
+                    "dropped_source_note_ratio",
                     "grid_policy",
                     "by_file_meter",
                     "residual_samples",
@@ -238,6 +258,18 @@
                     "type": "number",
                     "minimum": 0
                 }
+            },
+            "additionalProperties": false
+        },
+        "rawPairingRepairCounts": {
+            "type": "object",
+            "required": [
+                "same_tick_zero_duration_pair",
+                "redundant_orphan_note_off"
+            ],
+            "properties": {
+                "same_tick_zero_duration_pair": {"type": "integer", "minimum": 0},
+                "redundant_orphan_note_off": {"type": "integer", "minimum": 0}
             },
             "additionalProperties": false
         },

@@ -175,7 +175,8 @@ class MusicDirectoryParser:
                 "form_mapping_status": self._form_mapping_status(metadata, source_identity, timeline_hash),
                 "canonical_timeline_sha256": timeline_hash,
                 "performance_controls": performance_controls,
-                "quantization_audit": self._canonical_quantization_audit(fragments),
+                "paired_source_note_count": len(source_notes),
+                "quantization_audit": self._canonical_quantization_audit(fragments, repairs, len(source_notes)),
                 "raw_pairing_repairs": [self._pairing_repair_fact(source_identity, path, dataset_root, midi, repair) for repair in repairs],
             },
         )
@@ -280,7 +281,7 @@ class MusicDirectoryParser:
         return retained, {"physical_part_count": len(ranked), "policy": "truncate", "retained_physical_track_indexes": retained, "dropped_part_count": len(dropped), "dropped_note_count": dropped_notes, "dropped_note_ratio": dropped_notes / max(1, len(notes))}
 
     @staticmethod
-    def _canonical_quantization_audit(fragments: Sequence[Any]) -> Dict[str, Any]:
+    def _canonical_quantization_audit(fragments: Sequence[Any], repairs: Sequence[Any], paired_source_note_count: int) -> Dict[str, Any]:
         """Summarize fragment-local timing residuals by their canonical meter."""
         by_meter: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"onset": [], "end": []})
         for fragment in fragments:
@@ -293,7 +294,10 @@ class MusicDirectoryParser:
             return {"max": max(values, default=0.0), "p95": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else 0.0}
         fragment_count = sum(len(item["onset"]) for item in by_meter.values())
         projected = sum(fragment.quantization_repair_kind is not None for fragment in fragments)
-        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "projected_fragment_count": projected, "projected_fragment_rate": projected / fragment_count if fragment_count else 0.0, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "projected_fragment_count": sum(fragment.meter == meter and fragment.quantization_repair_kind is not None for fragment in fragments), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
+        repair_counts = Counter(repair.repair_kind for repair in repairs)
+        dropped = repair_counts["same_tick_zero_duration_pair"]
+        denominator = paired_source_note_count + dropped
+        return {"status": "MONITOR", "quantum_ql": 0.25, "source_boundaries_retained": True, "audit_unit": "source_note_fragment", "fragment_count": fragment_count, "projected_fragment_count": projected, "projected_fragment_rate": projected / fragment_count if fragment_count else 0.0, "raw_pairing_repair_counts": {"same_tick_zero_duration_pair": repair_counts["same_tick_zero_duration_pair"], "redundant_orphan_note_off": repair_counts["redundant_orphan_note_off"]}, "paired_source_note_count": paired_source_note_count, "dropped_source_note_count": dropped, "dropped_source_note_ratio": dropped / denominator if denominator else 0.0, "event_count": fragment_count, "nonzero_residual_count": sum(value > 1e-9 for item in by_meter.values() for values in item.values() for value in values), "by_meter": {meter: {"fragment_count": len(values["onset"]), "projected_fragment_count": sum(fragment.meter == meter and fragment.quantization_repair_kind is not None for fragment in fragments), "event_count": len(values["onset"]), "nonzero_residual_count": sum(value > 1e-9 for value in values["onset"] + values["end"]), "onset_residual_ql": summary(values["onset"]), "end_residual_ql": summary(values["end"])} for meter, values in by_meter.items()}}
 
     @staticmethod
     def _canonical_fragment_samples(
