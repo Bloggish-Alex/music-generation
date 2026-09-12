@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from data.music_parser import MusicDirectoryParser, MusicParserConfig
 from codec.semantic_harmony_set_codec import SemanticHarmonySetCodec
+
+
+def test_canonical_parser_import_boundary_excludes_legacy_music21_modules() -> None:
+    """The production raw-SMF parser cannot accidentally reattach legacy parsing."""
+    root = Path(__file__).resolve().parents[1]
+    for relative in ("src/data/music_parser.py", "src/data/canonical_timeline.py"):
+        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+        assert not any(name == "music21" or name.startswith("music21.") for name in imported)
+        assert "data.measure_map" not in imported
 
 
 def _write_five_thirty_second_midi(path: Path) -> None:
