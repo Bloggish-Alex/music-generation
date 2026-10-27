@@ -6,9 +6,11 @@ Mapping
 -------
 temperature : monthly anomaly -> A minor pentatonic, A3..A5
 rhythm      : month-to-month volatility -> note length / 16th-note flurries
+articulation: month-to-month change > 0.15 -> staccato (55% length, crisp attack)
 tempo       : decadal mean volatility -> 68..112 dotted-quarter bpm
 bass        : syncopated root/fifth/octave pattern, root cycles A-C-D-E-G
 CO2         : annual mean -> D Dorian counter-line, D3..D4, enters 1958
+contrast    : NH-SH -> A minor pentatonic A5..A6, one sustained note per year
 form        : 10-bar phrases, breath rests, cadence + 3-note decade motif
 
 Usage: python3 sonify.py [--start 1925] [--end 2024] [--out warming]

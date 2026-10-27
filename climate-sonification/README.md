@@ -20,9 +20,10 @@ mapped to ABC notation, MIDI, audio, and a browser player.
 | `tone.js` | vendored Tone.js 14.8.49, so the player works offline |
 | `sonify.py` | the pipeline: data → form → ABC / MIDI / JSON / PNG |
 | `gistemp.csv` | NASA GISTEMP v4 snapshot |
+| `gistemp_nh.csv` / `gistemp_sh.csv` | NASA GISTEMP hemispheric tables (NH−SH contrast voice) |
 | `co2_mm_mlo.csv` | NOAA Mauna Loa CO₂ snapshot |
 
-## The three additions
+## The additions
 
 ### 1. CO₂ counterpoint
 
@@ -54,9 +55,12 @@ The player has:
 - play / pause, space-bar shortcut
 - a year slider that seeks through 1925–2024
 - a moving playhead on both the temperature/CO₂ chart and the piano roll
-- live readout: year, temperature anomaly, CO₂ ppm, current tempo
-- four voice toggles (temperature, bass, CO₂, motif)
+- live readout: year, temperature anomaly, CO₂ ppm, NH−SH contrast, current tempo
+- five voice toggles (temperature, bass, CO₂, motif, hemispheres)
 - click the chart to seek
+- an idle attract mode: the playhead drifts through the century until you touch the page
+- a meter-driven glow on the play button, so the page breathes with the music
+- an ending card when the piece completes: the century's deltas in plain numbers
 - no network required: Tone.js and the score data are local files
 
 Audio is built with Tone.js `Part`s scheduled in **absolute seconds** from the
@@ -87,16 +91,41 @@ bar 10      cadence: long note (6 eighths) + 3-note glockenspiel motif
   0, 4, 6, 9 (a one-eighth hole before the fifth). The 2+4 ending pushes into
   the next bar instead of marking time.
 
+### 4. Hemispheric contrast
+
+GISTEMP's NH and SH tables give a second, orthogonal climate line: the
+asymmetry between the hemispheres. NH minus SH (−0.4…+0.8 °C) maps to A minor
+pentatonic A5–A6, one sustained note per year (July–December), resting on
+cadence bars.
+
+- deliberately **higher and sparser** than the temperature line — the same
+  duet logic that shapes the CO₂ voice
+- the series has a real arc: high in the 1920s–30s, dipping through the
+  1960s–80s Northern cooling era, then climbing to its highest notes in the
+  2010s–20s
+- warm-pad timbre in the MIDI; soft sine pad in the browser; violet in the
+  chart, piano roll, and voice legend
+
+### 5. Articulation from climate velocity
+
+Volatile months (month-to-month change > 0.15 °C) play **staccato**: the note
+is shortened to 55% of its slot and, in the browser, routed to a crisp,
+plucky FM attack. Rhythm (16th-note flurries) and decadal tempo are unchanged
+— articulation is a third, independent channel for the same volatility
+signal: fast notes *sound* fast, not just shorter.
+
 ## Mapping
 
 | data | musical parameter | rule |
 |---|---|---|
 | monthly temperature anomaly | **pitch** | −0.6…+1.5 °C → 10 degrees of A-minor pentatonic, A3…A5 |
 | month-to-month change | **rhythm** | > 0.22 °C: split the slot into two 16ths; < 0.06 °C: hold 2–3 eighths |
+| month-to-month change | **articulation** | > 0.15 °C: staccato — 55% length, crisp attack |
 | decadal mean volatility | **tempo** | 68–112 dotted-quarter BPM, one tempo per decade |
 | anomaly | **dynamics** | MIDI velocity 45–118; `!p!` … `!ff!` per decade |
 | decade index | **bass root** | A2 → C3 → D3 → E3 → G3, cycling every 10 years |
 | CO₂ annual mean | **counter-line pitch** | 315–425 ppm → D Dorian D3–D4 |
+| NH−SH contrast | **counter-line pitch** | −0.4…+0.8 °C → A minor pentatonic A5–A6 |
 | year | **bar** | 12/8, 12 eighth-note slots = 12 months |
 | decade | **phrase** | 10 bars, breath rests, cadence, 3-note motif |
 
@@ -112,6 +141,9 @@ Why these choices:
   months = 16th-note flurries. That is phrasing, not just mapping.
 - **Slow bass.** A syncopated root/fifth/octave pattern gives the ear a floor
   while the melody does the data work.
+- **Orthogonal counter-lines.** CO₂ sits low and slow, the hemispheric
+  contrast high and sparse; both are voiced to be heard beside the melody,
+  never merged into it.
 
 ## Run the pipeline
 
@@ -156,7 +188,5 @@ V:2 Bass (cello)            V:4 Decade motif (glockenspiel)
 
 ## Next
 
-- Add a second city / hemisphere as a counter-melody.
-- Map climate velocity (rate of change) to articulation instead of tempo.
 - Export a video with the playhead and curve for social.
-- Try a string quartet arrangement: the four voices already map to a quartet.
+- Try a string quartet arrangement: the five voices already map to a quartet plus a soloist.
