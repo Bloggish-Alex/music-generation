@@ -1,0 +1,75 @@
+X:1
+T:One Hundred Years of Warming, with CO2 (1925-2024)
+C:Data: NASA GISTEMP v4 + NOAA Mauna Loa CO2. Public domain.
+M:12/8
+L:1/8
+Q:3/8=82
+K:Am
+V:1 name="Temperature (flute)" clef=treble
+V:2 name="Bass (cello)" clef=bass
+V:3 name="CO2 (bassoon)" clef=alto
+V:4 name="Decade motif (glockenspiel)" clef=treble
+
+% temperature: A minor pentatonic A3-A5; pitch=anomaly, rhythm=volatility
+% CO2: D Dorian D3-D4, one long note every 2 years, enters 1958
+% form: 10-bar decades; breath rests at bars 4 and 8; cadence + motif at bar 10
+% ===== 1925s =====
+[V:1] [Q:3/8=82] !p! C/2 C/2 C2 D3 D D D2 E/2 E/2 E | G E E D/2 D/2 D D2 D D2 E2 | D2 C C D2 D D2 E E2 | E/2 E/2 D D D2 C z3 D D D | C/2 A,/2 A, C/2 D/2 C C2 C C2 D D2 | C/2 D/2 D2 D D3 D D2 G/2 G/2 E | D2 D D D2 E3 E E E | G D/2 D/2 D2 D C z3 D2 D | D2 C3 C2 D2 D2 C | D6 z6 |
+[V:2] A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,3 E,3 A,,2 E,4 | A,,12 |
+[V:3] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 c c d z3 |
+
+% ===== 1935s =====
+[V:1] [Q:3/8=78] !p! C/2 C/2 G/2 G/2 D/2 D/2 C/2 C/2 C D2 D2 E D D | D C D D2 D D D2 E E2 | E E D/2 D/2 D2 E2 E2 E2 D | E E2 E2 D z3 G E D | E E2 D E3 E3 E A | E/2 D/2 E E2 E E3 G E2 G | G G E G G2 G G E A/2 A/2 G G | G E/2 E/2 E3 E z3 E2 E | E G E E E2 E E E2 G2 | E6 z6 |
+[V:2] C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,3 z G,2 C,3 G,3 | C,12 |
+[V:3] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 c g d z3 |
+
+% ===== 1945s =====
+[V:1] [Q:3/8=75] !p! E E E2 E E2 G G2 E E | G E E2 E D D D E E2 C | E/2 E/2 D2 E2 E3 D2 E2 | E D D D E E z3 E D D | E/2 G/2 D E D D2 D D2 E D2 | D D2 D D E D2 D2 C D | C C D D E E E E E2 E G | E2 D E E E z3 E D E | E G E2 E E2 E3 E E | E6 z6 |
+[V:2] D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,3 A,3 D,2 A,4 | D,12 |
+[V:3] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 e e e z3 |
+
+% ===== 1955s =====
+[V:1] [Q:3/8=80] !p! E/2 G/2 D/2 D/2 C D D2 D2 D E D D | D D D2 C2 D D D D2 E | D2 E2 E G E G E E E G | A/2 A/2 G E E E2 z3 E E2 | E E2 G2 E3 E3 E | E2 C/2 C/2 D D E2 E E2 D G | E G E E3 E E2 E E2 | E G E2 E E z3 E2 E | E2 D/2 D/2 E E2 E2 G3 E | E6 z6 |
+[V:2] E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,3 z B,2 E,3 B,3 | E,12 |
+[V:3] z12 | z12 | z12 | D,12 | z12 | D,9 z3 | z12 | D,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 e d c z3 |
+
+% ===== 1965s =====
+[V:1] [Q:3/8=85] !p! D D D2 D D2 E D E E2 | D E E D D2 E D E D E E | E2 E/2 E/2 E E D E E2 E E E | D D G/2 G/2 E/2 D/2 D D z3 E/2 G/2 E D | D2 E G G2 E E E3 G | E G E E2 E2 D E E E2 | E D D2 E2 D E E3 D | D D2 E2 E z3 E E G | G G3 G2 E E E2 E E | E6 z6 |
+[V:2] G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,3 D3 G,2 D4 | G,12 |
+[V:3] z12 | D,12 | z12 | E,12 | z12 | E,9 z3 | z12 | E,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 d d d z3 |
+
+% ===== 1975s =====
+[V:1] [Q:3/8=94] !mp! E E2 E G E E2 E D D D | E E2 E D D D2 E D E E | G G3 G G G G2 E2 E | E2 G G2 E z3 E2 E | E2 G/2 G/2 G2 G E G G G2 A | G A G G2 G G3 E G G | A/2 c/2 A A G G G3 G E2 A | E/2 E/2 G E G G2 z3 E2 A | A A A2 G G G2 A2 G G | G6 z6 |
+[V:2] A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,3 z E,2 A,,3 E,3 | A,,12 |
+[V:3] z12 | E,12 | z12 | E,12 | z12 | F,9 z3 | z12 | F,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 e e e z3 |
+
+% ===== 1985s =====
+[V:1] [Q:3/8=94] !mp! G/2 G/2 E/2 D/2 G E3 E G E2 E G | G A G G G2 E2 E G E2 | G A G/2 E/2 G G2 A2 A G2 A | c A A A A2 z3 A E/2 E/2 G | E G A G G G2 G2 G2 A | A2 d/2 d/2 c/2 A/2 A A A G G A A2 | A2 A A G A A2 A2 G2 | A A A G G2 z3 E E2 | G A2 G G2 G2 E2 E G | G6 z6 |
+[V:2] C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,3 G,3 C,2 G,4 | C,12 |
+[V:3] z12 | F,12 | z12 | F,12 | z12 | G,9 z3 | z12 | G,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 g e g z3 |
+
+% ===== 1995s =====
+[V:1] [Q:3/8=103] !mp! A d/2 d/2 A/2 A/2 A2 A A2 G A A2 | G2 G G2 G2 A G/2 G/2 G2 A | G2 A G G2 G A A c c2 | c2 c/2 A/2 c2 d z3 A2 A | A c G/2 G/2 G2 A A2 A G3 | G c/2 c/2 A2 A A3 A2 G2 | A A2 A c A2 A A2 c c | d d2 c/2 A/2 c A z3 A c2 | c/2 d/2 c c3 A c c2 c A c | A6 z6 |
+[V:2] D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 D3 | D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 A,3 | D,3 z A,2 D,3 D3 | D,3 z A,2 D,3 D3 | D,12 |
+[V:3] z12 | G,12 | z12 | G,12 | z12 | G,9 z3 | z12 | A,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 a d' a z3 |
+
+% ===== 2005s =====
+[V:1] [Q:3/8=89] !mf! c/2 d/2 c c c c3 c2 c2 c | c c c A A2 A c c3 d | e c/2 c/2 c2 c c c3 c2 A | G A c/2 d/2 A A2 z3 c c2 | c A A2 c2 c c2 c d c | c d d d c c c3 c d A | A A2 c2 c c c2 c c c | A A2 c d2 z3 d d2 | c c c A c c c c c c d c | c6 z6 |
+[V:2] E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 B,4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,3 B,3 E,2 E4 | E,12 |
+[V:3] z12 | A,12 | z12 | B,12 | z12 | B,9 z3 | z12 | B,12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 c' c' c' z3 |
+
+% ===== 2015s =====
+[V:1] [Q:3/8=92] !f! d d2 c d2 c d d2 e2 | e2 g2 d d d2 d d2 d | e e e2 d2 d d2 d d2 | d d3 d d z3 e d d | d2 e e d d3 d2 e2 | e g2 e e d d2 d d e d | d2 d/2 d/2 c d2 d d d e2 d | d2 e d d2 z3 d c/2 c/2 d | d d g/2 g/2 e/2 d/2 d2 g g2 g a2 | e6 z6 |
+[V:2] G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,3 z D2 G,3 G3 | G,12 |
+[V:3] z12 | C12 | z12 | C12 | z12 | C9 z3 | z12 | D12 | z12 | z12 |
+[V:4] z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z12 | z6 d' d' d' z3 |
+

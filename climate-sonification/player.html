@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>One Hundred Years of Warming — a climate duet</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23ff6b4a'/%3E%3Cpath d='M10 20c4-8 8-8 12 0' stroke='%23080d18' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="player.css">
+</head>
+<body>
+<div class="app">
+  <header class="hero">
+    <div class="eyebrow">NASA GISTEMP × NOAA MAUNA LOA CO₂ · 1925—2024</div>
+    <h1>One Hundred Years<br><em>of Warming</em></h1>
+    <p class="dek">温度异常决定旋律的音高与节奏；CO₂ 在 1958 年进入，成为一条慢速对位声部。拖动年份，听一条气候曲线如何变成一首曲子。</p>
+  </header>
+
+  <section class="stage">
+    <div class="panel">
+      <canvas id="chart" aria-label="Temperature and CO2 curves"></canvas>
+      <div class="readout" aria-live="polite">
+        <div class="stat"><span>YEAR</span><b id="yearNow">1925</b></div>
+        <div class="stat"><span>TEMP</span><b id="tempNow">—</b></div>
+        <div class="stat"><span>CO₂</span><b id="co2Now">—</b></div>
+        <div class="stat"><span>TEMPO</span><b id="tempoNow">—</b></div>
+      </div>
+    </div>
+
+    <div class="panel roll-panel">
+      <div class="panel-label">PIANO ROLL · four voices</div>
+      <canvas id="roll" aria-label="Piano roll of the generated score"></canvas>
+    </div>
+  </section>
+
+  <section class="transport">
+    <button id="play" class="play" aria-label="Play">
+      <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+      <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+    </button>
+
+    <div class="timeline">
+      <input id="year" type="range" min="1925" max="2025" step="0.01" value="1925" aria-label="Year">
+      <div class="ticks"><span>1925</span><span>1950</span><span>1975</span><span>2000</span><span>2024</span></div>
+    </div>
+
+    <div id="time" class="time">0:00 / 4:38</div>
+  </section>
+
+  <section class="legend" aria-label="Voices">
+    <button class="chip on" data-voice="0"><i style="--c:#ff8a5b"></i>Temperature <small>flute</small></button>
+    <button class="chip on" data-voice="1"><i style="--c:#4f9cf9"></i>Bass <small>cello</small></button>
+    <button class="chip on" data-voice="2"><i style="--c:#2dd4bf"></i>CO₂ <small>bassoon</small></button>
+    <button class="chip on" data-voice="3"><i style="--c:#ffd166"></i>Motif <small>glockenspiel</small></button>
+  </section>
+
+  <footer class="notes">
+    <p><strong>How to read it:</strong> the red line is the annual temperature anomaly; the teal line is Mauna Loa CO₂. The piano roll shows every generated note: orange = temperature melody, blue = bass, teal = CO₂ counter-line, yellow = the three-note motif that closes each decade.</p>
+    <p><strong>Mapping:</strong> −0.6…+1.5 °C → A minor pentatonic A3–A5 · month-to-month volatility → note length and 16th-note flurries · decadal volatility → tempo · CO₂ 315–425 ppm → D Dorian D3–D4 · 10-bar phrases with breath rests and cadences.</p>
+    <p class="fine">Data: NASA GISTEMP v4 (public domain) and NOAA GML Mauna Loa CO₂ (public domain). Audio: Tone.js. This is sonification with musical constraints, not an analytical tool.</p>
+  </footer>
+</div>
+
+<script src="tone.js"></script>
+<script src="player_data.js"></script>
+<script src="player.js"></script>
+</body>
+</html>
