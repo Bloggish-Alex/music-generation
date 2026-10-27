@@ -67,6 +67,7 @@ h1 em{font-style:italic;color:var(--coral)}
 .stat b{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600}
 #tempNow{color:var(--coral)}
 #co2Now{color:var(--teal)}
+#hemiNow{color:#b388ff}
 
 .transport{
   display:flex;align-items:center;gap:18px;margin:20px 0 14px;
@@ -127,7 +128,7 @@ h1 em{font-style:italic;color:var(--coral)}
   #roll{height:180px}
   .readout{gap:8px;top:30px;right:8px;padding:7px 9px}
   .stat{min-width:44px}
-  .stat:nth-child(4){display:none}
+  .stat:nth-child(n+4){display:none}
   .stat b{font-size:13px}
   .transport{gap:12px;padding:10px}
   .play{width:48px;height:48px}

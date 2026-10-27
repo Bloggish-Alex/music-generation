@@ -39,11 +39,15 @@ CO2_ROOT = 50  # D3
 CO2_INTERVALS = [0, 2, 3, 5, 7, 9, 10, 12]
 CO2_MIN, CO2_MAX = 315.0, 425.0
 
+# --- hemispheric contrast voice: NH - SH -> A minor pentatonic, A5..A6 ---
+CONTRAST_ROOT = 81  # A5
+CONTRAST_MIN, CONTRAST_MAX = -0.4, 0.8
+
 BAR_TICKS = 2880  # 12/8 at 480 ticks/quarter
 EIGHTH = 240
 TPQ = 480
 
-VOICE_NAMES = {0: "melody", 1: "bass", 2: "co2", 3: "motif"}
+VOICE_NAMES = {0: "melody", 1: "bass", 2: "co2", 3: "motif", 4: "contrast"}
 
 
 @dataclass
@@ -97,6 +101,19 @@ def load_co2(path: Path):
     return {y: sum(v) / len(v) for y, v in months.items() if v}
 
 
+def load_contrast(nh_path: Path, sh_path: Path, start_year: int, end_year: int):
+    """Annual NH minus SH anomaly contrast; {} if the hemispheric tables are absent."""
+    if not nh_path.exists() or not sh_path.exists():
+        return {}
+    nh = dict(load_gistemp(nh_path))
+    sh = dict(load_gistemp(sh_path))
+    out = {}
+    for y in range(start_year, end_year + 1):
+        if y in nh and y in sh:
+            out[y] = sum(a - b for a, b in zip(nh[y], sh[y])) / 12
+    return out
+
+
 def degree_for(t: float) -> int:
     x = (t - T_MIN) / (T_MAX - T_MIN)
     return max(0, min(N_DEGREES, round(x * N_DEGREES)))
@@ -113,6 +130,15 @@ def co2_degree(v: float) -> int:
 
 def co2_midi(degree: int) -> int:
     return CO2_ROOT + CO2_INTERVALS[degree]
+
+
+def contrast_degree(v: float) -> int:
+    x = (v - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN)
+    return max(0, min(N_DEGREES, round(x * N_DEGREES)))
+
+
+def contrast_midi(degree: int) -> int:
+    return CONTRAST_ROOT + 12 * (degree // 5) + PENTA[degree % 5]
 
 
 def abc_pitch(midi: int) -> str:
@@ -147,7 +173,7 @@ def carve_rest(notes, a: int, b: int):
     return out
 
 
-def build_events(data, co2, start_year: int, end_year: int):
+def build_events(data, co2, contrast, start_year: int, end_year: int):
     rows = [(y, m) for y, m in data if start_year <= y <= end_year]
     if not rows:
         raise SystemExit("no temperature data in requested range")
@@ -156,6 +182,7 @@ def build_events(data, co2, start_year: int, end_year: int):
     bass: list[Note] = []
     co2_notes: list[Note] = []
     motifs: list[Note] = []
+    contrast_notes: list[Note] = []
     tempo_map: list[tuple[int, int]] = []
     dec_vols = []
 
@@ -247,6 +274,20 @@ def build_events(data, co2, start_year: int, end_year: int):
             pitch = co2_midi(co2_degree(co2[year]))
             co2_notes.append(Note(bar * BAR_TICKS, dur_slots * EIGHTH, pitch, 66, 2))
 
+        # ---------- hemispheric contrast, one high sustained note per year ----------
+        if bar % 10 != 9 and year in contrast:
+            cv = contrast[year]
+            vel = int(clamp(50 + (cv - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN) * 35, 48, 88))
+            contrast_notes.append(
+                Note(
+                    bar * BAR_TICKS + 6 * EIGHTH,
+                    6 * EIGHTH,
+                    contrast_midi(contrast_degree(cv)),
+                    vel,
+                    4,
+                )
+            )
+
         # ---------- tempo ----------
         if bar % 10 == 0:
             dec = rows[bar : bar + 10]
@@ -292,7 +333,7 @@ def build_events(data, co2, start_year: int, end_year: int):
                 Note(cb * BAR_TICKS + (6 + k) * EIGHTH, EIGHTH, pitch, 88, 3)
             )
 
-    return rows, mel, bass, co2_notes, motifs, tempo_map, dec_vols, co2_start_bar
+    return rows, mel, bass, co2_notes, motifs, contrast_notes, tempo_map, dec_vols, co2_start_bar
 
 
 def bar_times(tempo_map, n_bars: int):
@@ -309,7 +350,7 @@ def bar_times(tempo_map, n_bars: int):
     return times, t
 
 
-def write_abc(path: Path, rows, mel, bass, co2_notes, motifs, tempo_map, start_year):
+def write_abc(path: Path, rows, mel, bass, co2_notes, motifs, contrast_notes, tempo_map, start_year):
     def by_bar(notes):
         bars = {}
         for n in notes:
@@ -322,6 +363,7 @@ def write_abc(path: Path, rows, mel, bass, co2_notes, motifs, tempo_map, start_y
     bass_bars = by_bar(bass)
     co2_bars = by_bar(co2_notes)
     motif_bars = by_bar(motifs)
+    contrast_bars = by_bar(contrast_notes)
 
     def render_bar(notes, bar):
         out, slot = [], 0.0
@@ -350,9 +392,11 @@ def write_abc(path: Path, rows, mel, bass, co2_notes, motifs, tempo_map, start_y
         'V:2 name="Bass (cello)" clef=bass',
         'V:3 name="CO2 (bassoon)" clef=alto',
         'V:4 name="Decade motif (glockenspiel)" clef=treble',
+        'V:5 name="Hemispheres (pad)" clef=treble',
         "",
         "% temperature: A minor pentatonic A3-A5; pitch=anomaly, rhythm=volatility",
         "% CO2: D Dorian D3-D4, one long note every 2 years, enters 1958",
+        "% contrast: NH-SH -> A minor pentatonic A5-A6, one sustained note per year",
         "% form: 10-bar decades; breath rests at bars 4 and 8; cadence + motif at bar 10",
     ]
 
@@ -366,13 +410,14 @@ def write_abc(path: Path, rows, mel, bass, co2_notes, motifs, tempo_map, start_y
 
         lines.append(f"% ===== {y0}s =====")
         v1 = [f"[V:1] [Q:3/8={bpm}] {dyn_mark}"]
-        v2, v3, v4 = ["[V:2]"], ["[V:3]"], ["[V:4]"]
+        v2, v3, v4, v5 = ["[V:2]"], ["[V:3]"], ["[V:4]"], ["[V:5]"]
         for b in range(d, min(d + 10, len(rows))):
             v1.append(render_bar(mel_bars.get(b, []), b) + " |")
             v2.append(render_bar(bass_bars.get(b, []), b) + " |")
             v3.append(render_bar(co2_bars.get(b, []), b) + " |")
             v4.append(render_bar(motif_bars.get(b, []), b) + " |")
-        lines.extend([" ".join(v1), " ".join(v2), " ".join(v3), " ".join(v4), ""])
+            v5.append(render_bar(contrast_bars.get(b, []), b) + " |")
+        lines.extend([" ".join(v1), " ".join(v2), " ".join(v3), " ".join(v4), " ".join(v5), ""])
 
     path.write_text("\n".join(lines) + "\n")
 
@@ -404,6 +449,7 @@ def write_midi(path: Path, notes, tempo_map):
         (1, 42, "bass/cello"),
         (2, 70, "co2/bassoon"),
         (3, 9, "motif/glockenspiel"),
+        (4, 89, "contrast/warm pad"),
     ]
     for voice, program, name in programs:
         tr = mido.MidiTrack()
@@ -437,7 +483,7 @@ def write_midi(path: Path, notes, tempo_map):
     mid.save(path)
 
 
-def write_song_json(path: Path, rows, notes, tempo_map, co2, start_year, co2_start_bar):
+def write_song_json(path: Path, rows, notes, tempo_map, co2, contrast, start_year, co2_start_bar):
     times, total = bar_times(tempo_map, len(rows))
     bars = []
     for i, (year, _) in enumerate(rows):
@@ -483,7 +529,7 @@ def write_song_json(path: Path, rows, notes, tempo_map, co2, start_year, co2_sta
             "duration": round(total, 3),
             "co2Entry": rows[co2_start_bar][0] if co2_start_bar is not None else None,
             "counts": {
-                VOICE_NAMES[v]: sum(1 for n in notes if n.voice == v) for v in range(4)
+                VOICE_NAMES[v]: sum(1 for n in notes if n.voice == v) for v in range(5)
             },
         },
         "bars": bars,
@@ -493,6 +539,7 @@ def write_song_json(path: Path, rows, notes, tempo_map, co2, start_year, co2_sta
             "years": [y for y, _ in rows],
             "temp": [round(sum(m) / 12, 3) for _, m in rows],
             "co2": [round(co2[y], 2) if y in co2 else None for y, _ in rows],
+            "contrast": [round(contrast[y], 3) if y in contrast else None for y, _ in rows],
         },
         "notes": out_notes,
     }
@@ -502,7 +549,7 @@ def write_song_json(path: Path, rows, notes, tempo_map, co2, start_year, co2_sta
     return song
 
 
-def write_chart(path: Path, rows, notes, co2, start_year, co2_start_bar):
+def write_chart(path: Path, rows, notes, co2, contrast, start_year, co2_start_bar):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -512,6 +559,8 @@ def write_chart(path: Path, rows, notes, co2, start_year, co2_start_bar):
     annual = [sum(m) / 12 for _, m in rows]
     co2_years = [y for y, _ in rows if y in co2]
     co2_vals = [co2[y] for y in co2_years]
+    contrast_years = [y for y in years if y in contrast]
+    contrast_vals = [contrast[y] for y in contrast_years]
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(13, 8.4), gridspec_kw={"height_ratios": [1, 1.55]}, sharex=True
@@ -521,15 +570,23 @@ def write_chart(path: Path, rows, notes, co2, start_year, co2_start_bar):
     ax1.fill_between(years, annual, 0, color="#e74c3c", alpha=0.10)
     ax1.set_ylabel("°C vs 1951-80", color="#c0392b")
     ax1.tick_params(axis="y", labelcolor="#c0392b")
-    ax1.set_title("Temperature → music, with CO₂ counter-line entering in 1958")
+    ax1.set_title("Temperature, CO₂ and NH−SH contrast → music")
+
+    if contrast_vals:
+        ax1.plot(
+            contrast_years, contrast_vals, color="#9b59b6", lw=1.4, ls="--",
+            label="NH−SH contrast",
+        )
 
     ax1b = ax1.twinx()
     ax1b.plot(co2_years, co2_vals, color="#16a085", lw=2.0, label="CO₂")
     ax1b.set_ylabel("CO₂ (ppm)", color="#16a085")
     ax1b.tick_params(axis="y", labelcolor="#16a085")
+    lines, labels = ax1.get_legend_handles_labels()
+    ax1.legend(lines, labels, loc="upper left", fontsize=8, frameon=False)
 
-    colors = {0: "#e67e22", 1: "#3498db", 2: "#1abc9c", 3: "#f1c40f"}
-    alpha = {0: 0.85, 1: 0.55, 2: 0.9, 3: 0.9}
+    colors = {0: "#e67e22", 1: "#3498db", 2: "#1abc9c", 3: "#f1c40f", 4: "#9b59b6"}
+    alpha = {0: 0.85, 1: 0.55, 2: 0.9, 3: 0.9, 4: 0.85}
     for n in notes:
         x = start_year + n.tick / BAR_TICKS
         w = n.dur / BAR_TICKS
@@ -595,10 +652,13 @@ def main():
 
     data = load_gistemp(HERE / "gistemp.csv")
     co2 = load_co2(HERE / "co2_mm_mlo.csv")
-    rows, mel, bass, co2_notes, motifs, tempo_map, vols, co2_start_bar = build_events(
-        data, co2, args.start, args.end
+    contrast = load_contrast(
+        HERE / "gistemp_nh.csv", HERE / "gistemp_sh.csv", args.start, args.end
     )
-    all_notes = mel + bass + co2_notes + motifs
+    rows, mel, bass, co2_notes, motifs, contrast_notes, tempo_map, vols, co2_start_bar = build_events(
+        data, co2, contrast, args.start, args.end
+    )
+    all_notes = mel + bass + co2_notes + motifs + contrast_notes
 
     abc_path = HERE / f"{args.out}.abc"
     mid_path = HERE / f"{args.out}.mid"
@@ -606,17 +666,17 @@ def main():
     wav_path = HERE / f"{args.out}.wav"
     json_path = HERE / "player_data.js"
 
-    write_abc(abc_path, rows, mel, bass, co2_notes, motifs, tempo_map, args.start)
+    write_abc(abc_path, rows, mel, bass, co2_notes, motifs, contrast_notes, tempo_map, args.start)
     write_midi(mid_path, all_notes, tempo_map)
-    write_chart(png_path, rows, all_notes, co2, args.start, co2_start_bar)
+    write_chart(png_path, rows, all_notes, co2, contrast, args.start, co2_start_bar)
     song = write_song_json(
-        json_path, rows, all_notes, tempo_map, co2, args.start, co2_start_bar
+        json_path, rows, all_notes, tempo_map, co2, contrast, args.start, co2_start_bar
     )
 
     print(f"years      : {rows[0][0]}-{rows[-1][0]} ({len(rows)})")
     print(
         "notes      : "
-        + ", ".join(f"{VOICE_NAMES[v]}={sum(1 for n in all_notes if n.voice == v)}" for v in range(4))
+        + ", ".join(f"{VOICE_NAMES[v]}={sum(1 for n in all_notes if n.voice == v)}" for v in range(5))
     )
     print(f"co2 entry  : {song['meta']['co2Entry']}")
     print(f"duration   : {song['meta']['duration']:.1f}s")

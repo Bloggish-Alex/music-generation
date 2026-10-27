@@ -23,6 +23,7 @@
   const tempNow = $("#tempNow");
   const co2Now = $("#co2Now");
   const tempoNow = $("#tempoNow");
+  const hemiNow = $("#hemiNow");
 
   const state = {
     year: START,
@@ -101,6 +102,17 @@
     return bpm;
   }
 
+  function contrastAt(year) {
+    const vs = SONG.series.contrast;
+    if (!vs) return null;
+    const i = clamp(Math.floor(year - START), 0, vs.length - 1);
+    if (vs[i] == null) return null;
+    const j = Math.min(i + 1, vs.length - 1);
+    if (vs[j] == null) return vs[i];
+    const f = clamp(year - START - i, 0, 1);
+    return vs[i] * (1 - f) + vs[j] * f;
+  }
+
   // ---------- canvas helpers ----------
   const COLOR = {
     temp: "#ff8a5b",
@@ -108,6 +120,7 @@
     co2: "#2dd4bf",
     bass: "#4f9cf9",
     motif: "#ffd166",
+    hemi: "#b388ff",
     grid: "rgba(145,170,210,.12)",
     faint: "#5c6f8f",
     muted: "#8fa3c4",
@@ -160,8 +173,10 @@
     const x = (year) => L + ((year - START) / (END_BOUND - START)) * pw;
     const ty = (v) => T + ((1.5 - v) / 2.1) * ph;
     const cy = (v) => T + ((428 - v) / 116) * ph;
+    // NH-SH contrast lives in its own band along the bottom (-0.4..0.8 -> bottom..top of band)
+    const hy = (v) => T + (0.97 - 0.25 * ((v + 0.4) / 1.2)) * ph;
 
-    chartGeom = { w, h, L, R, T, B, pw, ph, x, ty, cy };
+    chartGeom = { w, h, L, R, T, B, pw, ph, x, ty, cy, hy };
 
     // background bands per decade
     for (let i = 0; i < SONG.sections.length; i++) {
@@ -281,6 +296,38 @@
       ctx.fillText("CO₂ enters", xx + 7, T + 12);
     }
 
+    // hemispheric contrast (NH - SH) in its own band along the bottom
+    const hs = SONG.series.contrast;
+    if (hs) {
+      const zeroY = hy(0);
+      ctx.strokeStyle = "rgba(179,136,255,.28)";
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(L, zeroY);
+      ctx.lineTo(w - R, zeroY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      let started = false;
+      ctx.beginPath();
+      SONG.series.years.forEach((yr, i) => {
+        const v = hs[i];
+        if (v == null) return;
+        const xx = x(yr + 0.5), yy = hy(v);
+        if (!started) { ctx.moveTo(xx, yy); started = true; }
+        else ctx.lineTo(xx, yy);
+      });
+      ctx.strokeStyle = "rgba(179,136,255,.85)";
+      ctx.lineWidth = 1.6;
+      ctx.shadowColor = "rgba(179,136,255,.35)";
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "rgba(179,136,255,.75)";
+      ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "left";
+      ctx.fillText("NH−SH", L + 4, T + 0.70 * ph - 6);
+    }
+
     // title note (hidden on narrow screens where the readout moves in)
     if (w > 560) {
       ctx.fillStyle = "rgba(238,244,255,.6)";
@@ -300,7 +347,7 @@
     const L = 58, R = 66, T = 16, B = 22;
     const pw = w - L - R, ph = h - T - B;
     const x = (year) => L + ((year - START) / (END_BOUND - START)) * pw;
-    const y = (midi) => T + ((94 - midi) / (94 - 30)) * ph;
+    const y = (midi) => T + ((105 - midi) / (105 - 30)) * ph;
 
     rollGeom = { w, h, L, R, T, B, pw, ph, x, y };
 
@@ -323,7 +370,7 @@
     ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    for (const [midi, name] of [[36, "C2"], [48, "C3"], [60, "C4"], [72, "C5"], [84, "C6"]]) {
+    for (const [midi, name] of [[36, "C2"], [48, "C3"], [60, "C4"], [72, "C5"], [84, "C6"], [96, "C7"]]) {
       const yy = y(midi);
       ctx.strokeStyle = "rgba(145,170,210,.09)";
       ctx.beginPath();
@@ -335,8 +382,8 @@
     }
 
     // notes
-    const colors = { 0: "#ff8a5b", 1: "#4f9cf9", 2: "#2dd4bf", 3: "#ffd166" };
-    const alphas = { 0: 0.9, 1: 0.55, 2: 0.95, 3: 0.95 };
+    const colors = { 0: "#ff8a5b", 1: "#4f9cf9", 2: "#2dd4bf", 3: "#ffd166", 4: "#b388ff" };
+    const alphas = { 0: 0.9, 1: 0.55, 2: 0.95, 3: 0.95, 4: 0.85 };
     for (const n of SONG.notes) {
       const x0 = x(n.ny), x1 = x(n.ny + Math.max(n.nw, 0.012));
       const yy = y(n.m);
@@ -350,6 +397,15 @@
     ctx.setLineDash([2, 4]);
     ctx.strokeStyle = "rgba(45,212,191,.22)";
     for (const midi of [50, 62]) {
+      const yy = y(midi);
+      ctx.beginPath();
+      ctx.moveTo(L, yy);
+      ctx.lineTo(w - R, yy);
+      ctx.stroke();
+    }
+    // hemispheric contrast register hints
+    ctx.strokeStyle = "rgba(179,136,255,.20)";
+    for (const midi of [81, 105]) {
       const yy = y(midi);
       ctx.beginPath();
       ctx.moveTo(L, yy);
@@ -419,6 +475,18 @@
       chart.shadowBlur = 0;
     }
 
+    const hv = contrastAt(year);
+    if (hv != null) {
+      const hyy = chartGeom.hy(hv);
+      chart.beginPath();
+      chart.arc(cx, hyy, 3, 0, Math.PI * 2);
+      chart.fillStyle = COLOR.hemi;
+      chart.shadowColor = COLOR.hemi;
+      chart.shadowBlur = 10;
+      chart.fill();
+      chart.shadowBlur = 0;
+    }
+
     // year bubble
     const label = String(Math.min(END, Math.floor(year)));
     chart.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -462,6 +530,8 @@
     const c = co2At(year);
     co2Now.textContent = c == null ? "—" : `${c.toFixed(0)} ppm`;
     tempoNow.textContent = `${tempoAt(year)} BPM`;
+    const h = contrastAt(year);
+    hemiNow.textContent = h == null ? "—" : `${h >= 0 ? "+" : ""}${h.toFixed(2)}°`;
 
     if (!state.scrubbing) {
       yearSlider.value = String(year);
@@ -472,7 +542,7 @@
   }
 
   // ---------- audio ----------
-  const audio = { synths: {}, parts: [], bases: { 0: -7, 1: -10, 2: -11, 3: -14 } };
+  const audio = { synths: {}, parts: [], bases: { 0: -7, 1: -10, 2: -11, 3: -14, 4: -16 } };
 
   function buildAudio() {
     const master = new Tone.Volume(-3).toDestination();
@@ -519,7 +589,13 @@
     }).connect(reverb);
     motif.volume.value = audio.bases[3];
 
-    audio.synths = { 0: melody, 1: bass, 2: co2, 3: motif };
+    const hemi = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: "sine" },
+      envelope: { attack: 0.45, decay: 0.5, sustain: 0.85, release: 2.4 },
+    }).connect(reverb);
+    hemi.volume.value = audio.bases[4];
+
+    audio.synths = { 0: melody, 1: bass, 2: co2, 3: motif, 4: hemi };
 
     // staccato melody notes (art === -1) get a crisp, plucky attack:
     // articulation maps climate velocity, distinct from rhythm and tempo

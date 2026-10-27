@@ -22,12 +22,13 @@
         <div class="stat"><span>YEAR</span><b id="yearNow">1925</b></div>
         <div class="stat"><span>TEMP</span><b id="tempNow">—</b></div>
         <div class="stat"><span>CO₂</span><b id="co2Now">—</b></div>
+        <div class="stat"><span>NH−SH</span><b id="hemiNow">—</b></div>
         <div class="stat"><span>TEMPO</span><b id="tempoNow">—</b></div>
       </div>
     </div>
 
     <div class="panel roll-panel">
-      <div class="panel-label">PIANO ROLL · four voices</div>
+      <div class="panel-label">PIANO ROLL · five voices</div>
       <canvas id="roll" aria-label="Piano roll of the generated score"></canvas>
     </div>
   </section>
@@ -51,11 +52,12 @@
     <button class="chip on" data-voice="1"><i style="--c:#4f9cf9"></i>Bass <small>cello</small></button>
     <button class="chip on" data-voice="2"><i style="--c:#2dd4bf"></i>CO₂ <small>bassoon</small></button>
     <button class="chip on" data-voice="3"><i style="--c:#ffd166"></i>Motif <small>glockenspiel</small></button>
+    <button class="chip on" data-voice="4"><i style="--c:#b388ff"></i>Hemispheres <small>NH−SH pad</small></button>
   </section>
 
   <footer class="notes">
-    <p><strong>How to read it:</strong> the red line is the annual temperature anomaly; the teal line is Mauna Loa CO₂. The piano roll shows every generated note: orange = temperature melody, blue = bass, teal = CO₂ counter-line, yellow = the three-note motif that closes each decade.</p>
-    <p><strong>Mapping:</strong> −0.6…+1.5 °C → A minor pentatonic A3–A5 · month-to-month volatility → note length and 16th-note flurries · decadal volatility → tempo · CO₂ 315–425 ppm → D Dorian D3–D4 · 10-bar phrases with breath rests and cadences.</p>
+    <p><strong>How to read it:</strong> the red line is the annual temperature anomaly; the teal line is Mauna Loa CO₂; the violet line in the lower band is the NH−SH hemispheric contrast. The piano roll shows every generated note: orange = temperature melody, blue = bass, teal = CO₂ counter-line, yellow = the three-note motif that closes each decade, violet = the hemispheric contrast line.</p>
+    <p><strong>Mapping:</strong> −0.6…+1.5 °C → A minor pentatonic A3–A5 · month-to-month volatility → note length and 16th-note flurries · month-to-month change > 0.15 °C → staccato attack · decadal volatility → tempo · CO₂ 315–425 ppm → D Dorian D3–D4 · NH−SH −0.4…+0.8 °C → A minor pentatonic A5–A6 · 10-bar phrases with breath rests and cadences.</p>
     <p class="fine">Data: NASA GISTEMP v4 (public domain) and NOAA GML Mauna Loa CO₂ (public domain). Audio: Tone.js. This is sonification with musical constraints, not an analytical tool.</p>
   </footer>
 </div>
