@@ -521,9 +521,22 @@
 
     audio.synths = { 0: melody, 1: bass, 2: co2, 3: motif };
 
+    // staccato melody notes (art === -1) get a crisp, plucky attack:
+    // articulation maps climate velocity, distinct from rhythm and tempo
+    const staccato = new Tone.PolySynth(Tone.FMSynth, {
+      harmonicity: 1.6,
+      modulationIndex: 2.2,
+      oscillator: { type: "triangle" },
+      envelope: { attack: 0.004, decay: 0.09, sustain: 0.08, release: 0.28 },
+      modulation: { type: "sine" },
+      modulationEnvelope: { attack: 0.005, decay: 0.08, sustain: 0.05, release: 0.25 },
+    }).connect(reverb);
+    staccato.volume.value = audio.bases[0] + 1.5;
+    audio.staccato = staccato;
+
     for (const [vc, synth] of Object.entries(audio.synths)) {
       const events = SONG.notes
-        .filter((n) => n.vc === Number(vc))
+        .filter((n) => n.vc === Number(vc) && !(Number(vc) === 0 && n.art === -1))
         .map((n) => ({ time: n.t, midi: n.m, dur: n.d, vel: n.v }));
       const part = new Tone.Part((time, e) => {
         synth.triggerAttackRelease(
@@ -536,9 +549,23 @@
       audio.parts.push(part);
     }
 
+    const staccatoEvents = SONG.notes
+      .filter((n) => n.vc === 0 && n.art === -1)
+      .map((n) => ({ time: n.t, midi: n.m, dur: n.d, vel: n.v }));
+    const staccatoPart = new Tone.Part((time, e) => {
+      audio.staccato.triggerAttackRelease(
+        Tone.Frequency(e.midi, "midi").toFrequency(),
+        Math.max(0.05, e.dur * 1.1),
+        time,
+        e.vel / 127
+      );
+    }, staccatoEvents).start(0);
+    audio.parts.push(staccatoPart);
+
     // apply mutes chosen before audio existed
     for (const vc of state.muted) {
       if (audio.synths[vc]) audio.synths[vc].volume.value = -60;
+      if (vc === 0 && audio.staccato) audio.staccato.volume.value = -60;
     }
     state.audioReady = true;
   }
@@ -605,6 +632,9 @@
       chip.classList.toggle("off", state.muted.has(vc));
       if (audio.synths[vc]) {
         audio.synths[vc].volume.value = state.muted.has(vc) ? -60 : audio.bases[vc];
+      }
+      if (vc === 0 && audio.staccato) {
+        audio.staccato.volume.value = state.muted.has(vc) ? -60 : audio.bases[0] + 1.5;
       }
     });
   }

@@ -53,6 +53,7 @@ class Note:
     midi: int
     vel: int
     voice: int
+    art: int = 0  # articulation: -1 staccato, 0 normal (climate velocity -> attack)
 
 
 def clamp(v, lo, hi):
@@ -140,9 +141,9 @@ def carve_rest(notes, a: int, b: int):
             out.append(n)
             continue
         if s < a:
-            out.append(Note(s, a - s, n.midi, n.vel, n.voice))
+            out.append(Note(s, a - s, n.midi, n.vel, n.voice, n.art))
         if e > b:
-            out.append(Note(b, e - b, n.midi, n.vel, n.voice))
+            out.append(Note(b, e - b, n.midi, n.vel, n.voice, n.art))
     return out
 
 
@@ -176,11 +177,11 @@ def build_events(data, co2, start_year: int, end_year: int):
             if delta > 0.22 and i < 11:
                 d1 = degree_for(t)
                 d2 = degree_for(t + (0.08 if t >= prev else -0.08))
-                dur = EIGHTH // 2
+                dur = int(EIGHTH // 2 * 0.55)  # staccato 16ths
                 tick = bar * BAR_TICKS + slot * EIGHTH
                 vel = int(clamp(60 + (t - T_MIN) / (T_MAX - T_MIN) * 55, 45, 118))
-                mel.append(Note(tick, dur, midi_for(d1), vel, 0))
-                mel.append(Note(tick + dur, dur, midi_for(d2), max(40, vel - 8), 0))
+                mel.append(Note(tick, dur, midi_for(d1), vel, 0, -1))
+                mel.append(Note(tick + EIGHTH // 2, dur, midi_for(d2), max(40, vel - 8), 0, -1))
                 slot += 1
                 i += 1
                 continue
@@ -198,7 +199,10 @@ def build_events(data, co2, start_year: int, end_year: int):
             dur = hold * EIGHTH
             tick = bar * BAR_TICKS + slot * EIGHTH
             vel = int(clamp(60 + (t - T_MIN) / (T_MAX - T_MIN) * 55, 45, 118))
-            mel.append(Note(tick, dur, midi_for(degree_for(t)), vel, 0))
+            art = -1 if delta > 0.15 else 0  # volatile months: crisp, marked attack
+            if art == -1:
+                dur = int(dur * 0.55)
+            mel.append(Note(tick, dur, midi_for(degree_for(t)), vel, 0, art))
             slot += hold
             i += hold
 
@@ -445,15 +449,16 @@ def write_song_json(path: Path, rows, notes, tempo_map, co2, start_year, co2_sta
         bar = n.tick // BAR_TICKS
         bar_dur = bars[bar]["d"]
         t = bars[bar]["t"] + (n.tick - bar * BAR_TICKS) / BAR_TICKS * bar_dur
-        out_notes.append(
-            {
-                "t": round(t, 4),
-                "d": round(n.dur / BAR_TICKS * bar_dur, 4),
-                "m": n.midi,
-                "v": n.vel,
-                "vc": n.voice,
-            }
-        )
+        o = {
+            "t": round(t, 4),
+            "d": round(n.dur / BAR_TICKS * bar_dur, 4),
+            "m": n.midi,
+            "v": n.vel,
+            "vc": n.voice,
+        }
+        if n.art:
+            o["art"] = n.art
+        out_notes.append(o)
     out_notes.sort(key=lambda n: (n["t"], n["vc"], n["m"]))
 
     sections = []
