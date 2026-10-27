@@ -32,6 +32,8 @@
     audioReady: false,
     muted: new Set(),
     lastFrame: 0,
+    attract: true, // idle demo: the playhead drifts until the first interaction
+    meterSmooth: 0,
   };
 
   // ---------- time <-> year ----------
@@ -521,6 +523,28 @@
     }
   }
 
+  // ---------- ending card: the century's punchline ----------
+  const endingEl = $("#ending");
+  let endingTimer = 0;
+
+  function showEnding() {
+    const t = SONG.series.temp;
+    const t0 = t[0], t1 = t[t.length - 1];
+    const cs = SONG.series.co2.filter((v) => v != null);
+    const c0 = cs[0], c1 = cs[cs.length - 1];
+    $("#endingYears").textContent = `${SONG.series.years[0]} → ${SONG.series.years[SONG.series.years.length - 1]}`;
+    $("#endingTemp").textContent = `${t0 >= 0 ? "+" : ""}${t0.toFixed(2)}° → ${t1 >= 0 ? "+" : ""}${t1.toFixed(2)}°`;
+    $("#endingCo2").textContent = `${c0.toFixed(0)} → ${c1.toFixed(0)} ppm`;
+    endingEl.hidden = false;
+    clearTimeout(endingTimer);
+    endingTimer = setTimeout(() => { endingEl.hidden = true; }, 9000);
+  }
+
+  function hideEnding() {
+    endingEl.hidden = true;
+    clearTimeout(endingTimer);
+  }
+
   // ---------- readout ----------
   function updateReadout() {
     const year = state.year;
@@ -647,6 +671,7 @@
   }
 
   async function togglePlay() {
+    hideEnding();
     if (!state.audioReady) {
       await Tone.start();
       buildAudio();
@@ -655,6 +680,7 @@
     if (Tone.Transport.state === "started") {
       Tone.Transport.pause();
       playBtn.classList.remove("playing");
+      playBtn.style.setProperty("--pulse", "1");
     } else {
       if (state.time >= DURATION - 0.05) {
         seek(START);
@@ -665,6 +691,7 @@
   }
 
   function seek(year) {
+    hideEnding();
     state.year = clamp(year, START, END_BOUND);
     state.time = yearToTime(state.year);
     if (state.audioReady) {
@@ -691,6 +718,14 @@
       togglePlay().catch(console.error);
     }
   });
+
+  // any interaction hands the page back to the visitor
+  function stopAttract() {
+    state.attract = false;
+  }
+  for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+    window.addEventListener(ev, stopAttract, { passive: true });
+  }
 
   chartEl.addEventListener("click", (e) => {
     if (!chartGeom) return;
@@ -719,19 +754,40 @@
   function loop() {
     if (Tone.Transport.state === "started") {
       const t = Tone.Transport.seconds;
+      // meter level -> play button glow, so the page breathes with the music
+      if (audio.meter) {
+        const level = clamp(Math.pow(10, audio.meter.getValue() / 20), 0, 1);
+        state.meterSmooth = state.meterSmooth * 0.85 + level * 0.15;
+        playBtn.style.setProperty("--pulse", (0.35 + state.meterSmooth * 0.65).toFixed(3));
+      }
       if (t >= DURATION - 0.02) {
         Tone.Transport.pause();
         state.time = DURATION;
         state.year = END_BOUND;
         playBtn.classList.remove("playing");
+        playBtn.style.setProperty("--pulse", "1");
         updateReadout();
         drawFrame();
+        showEnding();
       } else {
         state.time = t;
         state.year = timeToYear(t);
         updateReadout();
         drawFrame();
       }
+    } else if (state.attract && !state.scrubbing) {
+      // idle demo: the playhead drifts forward so the page shows itself
+      const now = performance.now() / 1000;
+      const dt = state.lastFrame ? Math.min(now - state.lastFrame, 0.1) : 0.016;
+      state.lastFrame = now;
+      let y = state.year + dt * 2;
+      if (y > END_BOUND) y = START + ((y - START) % (END_BOUND - START));
+      state.year = y;
+      state.time = yearToTime(y);
+      updateReadout();
+      drawFrame();
+    } else {
+      state.lastFrame = performance.now() / 1000;
     }
     requestAnimationFrame(loop);
   }
@@ -750,7 +806,7 @@
   });
 
   // expose a tiny debug handle (useful for testing / tinkering)
-  window.__climate = { state, audio, SONG, seek, togglePlay };
+  window.__climate = { state, audio, SONG, seek, togglePlay, showEnding };
 
   // wait for fonts/layout, then draw
   requestAnimationFrame(() => {
