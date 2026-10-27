@@ -36,15 +36,17 @@ body{
 }
 h1{
   font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
-  font-size:clamp(44px,7vw,86px);line-height:.92;letter-spacing:-.035em;
-  font-weight:400;margin:0 0 18px;
+  font-size:clamp(28px,4.6vw,54px);line-height:1;letter-spacing:-.035em;
+  font-weight:400;margin:0 0 18px;white-space:nowrap;
 }
+@media (max-width:560px){h1{font-size:6.5vw}}
 h1 em{font-style:italic;color:var(--coral)}
 .dek{max-width:620px;margin:0;color:var(--muted);font-size:15px;line-height:1.75}
 
 .stage{display:grid;gap:16px}
 .panel{
-  position:relative;background:linear-gradient(180deg,rgba(18,29,50,.92),rgba(10,17,31,.92));
+  position:relative;display:flex;flex-direction:column;
+  background:linear-gradient(180deg,rgba(18,29,50,.92),rgba(10,17,31,.92));
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);
   overflow:hidden;
 }
@@ -58,9 +60,9 @@ h1 em{font-style:italic;color:var(--coral)}
 }
 
 .readout{
-  position:absolute;top:12px;right:16px;display:flex;gap:18px;
-  padding:10px 14px;border:1px solid var(--line);border-radius:12px;
-  background:rgba(8,13,24,.72);backdrop-filter:blur(12px);
+  order:-1;display:flex;justify-content:flex-end;align-items:center;gap:18px;
+  padding:10px 16px;border-bottom:1px solid var(--line);
+  background:rgba(14,22,39,.66);backdrop-filter:blur(12px);
 }
 .stat{display:flex;flex-direction:column;gap:2px;min-width:58px}
 .stat span{font-size:9px;letter-spacing:.16em;color:var(--faint)}
@@ -144,7 +146,7 @@ h1 em{font-style:italic;color:var(--coral)}
   .app{width:calc(100% - 28px);padding-top:30px}
   #chart{height:300px}
   #roll{height:180px}
-  .readout{gap:8px;top:30px;right:8px;padding:7px 9px}
+  .readout{gap:8px;padding:7px 9px}
   .stat{min-width:44px}
   .stat:nth-child(n+4){display:none}
   .stat b{font-size:13px}
