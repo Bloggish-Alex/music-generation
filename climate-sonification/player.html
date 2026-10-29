@@ -74,5 +74,18 @@
 <script src="tone.js"></script>
 <script src="player_data.js"></script>
 <script src="player.js"></script>
+<script>
+// Report this page's height to the parent page so an embedding iframe can size itself.
+// Invisible — does not change the player content.
+(function () {
+  if (window.parent === window) return;
+  const send = () => parent.postMessage({ type: 'embed-height', height: document.documentElement.scrollHeight }, '*');
+  addEventListener('message', (e) => { if (e.data && e.data.type === 'embed-ping') send(); });
+  addEventListener('load', send);
+  addEventListener('resize', send);
+  new ResizeObserver(send).observe(document.documentElement);
+  send();
+})();
+</script>
 </body>
 </html>
